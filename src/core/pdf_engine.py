@@ -444,7 +444,8 @@ class PyMuPDF4LLMChunker:
 
     def __init__(self) -> None:
         self._available: bool | None = None
-        self._logger = logging.getLogger("PyMuPDF4LLMChunker")
+        import logging as _logging
+        self._logger = _logging.getLogger("PyMuPDF4LLMChunker")
 
     @property
     def is_available(self) -> bool:
