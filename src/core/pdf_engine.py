@@ -71,6 +71,7 @@ class TextPreprocessor:
         处理顺序：
         1. \\[...\\] 和 $$...$$（行间公式）
         2. \\(...\\) 和 $...$（行内公式）
+        3. 若全文无任何 LaTeX 标记但包含大量数学符号 → 整段包裹 $$
         """
         self._formula_store.clear()
         counter = 0
@@ -96,7 +97,30 @@ class TextPreprocessor:
         protected = self._INLINE_BRACKET_RE.sub(_replace_inline, protected)
         protected = self._INLINE_FORMULA_RE.sub(_replace_inline, protected)
 
+        # 如果没有任何公式被保护，且文本看起来像裸数学表达式 → 整段包裹
+        if counter == 0 and self._looks_like_raw_math(text):
+            placeholder = f"【FORMULA_0】"
+            self._formula_store[placeholder] = f"$${text}$$"
+            protected = placeholder
+
         return protected
+
+    @staticmethod
+    def _looks_like_raw_math(text: str) -> bool:
+        """判断文本是否像裸数学表达式（无 LaTeX 标记但有大量数学符号）。"""
+        t = text.strip()
+        if len(t) < 5:
+            return False
+        # 英文单词很少
+        words = t.split()
+        english = sum(1 for w in words if w.isalpha() and len(w) > 2)
+        if english > 5:
+            return False
+        # 数学符号或数字占比高
+        math_chars = sum(1 for c in t if c.isdigit()
+                         or c in "+-=*/<>.,;:()[]{}|^_"
+                         or ord(c) > 127)
+        return len(t) > 0 and math_chars / len(t) > 0.3
 
     def restore_formulas(self, translated_text: str) -> str:
         """将占位符反向替换回原始 LaTeX 公式。
@@ -149,6 +173,12 @@ class DocumentChunker:
 
     # 数学 Unicode 字符范围（用于公式检测）
     _MATH_UNICODE_RANGES: list[tuple[int, int]] = [
+        (0x00B2, 0x00B3),  # ² ³
+        (0x00B9, 0x00B9),  # ¹
+        (0x0370, 0x03FF),  # 希腊字母
+        (0x2070, 0x209F),  # 上标下标 (⁰ⁱ⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ)
+        (0x2100, 0x214F),  # 字母式符号
+        (0x2190, 0x21FF),  # 箭头
         (0x2200, 0x22FF),  # 数学运算符
         (0x27C0, 0x27EF),  # 杂项数学符号-A
         (0x2980, 0x29FF),  # 杂项数学符号-B
@@ -315,13 +345,13 @@ class DocumentChunker:
         """基于 span 级别检测数学公式。"""
         full_text = "".join(s.get("text", "") for s in spans)
         fonts = [s.get("font", "") for s in spans]
-        # 排除：太短、email、大量英文单词（说明是正文）
         if len(full_text) < 8:
             return False
         if "@" in full_text and len(full_text) < 60:
             return False
-        # 英文单词>20个 → 不是公式
-        english_words = sum(1 for w in full_text.split() if w.isalpha() and len(w) > 2)
+        # 英文单词统计
+        tokens = full_text.split()
+        english_words = sum(1 for w in tokens if w.isalpha() and len(w) > 2)
         if english_words > 20:
             return False
         # 数学字体
@@ -329,15 +359,23 @@ class DocumentChunker:
             for kw in ("CM", "Math", "Symbol", "Cambria", "STIX", "XITS", "TeX"):
                 if kw.lower() in f.lower() and len(full_text) > 10:
                     return True
-        # LaTeX 命令（使用预编译正则，至少匹配2个才认为是公式，减少误判）
+        # LaTeX 命令（至少匹配2个）
         latex_count = len(self._LATEX_COMMAND_PATTERN.findall(full_text))
         if latex_count >= 2:
             return True
-        # 数学 Unicode 占比很高（排除 ∗ ◦ • 等常见标点）
+        # 数学 Unicode 占比高
         math_count = sum(1 for c in full_text
                          if any(lo <= ord(c) <= hi for lo, hi in self._MATH_UNICODE_RANGES))
         total = len(full_text)
         if total > 0 and math_count / total > 0.15 and total < 300:
+            return True
+        # 孤立单字符标记多 + 英文词极少 → 数学表达式
+        single_char_tokens = sum(1 for w in tokens if len(w) == 1)
+        if single_char_tokens >= 3 and english_words <= 2 and total < 200:
+            return True
+        # 数字/符号占比极高且英文词少 → 数学表达式
+        digit_symbol_count = sum(1 for c in full_text if c.isdigit() or c in "+-*/=<>.,;:()[]{}|")
+        if total > 0 and digit_symbol_count / total > 0.4 and english_words <= 3:
             return True
         return False
 
