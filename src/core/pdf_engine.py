@@ -665,14 +665,20 @@ class DocumentEngine(BaseService):
 
     def close_document(self) -> None:
         """关闭当前文档，释放所有相关资源。"""
-        self.logger.info("关闭文档...")
+        self.logger.info("close_document: START (has_thread=%s, has_doc=%s, has_qtpdf=%s)",
+                         self._thread is not None, self._doc is not None,
+                         self._qtpdf_doc is not None)
 
-        # 1. 停止解析线程（协作式取消，不调用 terminate）
+        # 1. 停止解析线程
         if self._thread is not None:
+            self.logger.info("close_document: 停止解析线程 (running=%s)...",
+                             self._thread.isRunning())
             if self._thread.isRunning():
                 self._thread.requestInterruption()
                 self._thread.quit()
+                self.logger.info("close_document: wait 5s...")
                 self._thread.wait(5000)
+                self.logger.info("close_document: wait done")
             try:
                 self._thread.progress.disconnect()
                 self._thread.finished_parsing.disconnect()
@@ -682,26 +688,32 @@ class DocumentEngine(BaseService):
                 pass
             self._thread.deleteLater()
             self._thread = None
+            self.logger.info("close_document: 线程已清理")
 
-        # 2. 关闭 PDF 文档 (PyMuPDF)
+        # 2. 关闭 PyMuPDF
         if self._doc:
+            self.logger.info("close_document: 关闭 fitz.Document...")
             self._doc.close()
             self._doc = None
 
-        # 3. 释放 QtPdf 文档
+        # 3. 释放 QtPdf
         if self._qtpdf_doc is not None:
+            self.logger.info("close_document: 释放 QPdfDocument...")
             self._qtpdf_doc.deleteLater()
             self._qtpdf_doc = None
             self._qtpdf_ready = False
 
-        # 4. 取消所有待处理的异步渲染
+        # 4. 取消异步渲染
+        self.logger.info("close_document: 取消异步渲染 (pending=%d)...",
+                         len(self._pending_renders))
         self._pending_renders.clear()
         self._render_pool.clear()
         self._render_pool.waitForDone(2000)
+        self.logger.info("close_document: 渲染池已清空")
 
-        # 5. 清空渲染缓存
+        # 5. 清空缓存
         self._pixmap_cache.clear()
-        self.logger.info("文档已关闭，资源已释放")
+        self.logger.info("close_document: END")
 
     def get_page_pixmap(
         self, page_num: int, dpi: int = 150

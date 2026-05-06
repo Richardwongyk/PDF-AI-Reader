@@ -289,32 +289,34 @@ class MainWindow(QMainWindow):
             self._open_pdf_file(filepath)
 
     def _open_pdf_file(self, filepath: str) -> None:
-        """执行打开 PDF 文件的完整流程。
-
-        若已有文档打开，先执行完整关闭流程（停止线程、释放资源），
-        再打开新文档。避免 QPdfDocument 双实例冲突和线程残留。
-        """
-        # 先完整关闭旧文档
+        """执行打开 PDF 文件的完整流程。"""
+        self.logger.info("_open_pdf_file: START file=%s current_doc_hash=%s",
+                         filepath, self._current_doc_hash)
         if self._current_doc_hash:
+            self.logger.info("_open_pdf_file: 关闭旧文档...")
             self._on_close_document()
+            self.logger.info("_open_pdf_file: processEvents...")
             QApplication.processEvents()
+            self.logger.info("_open_pdf_file: processEvents 完成")
         self._status_page_label.setText("正在解析 PDF...")
         self._status_progress.setVisible(True)
+        self.logger.info("_open_pdf_file: 调用 open_document...")
         self._doc_engine.open_document(filepath)
+        self.logger.info("_open_pdf_file: END")
 
     def _on_close_document(self) -> None:
         """关闭当前文档。"""
+        self.logger.info("_on_close_document: START")
+        self.logger.info("_on_close_document: close_document...")
         self._doc_engine.close_document()
+        self.logger.info("_on_close_document: pdf_viewer.clear...")
         self._pdf_viewer.clear()
+        self.logger.info("_on_close_document: clear done, reset state...")
         self._current_doc_hash = ""
         self._current_blocks.clear()
         self._status_page_label.setText("就绪")
         self.setWindowTitle("PDF AI Reader")
-        # 清理翻译模式下可能残留的 busy 状态
-        for split in list(self._pdf_viewer._splits.values()):
-            split.close()
-            split.deleteLater()
-        self._pdf_viewer._splits.clear()
+        self.logger.info("_on_close_document: END")
 
     # =========================================================================
     # DocumentEngine 回调
