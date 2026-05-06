@@ -667,14 +667,19 @@ class DocumentEngine(BaseService):
         """关闭当前文档，释放所有相关资源。"""
         self.logger.info("关闭文档...")
 
-        # 1. 停止解析线程
+        # 1. 停止解析线程（协作式取消，不调用 terminate）
         if self._thread is not None:
             if self._thread.isRunning():
                 self._thread.requestInterruption()
                 self._thread.quit()
-                if not self._thread.wait(3000):
-                    self.logger.warning("解析线程未能在 3s 内退出，强制终止")
-                    self._thread.terminate()
+                self._thread.wait(5000)
+            try:
+                self._thread.progress.disconnect()
+                self._thread.finished_parsing.disconnect()
+                self._thread.parse_error.disconnect()
+                self._thread.formula_blocks_updated.disconnect()
+            except Exception:
+                pass
             self._thread.deleteLater()
             self._thread = None
 
