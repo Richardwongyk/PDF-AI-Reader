@@ -651,8 +651,9 @@ class SplitWidget(QFrame):
         self._cached_result = ""
         self._current_answer = ""
         self._chat_history.clear()
-        self._update_webview(is_finished=True)
-        self.close()
+        # 仅在 WebView 存活时更新，冻结状态跳过（PdfViewer 即将销毁此 widget）
+        if self._page_ready and self._result_view is not None:
+            self._update_webview(is_finished=True)
         self.close_requested.emit(self._block.id)
 
     def _on_regenerate(self) -> None:
