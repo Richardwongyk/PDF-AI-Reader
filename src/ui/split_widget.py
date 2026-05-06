@@ -380,8 +380,11 @@ class SplitWidget(QFrame):
         input_layout.addLayout(send_layout)
         body_layout.addWidget(self._input_widget)
 
-        # QWebEngineView — 从热备池获取，避免冷启动延迟
-        self._result_view = WebViewPool.acquire()
+        # QWebEngineView
+        self._result_view = QWebEngineView()
+        self._result_view.setObjectName("result_area")
+        self._result_view.setMinimumHeight(60)
+        self._result_view.page().setBackgroundColor(Qt.GlobalColor.transparent)
         self._page_ready = False
         self._pending_js: str | None = None
         self._pending_theme: str | None = None
@@ -519,55 +522,20 @@ class SplitWidget(QFrame):
     # ── WebView 截图冻结 ──
 
     def _freeze_webview(self) -> None:
-        """截图 WebView 内容，回收 WebView 到热备池，显示截图占位。"""
+        """截图 WebView 后隐藏，截图占位显示。WebView 保持存活避免 Chromium 崩溃。"""
         if self._result_view is None or not self._page_ready:
             return
-        # 保存当前内容以便展开时恢复
-        self._cached_result = self._current_answer
-        # 截图当前 WebView 内容
         pixmap = self._result_view.grab()
         if not pixmap.isNull():
             self._frozen_label.setPixmap(pixmap)
-        # 断开信号，从布局移除，回收
-        try:
-            self._result_view.loadFinished.disconnect(self._on_page_loaded)
-        except Exception:
-            pass
-        self._body_layout.removeWidget(self._result_view)
-        WebViewPool.release(self._result_view)
-        self._result_view = None
-        self._page_ready = False
+        self._result_view.setVisible(False)
         self._frozen_label.setVisible(True)
 
     def _thaw_webview(self) -> None:
-        """从热备池获取 WebView，设置 QWebChannel 并恢复显示。"""
-        if self._result_view is not None:
-            return
-        view = WebViewPool.acquire()
-        self._result_view = view
-        # 插入布局（在 frozen_label 之前）
-        idx = self._body_layout.indexOf(self._frozen_label)
-        if idx >= 0:
-            self._body_layout.insertWidget(idx, view, 1)
-
-        # 重新注册 QWebChannel（池中 WebView 之前可能连接过其他 bridge）
-        self._web_channel = QWebChannel(self)
-        self._web_channel.registerObject("bridge", self._height_bridge)
-        view.page().setWebChannel(self._web_channel)
-
-        view.loadFinished.connect(self._on_page_loaded)
-        # 页面加载完成后恢复缓存内容
-        if self._cached_result:
-            safe_text = json.dumps(self._cached_result)
-            self._pending_js = f"updateContent({safe_text}, true);"
-            self._current_answer = self._cached_result
-
-        template_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "markdown_template.html")
-        )
-        view.setUrl(QUrl.fromLocalFile(template_path))
-        view.setVisible(True)
+        """隐藏截图，恢复 WebView 显示。"""
         self._frozen_label.setVisible(False)
+        if self._result_view is not None:
+            self._result_view.setVisible(True)
 
     # ── 拖拽 ──
 
