@@ -1,47 +1,333 @@
 {
   "domain": "physics",
-  "description": "物理学专业术语包（量子力学、相对论、统计物理）",
   "terms": [
-    {"en": "quantum mechanics", "zh": "量子力学", "force": true},
-    {"en": "wave function", "zh": "波函数", "force": true},
-    {"en": "Schrödinger equation", "zh": "薛定谔方程", "force": true},
-    {"en": "Hamiltonian", "zh": "哈密顿量", "force": true},
-    {"en": "Lagrangian", "zh": "拉格朗日量", "force": true},
-    {"en": "eigenstate", "zh": "本征态", "force": true},
-    {"en": "superposition", "zh": "叠加", "force": false},
-    {"en": "entanglement", "zh": "纠缠", "force": true},
-    {"en": "spin", "zh": "自旋", "force": true},
-    {"en": "angular momentum", "zh": "角动量", "force": true},
-    {"en": "uncertainty principle", "zh": "不确定性原理", "force": true},
-    {"en": "relativity", "zh": "相对论", "force": true},
-    {"en": "general relativity", "zh": "广义相对论", "force": true},
-    {"en": "special relativity", "zh": "狭义相对论", "force": true},
-    {"en": "spacetime", "zh": "时空", "force": true},
-    {"en": "black hole", "zh": "黑洞", "force": false},
-    {"en": "event horizon", "zh": "视界", "force": true},
-    {"en": "singularity", "zh": "奇点", "force": true},
-    {"en": "gravitational wave", "zh": "引力波", "force": true},
-    {"en": "dark matter", "zh": "暗物质", "force": true},
-    {"en": "dark energy", "zh": "暗能量", "force": true},
-    {"en": "thermodynamics", "zh": "热力学", "force": true},
-    {"en": "entropy", "zh": "熵", "force": true},
-    {"en": "partition function", "zh": "配分函数", "force": true},
-    {"en": "statistical mechanics", "zh": "统计力学", "force": true},
-    {"en": "Boltzmann distribution", "zh": "玻尔兹曼分布", "force": true},
-    {"en": "electromagnetic field", "zh": "电磁场", "force": true},
-    {"en": "Maxwell equations", "zh": "麦克斯韦方程组", "force": true},
-    {"en": "gauge theory", "zh": "规范场论", "force": true},
-    {"en": "symmetry breaking", "zh": "对称性破缺", "force": true},
-    {"en": "phase transition", "zh": "相变", "force": true},
-    {"en": "condensed matter", "zh": "凝聚态物质", "force": true},
-    {"en": "superconductivity", "zh": "超导", "force": true},
-    {"en": "quantum field theory", "zh": "量子场论", "force": true},
-    {"en": "Feynman diagram", "zh": "费曼图", "force": true},
-    {"en": "renormalization", "zh": "重整化", "force": true},
-    {"en": "Standard Model", "zh": "标准模型", "force": true},
-    {"en": "Higgs boson", "zh": "希格斯玻色子", "force": true},
-    {"en": "nuclear physics", "zh": "核物理", "force": true},
-    {"en": "particle physics", "zh": "粒子物理", "force": true},
-    {"en": "cosmology", "zh": "宇宙学", "force": true}
+    {
+      "en": "quantum mechanics",
+      "zh": "量子力学",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "wave function",
+      "zh": "波函数",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Schrödinger equation",
+      "zh": "薛定谔方程",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Hamiltonian",
+      "zh": "哈密顿量",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Lagrangian",
+      "zh": "拉格朗日量",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "eigenstate",
+      "zh": "本征态",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "superposition",
+      "zh": "叠加",
+      "domain": "physics",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "entanglement",
+      "zh": "纠缠",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "spin",
+      "zh": "自旋",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "angular momentum",
+      "zh": "角动量",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "uncertainty principle",
+      "zh": "不确定性原理",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "relativity",
+      "zh": "相对论",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "general relativity",
+      "zh": "广义相对论",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "special relativity",
+      "zh": "狭义相对论",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "spacetime",
+      "zh": "时空",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "black hole",
+      "zh": "黑洞",
+      "domain": "physics",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "event horizon",
+      "zh": "视界",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "singularity",
+      "zh": "奇点",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "gravitational wave",
+      "zh": "引力波",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "dark matter",
+      "zh": "暗物质",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "dark energy",
+      "zh": "暗能量",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "thermodynamics",
+      "zh": "热力学",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "entropy",
+      "zh": "熵",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "partition function",
+      "zh": "配分函数",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "statistical mechanics",
+      "zh": "统计力学",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Boltzmann distribution",
+      "zh": "玻尔兹曼分布",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "electromagnetic field",
+      "zh": "电磁场",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Maxwell equations",
+      "zh": "麦克斯韦方程组",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "gauge theory",
+      "zh": "规范场论",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "symmetry breaking",
+      "zh": "对称性破缺",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "phase transition",
+      "zh": "相变",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "condensed matter",
+      "zh": "凝聚态物质",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "superconductivity",
+      "zh": "超导",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "quantum field theory",
+      "zh": "量子场论",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Feynman diagram",
+      "zh": "费曼图",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "renormalization",
+      "zh": "重整化",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Standard Model",
+      "zh": "标准模型",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Higgs boson",
+      "zh": "希格斯玻色子",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "nuclear physics",
+      "zh": "核物理",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "particle physics",
+      "zh": "粒子物理",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "cosmology",
+      "zh": "宇宙学",
+      "domain": "physics",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    }
   ]
 }

@@ -1,74 +1,549 @@
 {
   "domain": "math",
-  "description": "数学专业术语包（代数、拓扑、分析、几何）",
   "terms": [
-    {"en": "manifold", "zh": "流形", "force": true},
-    {"en": "homeomorphism", "zh": "同胚", "force": true},
-    {"en": "homotopy", "zh": "同伦", "force": true},
-    {"en": "diffeomorphism", "zh": "微分同胚", "force": true},
-    {"en": "eigenvalue", "zh": "特征值", "force": true},
-    {"en": "eigenvector", "zh": "特征向量", "force": true},
-    {"en": "determinant", "zh": "行列式", "force": true},
-    {"en": "isomorphism", "zh": "同构", "force": true},
-    {"en": "homomorphism", "zh": "同态", "force": true},
-    {"en": "kernel", "zh": "核", "force": true, "notes": "数学语境为'核'；计算机语境为'内核'"},
-    {"en": "cokernel", "zh": "余核", "force": true},
-    {"en": "norm", "zh": "范数", "force": true},
-    {"en": "convergence", "zh": "收敛", "force": false},
-    {"en": "divergence", "zh": "发散", "force": false},
-    {"en": "compactness", "zh": "紧致性", "force": true},
-    {"en": "topology", "zh": "拓扑", "force": true},
-    {"en": "topological space", "zh": "拓扑空间", "force": true},
-    {"en": "metric space", "zh": "度量空间", "force": true},
-    {"en": "Hilbert space", "zh": "希尔伯特空间", "force": true},
-    {"en": "Banach space", "zh": "巴拿赫空间", "force": true},
-    {"en": "algebra", "zh": "代数", "force": false},
-    {"en": "Lie group", "zh": "李群", "force": true},
-    {"en": "Lie algebra", "zh": "李代数", "force": true},
-    {"en": "tensor", "zh": "张量", "force": true},
-    {"en": "covariant derivative", "zh": "协变导数", "force": true},
-    {"en": "curvature", "zh": "曲率", "force": true},
-    {"en": "Riemannian metric", "zh": "黎曼度量", "force": true},
-    {"en": "geodesic", "zh": "测地线", "force": true},
-    {"en": "fundamental group", "zh": "基本群", "force": true},
-    {"en": "homology", "zh": "同调", "force": true},
-    {"en": "cohomology", "zh": "上同调", "force": true},
-    {"en": "sheaf", "zh": "层", "force": true},
-    {"en": "scheme", "zh": "概形", "force": true},
-    {"en": "fibration", "zh": "纤维化", "force": true},
-    {"en": "bundle", "zh": "丛", "force": true},
-    {"en": "tangent space", "zh": "切空间", "force": true},
-    {"en": "cotangent space", "zh": "余切空间", "force": true},
-    {"en": "lemma", "zh": "引理", "force": true},
-    {"en": "theorem", "zh": "定理", "force": true},
-    {"en": "corollary", "zh": "推论", "force": true},
-    {"en": "proof", "zh": "证明", "force": true},
-    {"en": "definition", "zh": "定义", "force": true},
-    {"en": "proposition", "zh": "命题", "force": true},
-    {"en": "conjecture", "zh": "猜想", "force": true},
-    {"en": "axiom", "zh": "公理", "force": true},
-    {"en": "necessary condition", "zh": "必要条件", "force": false},
-    {"en": "sufficient condition", "zh": "充分条件", "force": false},
-    {"en": "if and only if", "zh": "当且仅当", "force": true},
-    {"en": "without loss of generality", "zh": "不失一般性", "force": false},
-    {"en": "orthogonal", "zh": "正交", "force": true},
-    {"en": "symmetric", "zh": "对称", "force": false},
-    {"en": "antisymmetric", "zh": "反对称", "force": false},
-    {"en": "diagonalizable", "zh": "可对角化", "force": true},
-    {"en": "characteristic polynomial", "zh": "特征多项式", "force": true},
-    {"en": "minimal polynomial", "zh": "极小多项式", "force": true},
-    {"en": "Jordan canonical form", "zh": "若尔当标准形", "force": true},
-    {"en": "singular value decomposition", "zh": "奇异值分解", "force": true},
-    {"en": "spectral theorem", "zh": "谱定理", "force": true},
-    {"en": "affine", "zh": "仿射", "force": true},
-    {"en": "projective", "zh": "射影", "force": true},
-    {"en": "gradient", "zh": "梯度", "force": true},
-    {"en": "divergence", "zh": "散度", "force": false},
-    {"en": "curl", "zh": "旋度", "force": true},
-    {"en": "Laplacian", "zh": "拉普拉斯算子", "force": true},
-    {"en": "partial differential equation", "zh": "偏微分方程", "force": false},
-    {"en": "ordinary differential equation", "zh": "常微分方程", "force": false},
-    {"en": "boundary condition", "zh": "边界条件", "force": false},
-    {"en": "initial value problem", "zh": "初值问题", "force": false}
+    {
+      "en": "manifold",
+      "zh": "流形",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "homeomorphism",
+      "zh": "同胚",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "homotopy",
+      "zh": "同伦",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "diffeomorphism",
+      "zh": "微分同胚",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "eigenvalue",
+      "zh": "特征值",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "eigenvector",
+      "zh": "特征向量",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "determinant",
+      "zh": "行列式",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "isomorphism",
+      "zh": "同构",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "homomorphism",
+      "zh": "同态",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "kernel",
+      "zh": "核",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": "数学语境为'核'；计算机语境为'内核'"
+    },
+    {
+      "en": "cokernel",
+      "zh": "余核",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "norm",
+      "zh": "范数",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "convergence",
+      "zh": "收敛",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "divergence",
+      "zh": "发散",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "compactness",
+      "zh": "紧致性",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "topology",
+      "zh": "拓扑",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "topological space",
+      "zh": "拓扑空间",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "metric space",
+      "zh": "度量空间",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Hilbert space",
+      "zh": "希尔伯特空间",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Banach space",
+      "zh": "巴拿赫空间",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "algebra",
+      "zh": "代数",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Lie group",
+      "zh": "李群",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Lie algebra",
+      "zh": "李代数",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "tensor",
+      "zh": "张量",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "covariant derivative",
+      "zh": "协变导数",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "curvature",
+      "zh": "曲率",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Riemannian metric",
+      "zh": "黎曼度量",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "geodesic",
+      "zh": "测地线",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "fundamental group",
+      "zh": "基本群",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "homology",
+      "zh": "同调",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "cohomology",
+      "zh": "上同调",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "sheaf",
+      "zh": "层",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "scheme",
+      "zh": "概形",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "fibration",
+      "zh": "纤维化",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "bundle",
+      "zh": "丛",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "tangent space",
+      "zh": "切空间",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "cotangent space",
+      "zh": "余切空间",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "lemma",
+      "zh": "引理",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "theorem",
+      "zh": "定理",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "corollary",
+      "zh": "推论",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "proof",
+      "zh": "证明",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "definition",
+      "zh": "定义",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "proposition",
+      "zh": "命题",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "conjecture",
+      "zh": "猜想",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "axiom",
+      "zh": "公理",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "necessary condition",
+      "zh": "必要条件",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "sufficient condition",
+      "zh": "充分条件",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "if and only if",
+      "zh": "当且仅当",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "without loss of generality",
+      "zh": "不失一般性",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "orthogonal",
+      "zh": "正交",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "symmetric",
+      "zh": "对称",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "antisymmetric",
+      "zh": "反对称",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "diagonalizable",
+      "zh": "可对角化",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "characteristic polynomial",
+      "zh": "特征多项式",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "minimal polynomial",
+      "zh": "极小多项式",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Jordan canonical form",
+      "zh": "若尔当标准形",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "singular value decomposition",
+      "zh": "奇异值分解",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "spectral theorem",
+      "zh": "谱定理",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "affine",
+      "zh": "仿射",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "projective",
+      "zh": "射影",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "gradient",
+      "zh": "梯度",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "divergence",
+      "zh": "散度",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "curl",
+      "zh": "旋度",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "Laplacian",
+      "zh": "拉普拉斯算子",
+      "domain": "math",
+      "force": true,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "partial differential equation",
+      "zh": "偏微分方程",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "ordinary differential equation",
+      "zh": "常微分方程",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "boundary condition",
+      "zh": "边界条件",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    },
+    {
+      "en": "initial value problem",
+      "zh": "初值问题",
+      "domain": "math",
+      "force": false,
+      "aliases": [],
+      "notes": ""
+    }
   ]
 }

@@ -189,14 +189,15 @@ class SplitWidget(QFrame):
         self._page_width: int = page_width
         self._user_resized: bool = False
 
+        from src.ui.theme import get_split_style
+        self._current_theme = "dark"
+
         self.setObjectName("split_container")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setStyleSheet(get_split_style(self._current_theme))
         self._init_ui()
         self.setVisible(False)
-        from src.ui.theme import get_split_style
-        self._current_theme = "dark"
-        self.setStyleSheet(get_split_style(self._current_theme))
 
     # ── 属性 ──
 

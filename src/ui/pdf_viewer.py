@@ -389,13 +389,18 @@ class PdfViewer(QScrollArea):
                 self._trans_indicators[block_id] = indicator
 
     def _get_overlay(self, block_id: str) -> BlockOverlay | None:
-        """获取 overlay（可能在 _LazyPageWidget 或普通 segment widget 中）。"""
+        """获取 overlay（可能在 _LazyPageWidget 或普通 segment widget 中）。
+
+        检测 C++ 对象是否仍存活，若已销毁则自动清理引用。
+        """
         ov = self._overlays.get(block_id)
         if ov:
-            return ov
+            if _isValid(ov):
+                return ov
+            self._overlays.pop(block_id, None)
         for container in self._page_containers.values():
             ov = container.overlay(block_id)
-            if ov:
+            if ov and _isValid(ov):
                 return ov
         return None
 
