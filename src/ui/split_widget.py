@@ -513,6 +513,8 @@ class SplitWidget(QFrame):
         """截图 WebView 内容，回收 WebView 到热备池，显示截图占位。"""
         if self._result_view is None or not self._page_ready:
             return
+        # 保存当前内容以便展开时恢复
+        self._cached_result = self._current_answer
         # 截图当前 WebView 内容
         pixmap = self._result_view.grab()
         if not pixmap.isNull():
@@ -545,6 +547,12 @@ class SplitWidget(QFrame):
         view.page().setWebChannel(self._web_channel)
 
         view.loadFinished.connect(self._on_page_loaded)
+        # 页面加载完成后恢复缓存内容
+        if self._cached_result:
+            safe_text = json.dumps(self._cached_result)
+            self._pending_js = f"updateContent({safe_text}, true);"
+            self._current_answer = self._cached_result
+
         template_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "markdown_template.html")
         )
