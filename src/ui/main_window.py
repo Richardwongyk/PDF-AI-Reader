@@ -710,10 +710,10 @@ class MainWindow(QMainWindow):
             ocr = MathOCR()
             if not ocr.is_available:
                 return
+            # 收集所有 FORMULA 块：chunker 检测的 + MFD 视觉检测的
             formula_blocks = [
                 b for b in result.blocks
                 if b.block_type == BlockType.FORMULA
-                and b.metadata.get("formula_detector") == "pix2text-mfd"
             ]
             if not formula_blocks:
                 return

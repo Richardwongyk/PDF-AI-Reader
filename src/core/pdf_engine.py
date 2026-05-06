@@ -71,6 +71,7 @@ class TextPreprocessor:
         处理顺序：
         1. \\[...\\] 和 $$...$$（行间公式）
         2. \\(...\\) 和 $...$（行内公式）
+        3. 无标记的裸数学表达式 → 整段包裹 $$
         """
         self._formula_store.clear()
         counter = 0
