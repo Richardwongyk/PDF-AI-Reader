@@ -368,8 +368,9 @@ class MainWindow(QMainWindow):
         elapsed = time.time() - start
         self.logger.info("文档加载完成，耗时 %.2fs", elapsed)
 
-        # PyMuPDF4LLM 异步增强（不阻塞解析线程，避免 fitz 并发 segfault）
+        # PyMuPDF4LLM + MFR 异步增强（不阻塞解析线程）
         QTimer.singleShot(2000, lambda: self._run_pymupdf4llm_enhance(result))
+        QTimer.singleShot(3000, lambda: self._run_mfr_async(result))
 
     def _on_parse_progress(self, current: int, total: int) -> None:
         """解析进度更新。"""
@@ -669,7 +670,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_pymupdf4llm_enhance(self, result) -> None:
-        """异步运行 PyMuPDF4LLM 增强解析（不阻塞 UI/解析线程）。"""
+        """异步运行 PyMuPDF4LLM 增强解析。"""
         try:
             from src.core.pdf_engine import PyMuPDF4LLMChunker
             import fitz
@@ -684,6 +685,52 @@ class MainWindow(QMainWindow):
             self.logger.info("PyMuPDF4LLM 异步增强完成: %d 个块", count)
         except Exception as e:
             self.logger.warning("PyMuPDF4LLM 异步增强失败: %s", e)
+
+    def _run_mfr_async(self, result) -> None:
+        """异步运行 MFR 公式识别（不阻塞 UI/解析线程）。"""
+        try:
+            from src.core.math_ocr import MathOCR
+            from src.core.models import BlockType
+            import fitz
+            ocr = MathOCR()
+            if not ocr.is_available:
+                return
+            formula_blocks = [
+                b for b in result.blocks
+                if b.block_type == BlockType.FORMULA
+                and b.metadata.get("formula_detector") == "pix2text-mfd"
+            ]
+            if not formula_blocks:
+                return
+            self.logger.info("MFR 异步: %d 个公式待识别", len(formula_blocks))
+            ocr._ensure_model()
+            doc = fitz.open(result.filepath)
+            crops: list[bytes] = []
+            crop_map: list[int] = []
+            for i, fb in enumerate(formula_blocks):
+                try:
+                    page = doc[fb.page_num]
+                    rect = fitz.Rect(*fb.bbox)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0), clip=rect)
+                    crops.append(pix.tobytes("png"))
+                    crop_map.append(i)
+                except Exception:
+                    pass
+            if crops:
+                latex_results = ocr.recognize_batch(crops)
+                mfr_count = 0
+                for j, latex in enumerate(latex_results):
+                    if latex:
+                        fb = formula_blocks[crop_map[j]]
+                        fb.content = f"$$\n{latex}\n$$"
+                        fb.metadata["latex"] = latex
+                        fb.metadata["mfr_recognized"] = True
+                        mfr_count += 1
+                self.logger.info("MFR 异步完成: %d/%d 公式 → LaTeX",
+                                 mfr_count, len(formula_blocks))
+            doc.close()
+        except Exception as e:
+            self.logger.warning("MFR 异步失败: %s", e)
 
     def _check_first_launch(self) -> None:
         """首次启动检查：验证本地模型状态。"""

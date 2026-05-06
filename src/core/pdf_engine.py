@@ -894,12 +894,11 @@ class _ParseThread(QThread):
         self._chunker = chunker
 
     def run(self) -> None:
-        """三阶段渐进式 PDF 解析。
+        """两阶段渐进式 PDF 解析。
 
         阶段一（极速呈现）：启发式分块 → finished_parsing
         阶段二（公式检测）：Pix2Text MFD → formula_blocks_updated
-        阶段三（公式识别）：MathOCR MFR 公式→LaTeX → formula_blocks_updated
-        PyMuPDF4LLM 增强改为 main_window 异步运行，不阻塞解析线程。
+        PyMuPDF4LLM 增强、MFR 公式识别改为异步运行，不阻塞解析线程。
         """
         import logging as _log
         _log.getLogger("ParseThread").info("run: START %s", self._filepath)
@@ -974,63 +973,6 @@ class _ParseThread(QThread):
                 )
             except Exception as e:
                 logger.warning("MFD 精扫失败（不影响阅读）: %s", e)
-
-            # ── 阶段三：MFR 公式识别（CPU 批量推理） ──
-            if not self.isInterruptionRequested():
-                logger.info("run: 阶段三 MFR (formulas=%d)...",
-                            sum(1 for b in refined if b.block_type.value == "formula"))
-                try:
-                    from src.core.math_ocr import MathOCR
-                    from src.core.models import BlockType as BT
-                    math_ocr = MathOCR()
-                    if math_ocr.is_available:
-                        math_ocr._ensure_model()
-                        formula_blocks = [
-                            b for b in refined
-                            if b.block_type == BT.FORMULA
-                            and b.metadata.get("formula_detector") == "pix2text-mfd"
-                        ]
-                        if formula_blocks:
-                            # 收集所有公式截图
-                            crops: list[bytes] = []
-                            crop_map: list[int] = []  # index → formula_blocks index
-                            for i, fb in enumerate(formula_blocks):
-                                if self.isInterruptionRequested():
-                                    break
-                                try:
-                                    page = doc[fb.page_num]
-                                    rect = fitz.Rect(*fb.bbox)
-                                    mat = fitz.Matrix(3.0, 3.0)
-                                    pix = page.get_pixmap(matrix=mat, clip=rect)
-                                    crops.append(pix.tobytes("png"))
-                                    crop_map.append(i)
-                                except Exception:
-                                    pass
-
-                            # 批量识别 → 大幅加速
-                            if crops and not self.isInterruptionRequested():
-                                latex_results = math_ocr.recognize_batch(crops)
-                                mfr_updated: list[dict] = []
-                                for j, latex in enumerate(latex_results):
-                                    if latex:
-                                        fb = formula_blocks[crop_map[j]]
-                                        fb.content = f"$$\n{latex}\n$$"
-                                        fb.metadata["latex"] = latex
-                                        fb.metadata["mfr_recognized"] = True
-                                        mfr_updated.append({
-                                            "id": fb.id,
-                                            "block_type": fb.block_type.value,
-                                            "metadata": fb.metadata,
-                                            "content": fb.content,
-                                        })
-                                if mfr_updated and not self.isInterruptionRequested():
-                                    self.formula_blocks_updated.emit(mfr_updated)
-                                logger.info(
-                                    "MFR 完成: %d/%d 个公式 → LaTeX",
-                                    len(mfr_updated), len(formula_blocks),
-                                )
-                except Exception as e:
-                    logger.warning("MFR 阶段失败（不影响阅读）: %s", e)
 
             logger.info("run: 所有阶段完成, 关闭 doc...")
             doc.close()
