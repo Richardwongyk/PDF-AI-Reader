@@ -291,14 +291,15 @@ class MainWindow(QMainWindow):
     def _open_pdf_file(self, filepath: str) -> None:
         """执行打开 PDF 文件的完整流程。
 
-        Args:
-            filepath: PDF 文件绝对路径。
+        若已有文档打开，先执行完整关闭流程（停止线程、释放资源），
+        再打开新文档。避免 QPdfDocument 双实例冲突和线程残留。
         """
+        # 先完整关闭旧文档
+        if self._current_doc_hash:
+            self._on_close_document()
+            QApplication.processEvents()
         self._status_page_label.setText("正在解析 PDF...")
         self._status_progress.setVisible(True)
-        # 先清理旧的 UI 状态，避免新旧 WebView 并发导致 Chromium 崩溃
-        self._pdf_viewer.clear()
-        QApplication.processEvents()
         self._doc_engine.open_document(filepath)
 
     def _on_close_document(self) -> None:

@@ -511,17 +511,16 @@ class SplitWidget(QFrame):
         """截图 WebView 内容，回收 WebView 到热备池，显示截图占位。"""
         if self._result_view is None or not self._page_ready:
             return
-        # 保存当前内容以便展开时恢复
         self._cached_result = self._current_answer
-        # 截图当前 WebView 内容
         pixmap = self._result_view.grab()
         if not pixmap.isNull():
             self._frozen_label.setPixmap(pixmap)
-        # 断开信号，从布局移除，回收
+        # 断开信号、清除 QWebChannel（避免池中 WebView 残留旧 channel）
         try:
             self._result_view.loadFinished.disconnect(self._on_page_loaded)
         except Exception:
             pass
+        self._result_view.page().setWebChannel(None)
         self._body_layout.removeWidget(self._result_view)
         self._result_view.setParent(None)
         WebViewPool.release(self._result_view)

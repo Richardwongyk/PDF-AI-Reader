@@ -597,16 +597,13 @@ class DocumentEngine(BaseService):
         """
         self.logger.info("打开文档: %s", filepath)
 
-        # 清理上一个线程
+        # 清理上一个线程（协作式取消，不调用 terminate）
         if self._thread is not None:
             self.logger.info("清理上一解析线程...")
             if self._thread.isRunning():
                 self._thread.requestInterruption()
                 self._thread.quit()
-                if not self._thread.wait(3000):
-                    self.logger.warning("上一解析线程未能在 3s 内退出，强制终止")
-                    self._thread.terminate()
-            # 断开旧线程的所有信号连接
+                self._thread.wait(5000)
             try:
                 self._thread.progress.disconnect()
                 self._thread.finished_parsing.disconnect()
@@ -642,8 +639,13 @@ class DocumentEngine(BaseService):
             self.logger.warning("PyMuPDF 重新打开文档失败: %s", e)
             self._doc = None
 
-        # 同时加载 QtPdf (PDFium) 文档（供矢量渲染）
+        # 释放旧的 QtPdf 实例（避免双文档冲突）
+        if self._qtpdf_doc is not None:
+            self._qtpdf_doc.deleteLater()
+            self._qtpdf_doc = None
         self._qtpdf_ready = False
+
+        # 加载 QtPdf (PDFium) 文档（供矢量渲染）
         if _HAS_QTPDF:
             try:
                 self._qtpdf_doc = QPdfDocument(self)

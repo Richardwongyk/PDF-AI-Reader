@@ -332,6 +332,9 @@ class PdfViewer(QScrollArea):
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
+        # 防止文档切换后，旧异步任务回调访问已销毁的 C++ 对象
+        if not _isValid(container):
+            return
 
         segs = self._page_segments.get(page_num, [])
         if len(segs) != 1 or segs[0].get("widget") is not container:
@@ -342,7 +345,6 @@ class PdfViewer(QScrollArea):
         if pixmap is None or pixmap.isNull():
             return
         container.render(pixmap, blocks, self._scale, self._connect_overlay)
-        # 恢复翻译指示器
         for b in blocks:
             if b.id in self._trans_indicators:
                 self._set_translation_marker(b.id, True)
