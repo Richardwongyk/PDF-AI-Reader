@@ -111,16 +111,22 @@ class TextPreprocessor:
         t = text.strip()
         if len(t) < 5:
             return False
-        # 英文单词很少
         words = t.split()
-        english = sum(1 for w in words if w.isalpha() and len(w) > 2)
+        # 英文单词（>2字母的纯字母词）
+        english = sum(1 for w in words
+                      if len(w) > 2 and all(c.isalpha() for c in w))
         if english > 5:
             return False
-        # 数学符号或数字占比高
-        math_chars = sum(1 for c in t if c.isdigit()
-                         or c in "+-=*/<>.,;:()[]{}|^_"
+        # 单字符 token 多 → 数学变量
+        single_char = sum(1 for w in words if len(w) == 1)
+        if single_char >= 3 and english <= 2:
+            return True
+        # 数学符号/数字/上标占比高
+        math_chars = sum(1 for c in t
+                         if c.isdigit()
+                         or c in "+-*/=<>.,;:()[]{}|^_"
                          or ord(c) > 127)
-        return len(t) > 0 and math_chars / len(t) > 0.3
+        return len(t) > 0 and math_chars / len(t) > 0.2
 
     def restore_formulas(self, translated_text: str) -> str:
         """将占位符反向替换回原始 LaTeX 公式。
