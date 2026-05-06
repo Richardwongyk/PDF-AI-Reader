@@ -409,7 +409,10 @@ class SplitWidget(QFrame):
             os.path.join(os.path.dirname(__file__), "markdown_template.html")
         )
         self._result_view.setUrl(QUrl.fromLocalFile(template_path))
-        body_layout.addWidget(self._result_view, 1)
+        self._result_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        body_layout.addWidget(self._result_view)
 
         # 冻结截图标签（折叠时替换 WebView 以预览内容）
         self._frozen_label = QLabel()
@@ -417,7 +420,7 @@ class SplitWidget(QFrame):
         self._frozen_label.setWordWrap(False)
         self._frozen_label.setVisible(False)
         self._frozen_label.setStyleSheet("background: transparent; border: none;")
-        body_layout.addWidget(self._frozen_label, 1)
+        body_layout.addWidget(self._frozen_label)
 
         # 追问
         self._followup_widget = QWidget()
@@ -448,6 +451,7 @@ class SplitWidget(QFrame):
         clear_btn.clicked.connect(self._on_clear_close)
         action_layout.addWidget(clear_btn)
         body_layout.addWidget(self._action_widget)
+        body_layout.addStretch()
 
         main_layout.addWidget(self._body_widget, 1)
 
@@ -558,7 +562,7 @@ class SplitWidget(QFrame):
         # 插入布局（在 frozen_label 之前）
         idx = self._body_layout.indexOf(self._frozen_label)
         if idx >= 0:
-            self._body_layout.insertWidget(idx, view, 1)
+            self._body_layout.insertWidget(idx, view)
 
         # 切换 bridge 到当前 SplitWidget（永久 channel 不重新绑定）
         WebViewPool.swap_bridge(view, self._height_bridge)

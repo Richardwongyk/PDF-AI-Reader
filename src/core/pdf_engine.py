@@ -44,9 +44,17 @@ class TextPreprocessor:
     - 翻译完成后反向替换恢复公式
     """
 
+    # 匹配行间公式 \[...\] (LaTeX 标准)
+    _DISPLAY_BRACKET_RE: re.Pattern[str] = re.compile(
+        r"\\\[(.+?)\\\]", re.DOTALL
+    )
     # 匹配行间公式 $$...$$
     _DISPLAY_FORMULA_RE: re.Pattern[str] = re.compile(
         r"\$\$(.+?)\$\$", re.DOTALL
+    )
+    # 匹配行内公式 \(...\) (LaTeX 标准)
+    _INLINE_BRACKET_RE: re.Pattern[str] = re.compile(
+        r"\\\((.+?)\\\)"
     )
     # 匹配行内公式 $...$（不匹配 $$）
     _INLINE_FORMULA_RE: re.Pattern[str] = re.compile(
@@ -60,14 +68,9 @@ class TextPreprocessor:
     def protect_formulas(self, text: str) -> str:
         """将文本中的 LaTeX 公式替换为占位符。
 
-        处理顺序：先匹配行间公式 $$...$$，再匹配行内公式 $...$。
-        原始公式字符串存入 self._formula_store。
-
-        Args:
-            text: 原始文本。
-
-        Returns:
-            公式被替换为【FORMULA_0】、【FORMULA_1】... 的文本。
+        处理顺序：
+        1. \\[...\\] 和 $$...$$（行间公式）
+        2. \\(...\\) 和 $...$（行内公式）
         """
         self._formula_store.clear()
         counter = 0
@@ -86,9 +89,11 @@ class TextPreprocessor:
             counter += 1
             return placeholder
 
-        # 先保护行间公式（$$...$$）
-        protected = self._DISPLAY_FORMULA_RE.sub(_replace_display, text)
-        # 再保护行内公式（$...$）
+        # 行间公式: \[...\] 和 $$...$$
+        protected = self._DISPLAY_BRACKET_RE.sub(_replace_display, text)
+        protected = self._DISPLAY_FORMULA_RE.sub(_replace_display, protected)
+        # 行内公式: \(...\) 和 $...$
+        protected = self._INLINE_BRACKET_RE.sub(_replace_inline, protected)
         protected = self._INLINE_FORMULA_RE.sub(_replace_inline, protected)
 
         return protected
