@@ -156,18 +156,24 @@ class SplitWidget(QFrame):
         self.setVisible(False)
 
     def collapse(self) -> None:
-        """折叠裂缝：动画收缩至消失。"""
+        """折叠裂缝：截图冻结 WebView 后动画收缩。
+
+        截图冻结可让折叠后的细条保留内容预览，
+        同时为后续 WebView 回收（释放 Chromium 进程）做好准备。
+        """
         if self._collapsed:
             return
         self._collapsed = True
         self._page_width = max(self._page_width, self.width())
+        self._freeze_webview()
         self._animate_collapse()
 
     def expand(self) -> None:
-        """展开裂缝：动画展开。"""
+        """展开裂缝：还原 WebView 并动画展开。"""
         if not self._collapsed:
             return
         self._collapsed = False
+        self._thaw_webview()
         self._animate_expand()
         self._update_mode_ui()
 
@@ -303,6 +309,14 @@ class SplitWidget(QFrame):
         self._result_view.setUrl(QUrl.fromLocalFile(template_path))
         body_layout.addWidget(self._result_view, 1)
 
+        # 冻结截图标签（折叠时替换 WebView 以预览内容）
+        self._frozen_label = QLabel()
+        self._frozen_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._frozen_label.setWordWrap(False)
+        self._frozen_label.setVisible(False)
+        self._frozen_label.setStyleSheet("background: transparent; border: none;")
+        body_layout.addWidget(self._frozen_label, 1)
+
         # 追问
         self._followup_widget = QWidget()
         self._followup_layout = QHBoxLayout(self._followup_widget)
@@ -407,6 +421,26 @@ class SplitWidget(QFrame):
         else:
             # 页面未加载完成时缓存，等加载完成后应用
             self._pending_theme = theme
+
+    # ── WebView 截图冻结 ──
+
+    def _freeze_webview(self) -> None:
+        """截图 WebView 内容并冻结，释放 Chromium 渲染资源。"""
+        if self._result_view is None or not self._page_ready:
+            return
+        # 截图当前 WebView 内容
+        pixmap = self._result_view.grab()
+        if not pixmap.isNull():
+            self._frozen_label.setPixmap(pixmap)
+        # 隐藏 WebView，显示截图
+        self._result_view.setVisible(False)
+        self._frozen_label.setVisible(True)
+
+    def _thaw_webview(self) -> None:
+        """解冻：隐藏截图，恢复 WebView。"""
+        self._frozen_label.setVisible(False)
+        if self._result_view is not None:
+            self._result_view.setVisible(True)
 
     # ── 拖拽 ──
 
