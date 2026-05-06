@@ -136,18 +136,11 @@ class WebViewPool:
 
     @classmethod
     def release(cls, view: QWebEngineView) -> None:
-        """回收 WebView 到热备池，超过限额则销毁。"""
+        """回收 WebView 到热备池，超过限额则延迟销毁。"""
         cls._in_use = max(0, cls._in_use - 1)
-        # 停止正在进行的页面加载，避免 Chromium 崩溃
-        try:
-            view.page().triggerAction(view.page().WebAction.Stop)
-        except Exception:
-            pass
         if cls._standby is None and cls._in_use < 2:
-            # 作为热备保留（不在此处 setUrl，由 acquire 端负责重载）
             cls._standby = view
         else:
-            view.setParent(None)
             view.deleteLater()
 
 
@@ -380,11 +373,8 @@ class SplitWidget(QFrame):
         input_layout.addLayout(send_layout)
         body_layout.addWidget(self._input_widget)
 
-        # QWebEngineView
-        self._result_view = QWebEngineView()
-        self._result_view.setObjectName("result_area")
-        self._result_view.setMinimumHeight(60)
-        self._result_view.page().setBackgroundColor(Qt.GlobalColor.transparent)
+        # QWebEngineView — 从热备池获取，避免冷启动延迟
+        self._result_view = WebViewPool.acquire()
         self._page_ready = False
         self._pending_js: str | None = None
         self._pending_theme: str | None = None
@@ -522,20 +512,56 @@ class SplitWidget(QFrame):
     # ── WebView 截图冻结 ──
 
     def _freeze_webview(self) -> None:
-        """截图 WebView 后隐藏，截图占位显示。WebView 保持存活避免 Chromium 崩溃。"""
+        """截图 WebView 内容，回收 WebView 到热备池，显示截图占位。"""
         if self._result_view is None or not self._page_ready:
             return
+        # 保存当前内容以便展开时恢复
+        self._cached_result = self._current_answer
+        # 截图当前 WebView 内容
         pixmap = self._result_view.grab()
         if not pixmap.isNull():
             self._frozen_label.setPixmap(pixmap)
-        self._result_view.setVisible(False)
+        # 断开信号，从布局移除，回收
+        try:
+            self._result_view.loadFinished.disconnect(self._on_page_loaded)
+        except Exception:
+            pass
+        self._body_layout.removeWidget(self._result_view)
+        self._result_view.setParent(None)
+        WebViewPool.release(self._result_view)
+        self._result_view = None
+        self._page_ready = False
         self._frozen_label.setVisible(True)
 
     def _thaw_webview(self) -> None:
-        """隐藏截图，恢复 WebView 显示。"""
-        self._frozen_label.setVisible(False)
+        """从热备池获取 WebView，设置 QWebChannel 并恢复显示。"""
         if self._result_view is not None:
-            self._result_view.setVisible(True)
+            return
+        view = WebViewPool.acquire()
+        self._result_view = view
+        # 插入布局（在 frozen_label 之前）
+        idx = self._body_layout.indexOf(self._frozen_label)
+        if idx >= 0:
+            self._body_layout.insertWidget(idx, view, 1)
+
+        # 重新注册 QWebChannel（池中 WebView 之前可能连接过其他 bridge）
+        self._web_channel = QWebChannel(self)
+        self._web_channel.registerObject("bridge", self._height_bridge)
+        view.page().setWebChannel(self._web_channel)
+
+        view.loadFinished.connect(self._on_page_loaded)
+        # 页面加载完成后恢复缓存内容
+        if self._cached_result:
+            safe_text = json.dumps(self._cached_result)
+            self._pending_js = f"updateContent({safe_text}, true);"
+            self._current_answer = self._cached_result
+
+        template_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "markdown_template.html")
+        )
+        view.setUrl(QUrl.fromLocalFile(template_path))
+        view.setVisible(True)
+        self._frozen_label.setVisible(False)
 
     # ── 拖拽 ──
 
@@ -625,12 +651,10 @@ class SplitWidget(QFrame):
 
     def _on_clear_close(self) -> None:
         """清除翻译并关闭裂缝，释放资源。"""
+        self.close()
         self._cached_result = ""
         self._current_answer = ""
         self._chat_history.clear()
-        # 仅在 WebView 存活时更新，冻结状态跳过（PdfViewer 即将销毁此 widget）
-        if self._page_ready and self._result_view is not None:
-            self._update_webview(is_finished=True)
         self.close_requested.emit(self._block.id)
 
     def _on_regenerate(self) -> None:
