@@ -584,6 +584,15 @@ class TranslationService:
             glossary_terms=glossary_str if glossary_str else "（无特殊术语要求）",
         )
 
+        # 公式块强化指令：LaTeX 原样保留，只翻译周围文字
+        if block_type == "formula":
+            system_content += (
+                "\n\n【重要】当前段落已通过视觉模型识别为数学公式。"
+                "公式内容使用 LaTeX 格式（【FORMULA_x】占位符）标记。"
+                "严格保留所有公式占位符及其 LaTeX 代码，不翻译、不修改、不增删任何数学符号。"
+                "如果公式旁边有英文文字说明，仅翻译文字部分，公式本身保持原样。"
+            )
+
         # 定理/证明环境额外指令
         if block_type in ("heading",) and any(
             kw in text.lower() for kw in ("theorem", "lemma", "proof", "definition")

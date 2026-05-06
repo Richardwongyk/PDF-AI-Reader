@@ -431,6 +431,90 @@ class DocumentChunker:
 
 
 # =============================================================================
+# PyMuPDF4LLMChunker —— LLM 友好增强解析器
+# =============================================================================
+
+class PyMuPDF4LLMChunker:
+    """基于 PyMuPDF4LLM 的增强文本提取器。
+
+    将 PyMuPDF4LLM 输出的结构化 Markdown 与启发式 chunker 的
+    BBox 数据融合，提升段落文本质量（更好的双栏处理、公式格式保留）。
+    作为 DocumentChunker 的补充，在解析流水线的后台阶段运行。
+    """
+
+    def __init__(self) -> None:
+        self._available: bool | None = None
+        self._logger = logging.getLogger("PyMuPDF4LLMChunker")
+
+    @property
+    def is_available(self) -> bool:
+        if self._available is None:
+            try:
+                import pymupdf4llm  # noqa: F401
+                self._available = True
+            except ImportError:
+                self._logger.warning("PyMuPDF4LLM 未安装")
+                self._available = False
+        return self._available
+
+    def enhance_blocks(
+        self, doc: fitz.Document, blocks: list[DocumentBlock]
+    ) -> list[DocumentBlock]:
+        """用 PyMuPDF4LLM 的 Markdown 输出增强块文本。
+
+        保持原有 BBox 和块结构不变，仅用 PyMuPDF4LLM 更准确的
+        文本替换 block.content。
+
+        Args:
+            doc: PyMuPDF 文档对象。
+            blocks: 启发式 chunker 产出的块列表。
+
+        Returns:
+            文本内容被增强的块列表（原地修改）。
+        """
+        if not self.is_available:
+            return blocks
+        try:
+            import pymupdf4llm
+            md_text = pymupdf4llm.to_markdown(doc)
+            if not md_text:
+                return blocks
+            # 按页分割 Markdown，将干净文本匹配回块
+            self._align_markdown_to_blocks(md_text, blocks)
+        except Exception as e:
+            self._logger.warning("PyMuPDF4LLM 增强失败: %s", e)
+        return blocks
+
+    def _align_markdown_to_blocks(
+        self, md_text: str, blocks: list[DocumentBlock]
+    ) -> None:
+        """将 Markdown 文本按段落匹配回 block，替换 content。
+
+        策略：对每个块，在 Markdown 中查找最长公共子串，
+        若匹配度 > 60% 则用 Markdown 版本替换。
+        """
+        from difflib import SequenceMatcher
+        md_paragraphs = [p.strip() for p in md_text.split("\n\n") if p.strip()]
+
+        for block in blocks:
+            if block.block_type.value == "image":
+                continue
+            best_ratio = 0.0
+            best_text = ""
+            orig = block.content.strip()
+            if len(orig) < 10:
+                continue
+            for para in md_paragraphs:
+                ratio = SequenceMatcher(None, orig[:200], para[:200]).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_text = para
+            if best_ratio > 0.6 and best_text:
+                block.content = best_text
+                block.metadata["enhanced_by"] = "pymupdf4llm"
+
+
+# =============================================================================
 # DocumentEngine —— 文档引擎
 # =============================================================================
 
@@ -780,7 +864,13 @@ class _ParseThread(QThread):
         self._chunker = chunker
 
     def run(self) -> None:
-        """两阶段 PDF 解析。"""
+        """四阶段渐进式 PDF 解析。
+
+        阶段一（极速呈现）：启发式分块 → finished_parsing
+        阶段二（文本增强）：PyMuPDF4LLM 改进文本质量
+        阶段三（公式检测）：Pix2Text MFD → formula_blocks_updated
+        阶段四（公式识别）：MathOCR MFR 公式→LaTeX → formula_blocks_updated
+        """
         try:
             doc = fitz.open(self._filepath)
             if doc.needs_pass:
@@ -816,7 +906,21 @@ class _ParseThread(QThread):
             )
             self.finished_parsing.emit(result)
 
-            # ── 阶段二：ML 公式精扫（后台，不阻塞阅读） ──
+            # ── 阶段二：PyMuPDF4LLM 增强解析（后台，提升文本质量） ──
+            if not self.isInterruptionRequested():
+                try:
+                    enhanced = PyMuPDF4LLMChunker()
+                    if enhanced.is_available:
+                        enhanced.enhance_blocks(doc, blocks)
+                        logger.info(
+                            "PyMuPDF4LLM 增强完成: %d 个块",
+                            sum(1 for b in blocks
+                                if b.metadata.get("enhanced_by") == "pymupdf4llm"),
+                        )
+                except Exception as e:
+                    logger.warning("PyMuPDF4LLM 增强失败: %s", e)
+
+            # ── 阶段三：Pix2Text MFD 公式检测（后台） ──
             if self.isInterruptionRequested():
                 doc.close()
                 return
@@ -843,6 +947,51 @@ class _ParseThread(QThread):
                 )
             except Exception as e:
                 logger.warning("MFD 精扫失败（不影响阅读）: %s", e)
+
+            # ── 阶段四：MFR 公式识别（MFD 检测到的公式 → LaTeX） ──
+            if not self.isInterruptionRequested():
+                try:
+                    from src.core.math_ocr import MathOCR
+                    from src.core.models import BlockType as BT
+                    math_ocr = MathOCR()
+                    if math_ocr.is_available:
+                        math_ocr._ensure_model()
+                        formula_blocks = [
+                            b for b in refined
+                            if b.block_type == BT.FORMULA
+                            and b.metadata.get("formula_detector") == "pix2text-mfd"
+                        ]
+                        mfr_updated: list[dict] = []
+                        for fb in formula_blocks:
+                            if self.isInterruptionRequested():
+                                break
+                            try:
+                                page = doc[fb.page_num]
+                                rect = fitz.Rect(*fb.bbox)
+                                # 216 DPI 局部渲染，保证公式细节清晰
+                                mat = fitz.Matrix(3.0, 3.0)
+                                pix = page.get_pixmap(matrix=mat, clip=rect)
+                                latex = math_ocr.recognize(pix.tobytes("png"))
+                                if latex:
+                                    fb.content = f"$$\n{latex}\n$$"
+                                    fb.metadata["latex"] = latex
+                                    fb.metadata["mfr_recognized"] = True
+                                    mfr_updated.append({
+                                        "id": fb.id,
+                                        "block_type": fb.block_type.value,
+                                        "metadata": fb.metadata,
+                                        "content": fb.content,
+                                    })
+                            except Exception:
+                                pass
+                        if mfr_updated and not self.isInterruptionRequested():
+                            self.formula_blocks_updated.emit(mfr_updated)
+                        logger.info(
+                            "MFR 完成: %d/%d 个公式被识别为 LaTeX",
+                            len(mfr_updated), len(formula_blocks),
+                        )
+                except Exception as e:
+                    logger.warning("MFR 阶段失败（不影响阅读）: %s", e)
 
             doc.close()
 

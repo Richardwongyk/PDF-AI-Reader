@@ -376,13 +376,16 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "打开失败", message)
 
     def _on_formula_blocks_updated(self, updated: list[dict]) -> None:
-        """MFD 精扫完成：更新块类型并刷新对应 overlay。"""
+        """MFD/MFR 精扫完成：更新块类型、LaTeX 内容并刷新 overlay。"""
         update_map = {u["id"]: u for u in updated}
         for block in self._current_blocks:
             if block.id in update_map:
                 info = update_map[block.id]
                 block.block_type = BlockType(info["block_type"])
                 block.metadata.update(info.get("metadata", {}))
+                # MFR 阶段：用识别到的 LaTeX 替换公式块内容
+                if "content" in info:
+                    block.content = info["content"]
         # 刷新已渲染的 overlay
         for block_id in update_map:
             ov = self._pdf_viewer._overlays.get(block_id)
