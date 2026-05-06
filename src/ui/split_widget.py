@@ -128,6 +128,8 @@ class WebViewPool:
         if cls._standby is not None:
             view = cls._standby
             cls._standby = None
+            # 强制清空旧内容，避免 setUrl(同URL) 不刷新
+            view.setHtml("")
         else:
             view = cls._create_view()
         cls._in_use += 1
@@ -138,7 +140,6 @@ class WebViewPool:
     def release(cls, view: QWebEngineView) -> None:
         cls._in_use = max(0, cls._in_use - 1)
         if cls._standby is None and cls._in_use < 2:
-            # 回收前注销旧 bridge
             if hasattr(view, '_current_bridge') and view._current_bridge:
                 try:
                     view._permanent_channel.deregisterObject(view._current_bridge)
