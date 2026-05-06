@@ -12,8 +12,15 @@ import re
 from typing import Any
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QSize, QThread, Signal
 from PySide6.QtGui import QPixmap
+
+# QtPdf (PDFium) — 矢量渲染引擎，PySide6 自带
+try:
+    from PySide6.QtPdf import QPdfDocument
+    _HAS_QTPDF = True
+except ImportError:
+    _HAS_QTPDF = False
 
 from src.core.base_service import BaseService
 from src.core.models import (
@@ -453,6 +460,9 @@ class DocumentEngine(BaseService):
         super().__init__(parent)
         self._config = config
         self._doc: fitz.Document | None = None
+        # QtPdf (PDFium) 渲染后端 — 矢量高清显示
+        self._qtpdf_doc: QPdfDocument | None = None
+        self._qtpdf_ready: bool = False
         self._chunker = DocumentChunker()
         self._preprocessor = TextPreprocessor()
         self._thread: QThread | None = None
@@ -483,6 +493,11 @@ class DocumentEngine(BaseService):
     def document(self) -> fitz.Document | None:
         """获取底层 PyMuPDF 文档对象。"""
         return self._doc
+
+    @property
+    def using_qtpdf(self) -> bool:
+        """是否正在使用 QtPdf (PDFium) 进行矢量渲染。"""
+        return self._qtpdf_ready
 
     def open_document(self, filepath: str) -> None:
         """打开 PDF 文件并在工作线程中执行解析流水线。
@@ -520,12 +535,29 @@ class DocumentEngine(BaseService):
         """
         self.logger.info("解析完成: %s (%d 页, %d 块)", result.title or result.filepath, result.page_count, len(result.blocks))
 
-        # 重新打开文档（供渲染使用）
+        # 重新打开 PyMuPDF 文档（供文本提取 / BBox 查询）
         try:
             self._doc = fitz.open(result.filepath)
         except Exception as e:
-            self.logger.warning("重新打开文档失败: %s", e)
+            self.logger.warning("PyMuPDF 重新打开文档失败: %s", e)
             self._doc = None
+
+        # 同时加载 QtPdf (PDFium) 文档（供矢量渲染）
+        self._qtpdf_ready = False
+        if _HAS_QTPDF:
+            try:
+                self._qtpdf_doc = QPdfDocument(self)
+                self._qtpdf_doc.load(result.filepath)
+                if self._qtpdf_doc.status() == QPdfDocument.Status.Ready:
+                    self._qtpdf_ready = True
+                    self.logger.info("QtPdf (PDFium) 矢量渲染就绪")
+                elif self._qtpdf_doc.status() == QPdfDocument.Status.Error:
+                    self.logger.warning("QtPdf 加载失败，回退到 PyMuPDF 渲染")
+            except Exception as e:
+                self.logger.warning("QtPdf 初始化失败 (%s)，回退到 PyMuPDF 渲染", e)
+        else:
+            self.logger.info("QtPdf 模块不可用，使用 PyMuPDF 渲染")
+
         self._pixmap_cache.clear()
         self.parse_finished.emit(result)
 
@@ -544,12 +576,18 @@ class DocumentEngine(BaseService):
             self._thread.deleteLater()
             self._thread = None
 
-        # 2. 关闭 PDF 文档
+        # 2. 关闭 PDF 文档 (PyMuPDF)
         if self._doc:
             self._doc.close()
             self._doc = None
 
-        # 3. 清空渲染缓存
+        # 3. 释放 QtPdf 文档
+        if self._qtpdf_doc is not None:
+            self._qtpdf_doc.deleteLater()
+            self._qtpdf_doc = None
+            self._qtpdf_ready = False
+
+        # 4. 清空渲染缓存
         self._pixmap_cache.clear()
         self.logger.info("文档已关闭，资源已释放")
 
@@ -557,6 +595,9 @@ class DocumentEngine(BaseService):
         self, page_num: int, dpi: int = 150
     ) -> QPixmap | None:
         """获取指定页面的渲染图像（主线程安全）。
+
+        优先使用 QtPdf (PDFium) 进行矢量渲染，品质更高；
+        若 QtPdf 不可用则回退到 PyMuPDF 光栅化。
 
         Args:
             page_num: 页码（0-based）。
@@ -572,29 +613,46 @@ class DocumentEngine(BaseService):
         if page_num in self._pixmap_cache and dpi in self._pixmap_cache[page_num]:
             return self._pixmap_cache[page_num][dpi]
 
-        try:
-            page = self._doc[page_num]
-            # 使用 dpi 计算缩放矩阵
-            zoom = dpi / 72.0
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-            # 转换为 QPixmap
-            qpixmap = QPixmap()
-            qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
+        qpixmap: QPixmap | None = None
 
-            # 存入缓存
-            if page_num not in self._pixmap_cache:
-                self._pixmap_cache[page_num] = {}
-            self._pixmap_cache[page_num][dpi] = qpixmap
+        # 优先使用 QtPdf (PDFium) 矢量渲染
+        if self._qtpdf_ready and self._qtpdf_doc is not None:
+            try:
+                page = self._doc[page_num]
+                zoom = dpi / 72.0
+                pixel_w = max(int(page.rect.width * zoom), 1)
+                pixel_h = max(int(page.rect.height * zoom), 1)
+                image = self._qtpdf_doc.render(page_num, QSize(pixel_w, pixel_h))
+                if not image.isNull():
+                    qpixmap = QPixmap.fromImage(image)
+            except Exception:
+                self.logger.debug(
+                    "QtPdf 渲染失败 page=%d, 回退到 PyMuPDF", page_num
+                )
 
-            # LRU 清理：超过 20 个页面缓存时删除最旧的
-            if len(self._pixmap_cache) > 20:
-                oldest = min(self._pixmap_cache.keys())
-                del self._pixmap_cache[oldest]
+        # 回退：PyMuPDF 光栅化
+        if qpixmap is None:
+            try:
+                page = self._doc[page_num]
+                zoom = dpi / 72.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+                qpixmap = QPixmap()
+                qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
+            except Exception:
+                return None
 
-            return qpixmap
-        except Exception:
-            return None
+        # 存入缓存
+        if page_num not in self._pixmap_cache:
+            self._pixmap_cache[page_num] = {}
+        self._pixmap_cache[page_num][dpi] = qpixmap
+
+        # LRU 清理：超过 20 个页面缓存时删除最旧的
+        if len(self._pixmap_cache) > 20:
+            oldest = min(self._pixmap_cache.keys())
+            del self._pixmap_cache[oldest]
+
+        return qpixmap
 
     def preload_pages(self, page_nums: list[int], dpi: int = 150) -> None:
         """预加载指定页面到渲染缓存。

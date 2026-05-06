@@ -341,10 +341,12 @@ class MainWindow(QMainWindow):
         from src.data.chroma_repo import ChromaRepo
         self._current_doc_hash = ChromaRepo.compute_doc_hash(result.filepath)
 
+        # 状态栏：知识库 + 渲染引擎
+        render_engine = "QtPdf" if self._doc_engine.using_qtpdf else "PyMuPDF"
         if self._knowledge_engine.check_exists(self._current_doc_hash):
-            self._status_model_label.setText("📚 知识库已就绪")
+            self._status_model_label.setText(f"📚 知识库就绪 | 🖥️ {render_engine}")
         else:
-            self._status_model_label.setText("🔨 正在构建知识库...")
+            self._status_model_label.setText(f"🔨 构建中... | 🖥️ {render_engine}")
             self._knowledge_engine.build_knowledge_base(result.blocks, self._current_doc_hash)
 
         # 更新术语表（用于翻译）
@@ -385,7 +387,9 @@ class MainWindow(QMainWindow):
                         break
             if ov:
                 ov.update()
-        self._status_model_label.setText("📚 知识库已就绪 | ✅ 公式精扫完成")
+        self._status_model_label.setText(
+            f"📚 知识库就绪 | ✅ 公式精扫完成 | 🖥️ {'QtPdf' if self._doc_engine.using_qtpdf else 'PyMuPDF'}"
+        )
 
     # =========================================================================
     # KnowledgeEngine 回调
@@ -400,7 +404,8 @@ class MainWindow(QMainWindow):
     def _on_kb_finished(self, doc_hash: str) -> None:
         """知识库构建完成。"""
         self._status_progress.setVisible(False)
-        self._status_model_label.setText("📚 知识库已就绪")
+        render_engine = "QtPdf" if self._doc_engine.using_qtpdf else "PyMuPDF"
+        self._status_model_label.setText(f"📚 知识库就绪 | 🖥️ {render_engine}")
 
     def _on_kb_error(self, message: str) -> None:
         """知识库构建失败。"""
