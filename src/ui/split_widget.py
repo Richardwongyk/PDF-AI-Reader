@@ -102,13 +102,12 @@ class WebViewPool:
 
     @classmethod
     def prewarm(cls) -> None:
-        """后台预热：创建并加载模板 HTML 的隐藏 WebView。"""
+        """后台预热：创建 WebView 实例（不加载 URL，由调用方负责）。"""
         if cls._standby is not None:
             return
         view = QWebEngineView()
         view.setMinimumHeight(60)
         view.page().setBackgroundColor(Qt.GlobalColor.transparent)
-        view.setUrl(cls._template_url())
         view.setObjectName("result_area")
         cls._standby = view
 
@@ -116,21 +115,18 @@ class WebViewPool:
     def acquire(cls) -> QWebEngineView:
         """获取一个 WebView：优先从热备取，否则新建。
 
-        热备 WebView 需要重新加载模板以重置状态。
+        不在此处 setUrl —— 由调用方负责加载模板。
+        避免与调用方的 setUrl 产生竞态导致 Chromium 崩溃。
         """
         if cls._standby is not None:
             view = cls._standby
             cls._standby = None
-            # 重新加载模板以重置 JS 状态
-            view.setUrl(cls._template_url())
         else:
             view = QWebEngineView()
             view.setMinimumHeight(60)
             view.page().setBackgroundColor(Qt.GlobalColor.transparent)
             view.setObjectName("result_area")
-            view.setUrl(cls._template_url())
         cls._in_use += 1
-        # 后台补充热备
         QTimer.singleShot(50, cls.prewarm)
         return view
 
