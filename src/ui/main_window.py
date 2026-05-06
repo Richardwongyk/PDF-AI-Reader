@@ -218,9 +218,10 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._right_dock)
 
     def _apply_theme(self) -> None:
-        """应用 QPalette 主题并广播到所有裂缝。"""
+        """应用主题。light=系统原生，dark/sepia=QPalette。广播到所有裂缝。"""
         theme = self._config.ui.theme
-        apply_theme(theme)
+        if theme != "light":
+            apply_theme(theme)
         self.setStyleSheet("")
         if self._pdf_viewer:
             self._pdf_viewer.apply_theme_to_splits(theme)

@@ -189,13 +189,13 @@ class SplitWidget(QFrame):
         self._page_width: int = page_width
         self._user_resized: bool = False
 
-        from src.ui.theme import get_split_style
-        self._current_theme = "dark"
+        from src.ui.theme import SPLIT_WIDGET_STYLE, get_split_style
+        self._current_theme = "light"
 
         self.setObjectName("split_container")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setStyleSheet(get_split_style(self._current_theme))
+        self.setStyleSheet(SPLIT_WIDGET_STYLE)
         self._init_ui()
         self.setVisible(False)
 
@@ -441,49 +441,28 @@ class SplitWidget(QFrame):
     # ── 模式样式 ──
 
     def _apply_translation_style(self) -> None:
-        """应用翻译/解释模式的样式（主题感知）。"""
-        if self._current_theme == "dark":
-            self.setStyleSheet(f"""
-                QFrame#split_container {{
-                    background: #1a1a2e;
-                    border: none;
-                    margin: 0px;
-                    padding: 0px;
-                }}
-                QPushButton#action_button {{
-                    background: {self._BLUE};
-                    color: #fff;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 6px 14px;
-                    font-size: 12px;
-                    font-weight: bold;
-                }}
-                QPushButton#action_button:hover {{
-                    background: {self._BLUE_DARK};
-                }}
-            """)
-        else:
-            self.setStyleSheet(f"""
-                QFrame#split_container {{
-                    background: {self._BLUE_BG};
-                    border: none;
-                    margin: 0px;
-                    padding: 0px;
-                }}
-                QPushButton#action_button {{
-                    background: {self._BLUE};
-                    color: #fff;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 6px 14px;
-                    font-size: 12px;
-                    font-weight: bold;
-                }}
-                QPushButton#action_button:hover {{
-                    background: {self._BLUE_DARK};
-                }}
-            """)
+        """应用翻译/解释模式的样式。"""
+        bg = "#f0f5ff" if self._current_theme == "light" else "#1a1a2e"
+        self.setStyleSheet(f"""
+            QFrame#split_container {{
+                background: {bg};
+                border: none;
+                margin: 0px;
+                padding: 0px;
+            }}
+            QPushButton#action_button {{
+                background: {self._BLUE};
+                color: #fff;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton#action_button:hover {{
+                background: {self._BLUE_DARK};
+            }}
+        """)
 
     def _update_mode_ui(self) -> None:
         if self._mode == SplitMode.TRANSLATION:
@@ -504,8 +483,8 @@ class SplitWidget(QFrame):
             self._followup_widget.setVisible(False)
             self._input_area.setPlaceholderText("请解释此概念的含义...")
         else:
-            from src.ui.theme import get_split_style
-            self.setStyleSheet(get_split_style(self._current_theme))
+            from src.ui.theme import SPLIT_WIDGET_STYLE
+            self.setStyleSheet(SPLIT_WIDGET_STYLE)
             self._header_label.setVisible(True)
             self._header_label.setText("🔍 提问")
             self._context_label.setVisible(True)
