@@ -894,15 +894,13 @@ class _ParseThread(QThread):
         self._chunker = chunker
 
     def run(self) -> None:
-        """四阶段渐进式 PDF 解析。
-
-        阶段一（极速呈现）：启发式分块 → finished_parsing
-        阶段二（文本增强）：PyMuPDF4LLM 改进文本质量
-        阶段三（公式检测）：Pix2Text MFD → formula_blocks_updated
-        阶段四（公式识别）：MathOCR MFR 公式→LaTeX → formula_blocks_updated
-        """
+        """四阶段渐进式 PDF 解析。"""
+        import logging as _log
+        _log.getLogger("ParseThread").info("run: START %s", self._filepath)
         try:
+            _log.getLogger("ParseThread").info("run: fitz.open...")
             doc = fitz.open(self._filepath)
+            _log.getLogger("ParseThread").info("run: fitz.open OK, pages=%d", doc.page_count)
             if doc.needs_pass:
                 self.parse_error.emit("PDF 文件已加密，暂不支持密码保护的文件。")
                 doc.close()
@@ -921,9 +919,11 @@ class _ParseThread(QThread):
             except Exception:
                 pass
 
-            # ── 阶段一：启发式分块（极速，<0.5s） ──
+            # ── 阶段一：启发式分块 ──
+            _log.getLogger("ParseThread").info("run: 阶段一 分块...")
             self.progress.emit(0, page_count)
             blocks = self._chunker.chunk(doc)
+            _log.getLogger("ParseThread").info("run: 阶段一 完成, blocks=%d", len(blocks))
             self.progress.emit(page_count, page_count)
 
             result = ParseResult(
@@ -934,12 +934,15 @@ class _ParseThread(QThread):
                 toc=toc,
                 blocks=blocks,
             )
+            _log.getLogger("ParseThread").info("run: emit finished_parsing...")
             self.finished_parsing.emit(result)
+            _log.getLogger("ParseThread").info("run: finished_parsing emitted")
 
-            import logging
-            logger = logging.getLogger("ParseThread")
+            import logging as _log2
+            logger = _log2.getLogger("ParseThread")
 
-            # ── 阶段二：PyMuPDF4LLM 增强解析（后台，提升文本质量） ──
+            # ── 阶段二：PyMuPDF4LLM 增强解析 ──
+            logger.info("run: 阶段二 PyMuPDF4LLM...")
             if not self.isInterruptionRequested():
                 try:
                     enhanced = PyMuPDF4LLMChunker()
@@ -953,11 +956,13 @@ class _ParseThread(QThread):
                 except Exception as e:
                     logger.warning("PyMuPDF4LLM 增强失败: %s", e)
 
-            # ── 阶段三：Pix2Text MFD 公式检测（后台） ──
+            # ── 阶段三：Pix2Text MFD 公式检测 ──
             if self.isInterruptionRequested():
+                logger.info("run: 中断, 退出")
                 doc.close()
                 return
 
+            logger.info("run: 阶段三 MFD...")
             from src.core.formula_detector import Pix2TextMFDDetector
             try:
                 refined = Pix2TextMFDDetector(dpi=200).apply_to_blocks(blocks, doc)
@@ -981,6 +986,8 @@ class _ParseThread(QThread):
 
             # ── 阶段四：MFR 公式识别（CPU 批量推理） ──
             if not self.isInterruptionRequested():
+                logger.info("run: 阶段四 MFR (formulas=%d)...",
+                            sum(1 for b in refined if b.block_type.value == "formula"))
                 try:
                     from src.core.math_ocr import MathOCR
                     from src.core.models import BlockType as BT
@@ -1034,7 +1041,9 @@ class _ParseThread(QThread):
                 except Exception as e:
                     logger.warning("MFR 阶段失败（不影响阅读）: %s", e)
 
+            logger.info("run: 所有阶段完成, 关闭 doc...")
             doc.close()
+            logger.info("run: END")
 
         except FileNotFoundError:
             self.parse_error.emit(f"文件不存在: {self._filepath}")

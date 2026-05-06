@@ -323,18 +323,15 @@ class MainWindow(QMainWindow):
     # =========================================================================
 
     def _on_document_loaded(self, result) -> None:
-        """文档解析完成。
-
-        Args:
-            result: ParseResult 对象。
-        """
+        """文档解析完成。"""
         import time
         start = time.time()
-        self.logger.info("文档解析完成: %s, %d 页, %d 块",
+        self.logger.info("_on_document_loaded: START %s (%d pages, %d blocks)",
                          result.filepath, result.page_count, len(result.blocks))
 
         self._current_blocks = result.blocks
         self._status_progress.setVisible(False)
+        self.logger.info("_on_document_loaded: load_document...")
         self._status_page_label.setText(
             f"{result.title or Path(result.filepath).name} — {result.page_count} 页"
         )
