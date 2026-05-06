@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# 应用数据
+data/knowledge_bases/
+
+# 日志
+logs/
+
+# 环境变量（含密钥）
+.env
+config.yaml
+
+# ========== 中间文件 / 打包输出 ==========
+代码打包.txt
+*.spec
+
+# ========== 用户数据文件 ==========
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.svg
+
+# ========== 其他 ==========
+PDF_AI_Reader/
+*.bak
+*.tmp
+*~

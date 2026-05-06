@@ -1,0 +1,20 @@
+model:
+  local: qwen3.5:4b
+  cloud: deepseek/deepseek-chat
+  embed_local: bge-m3
+  ollama_host: http://localhost:11434
+routing:
+  translation: local_first
+  qa: local_first
+  summarization: local_first
+  embed: local_only
+  auto_upgrade_threshold: 2000
+ui:
+  language: zh_CN
+  theme: light
+  split_position: below
+  font_size: 12
+  line_spacing: 1.5
+  show_word_translation: false
+api_keys:
+  deepseek/deepseek-chat: "在此填入你的 API Key"

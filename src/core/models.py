@@ -1,0 +1,182 @@
+"""
+数据模型 —— PDF AI Reader 全部数据结构的 Pydantic 模型定义。
+
+每个模型都是 Pydantic BaseModel，提供自动验证、序列化/反序列化、
+JSON Schema 导出等能力。所有类型注解使用 Python 3.13 标准语法。
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# 枚举类型
+# =============================================================================
+
+class BlockType(str, Enum):
+    """文档块类型枚举。"""
+    PARAGRAPH = "paragraph"   # 普通段落
+    FORMULA = "formula"       # 数学公式（LaTeX）
+    HEADING = "heading"       # 章节标题
+    IMAGE = "image"           # 图片（预留）
+    TABLE = "table"           # 表格（预留）
+
+
+class SplitMode(str, Enum):
+    """裂缝工作模式枚举。"""
+    QUESTION = "question"          # 提问模式：显示输入框 + 结果区
+    TRANSLATION = "translation"    # 翻译模式：仅显示结果区（译文）
+    EXPLANATION = "explanation"    # 解释模式：自动发送解释请求
+
+
+class SplitState(str, Enum):
+    """裂缝状态机枚举。"""
+    HIDDEN = "hidden"       # 完全隐藏
+    OPENING = "opening"     # 正在播放展开动画
+    READY = "ready"         # 已打开，等待输入或展示结果
+    BUSY = "busy"           # 正在等待 AI 响应
+    CLOSING = "closing"     # 正在播放关闭动画
+
+
+class TaskType(str, Enum):
+    """AI 任务类型枚举。"""
+    TRANSLATION = "translation"
+    QA = "qa"
+    EMBEDDING = "embedding"
+    SUMMARIZATION = "summarization"
+    FOLLOWUP_QUESTIONS = "followup_questions"
+
+
+class RoutingStrategy(str, Enum):
+    """路由策略枚举。"""
+    LOCAL_FIRST = "local_first"
+    CLOUD_ONLY = "cloud_only"
+    LOCAL_ONLY = "local_only"
+
+
+# =============================================================================
+# 核心数据模型
+# =============================================================================
+
+class DocumentBlock(BaseModel):
+    """文档知识块 —— 知识库的最小单元。
+
+    每个块代表一个段落、一个公式或一个标题，
+    是 PDF 分割、向量嵌入、语义检索的基本单位。
+    """
+    id: str
+    # 唯一标识，格式: "p{page_num}_b{block_index}"
+    # 示例: "p5_b12" 表示第 5 页第 12 个块
+
+    page_num: int
+    # 所在页码（0-based）
+
+    block_type: BlockType
+    # 块类型：段落 / 公式 / 标题 / 图片 / 表格
+
+    content: str
+    # 块的文本内容。
+    # - 类型为 paragraph 时：英文原文段落
+    # - 类型为 formula 时：LaTeX 源码（如 "E = mc^2"）
+    # - 类型为 heading 时：章节标题文本
+
+    bbox: tuple[float, float, float, float]
+    # 包围框坐标: (x0, y0, x1, y1)，相对于页面左上角，单位 pt
+    # 用于点击定位和高亮绘制
+
+    section_title: str = ""
+    # 所属章节标题（由最近的 heading 块确定）
+
+    metadata: dict = Field(default_factory=dict)
+    # 扩展元数据，可包含:
+    # - "summary": AI 生成的摘要（≤50字）
+    # - "is_theorem": bool, 是否为定理/证明环境
+    # - "domain": str, 推测的学科领域
+    # - "keywords": list[str], 关键术语
+
+
+class GlossaryEntry(BaseModel):
+    """术语表条目。"""
+    en: str                              # 英文术语
+    zh: str                              # 中文翻译
+    domain: str                          # 学科领域（如 "math", "cs_ml", "physics"）
+    force: bool = False                  # 是否强制使用此翻译
+    aliases: list[str] = Field(default_factory=list)  # 英文别名
+    notes: str = ""                      # 可选备注
+
+
+class Bookmark(BaseModel):
+    """书签。"""
+    id: str                              # 唯一标识
+    page_num: int                        # 页码（0-based）
+    title: str                           # 书签标题
+    note: str = ""                       # 可选备注
+    is_ai_suggested: bool = False        # 是否由 AI 自动建议
+    created_at: str = ""                 # ISO 时间戳
+
+
+# =============================================================================
+# 配置模型
+# =============================================================================
+
+class ModelConfig(BaseModel):
+    """模型配置。"""
+    local: str = "qwen3.5:4b"            # 本地默认模型
+    cloud: str = "deepseek/deepseek-chat" # 云端默认模型
+    embed_local: str = "bge-m3"          # 本地嵌入模型
+    ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
+
+
+class RoutingConfig(BaseModel):
+    """路由策略配置。"""
+    translation: str = "local_first"     # local_first / cloud_only / local_only
+    qa: str = "local_first"
+    summarization: str = "local_first"
+    embed: str = "local_only"            # 嵌入固定本地
+    auto_upgrade_threshold: int = 2000   # 字符数超过此值自动升级到云端
+
+
+class UIConfig(BaseModel):
+    """UI 配置。"""
+    language: str = "zh_CN"              # 界面语言
+    theme: str = "light"                 # light / dark / sepia
+    split_position: str = "below"        # below / right（裂缝默认位置）
+    font_size: int = 12                  # 阅读区字体大小
+    line_spacing: float = 1.5            # 行距
+    show_word_translation: bool = False  # 是否开启取词翻译
+
+
+class AppConfig(BaseModel):
+    """应用配置总模型。"""
+    model: ModelConfig = Field(default_factory=ModelConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    ui: UIConfig = Field(default_factory=UIConfig)
+    api_keys: dict[str, str] = Field(default_factory=dict)
+
+
+# =============================================================================
+# 运行时数据结构
+# =============================================================================
+
+class ParseResult(BaseModel):
+    """PDF 解析结果（用于线程间传递）。"""
+    filepath: str
+    title: str = ""
+    author: str = ""
+    page_count: int = 0
+    toc: list[dict] = Field(default_factory=list)      # 原生大纲/目录
+    blocks: list[DocumentBlock] = Field(default_factory=list)
+
+
+class KnowledgeStatus(BaseModel):
+    """知识库状态。"""
+    doc_hash: str
+    collection_name: str
+    is_ready: bool = False
+    total_blocks: int = 0
+    embedded_blocks: int = 0
+    build_time_seconds: float = 0.0
