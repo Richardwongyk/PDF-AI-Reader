@@ -194,8 +194,9 @@ class SplitWidget(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._init_ui()
         self.setVisible(False)
-        from src.ui.theme import SPLIT_WIDGET_STYLE
-        self.setStyleSheet(SPLIT_WIDGET_STYLE)
+        from src.ui.theme import get_split_style
+        self._current_theme = "dark"
+        self.setStyleSheet(get_split_style(self._current_theme))
 
     # ── 属性 ──
 
@@ -439,27 +440,49 @@ class SplitWidget(QFrame):
     # ── 模式样式 ──
 
     def _apply_translation_style(self) -> None:
-        """应用翻译/解释模式的样式。"""
-        self.setStyleSheet(f"""
-            QFrame#split_container {{
-                background: {self._BLUE_BG};
-                border: none;
-                margin: 0px;
-                padding: 0px;
-            }}
-            QPushButton#action_button {{
-                background: {self._BLUE};
-                color: #fff;
-                border: none;
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-size: 12px;
-                font-weight: bold;
-            }}
-            QPushButton#action_button:hover {{
-                background: {self._BLUE_DARK};
-            }}
-        """)
+        """应用翻译/解释模式的样式（主题感知）。"""
+        if self._current_theme == "dark":
+            self.setStyleSheet(f"""
+                QFrame#split_container {{
+                    background: #1a1a2e;
+                    border: none;
+                    margin: 0px;
+                    padding: 0px;
+                }}
+                QPushButton#action_button {{
+                    background: {self._BLUE};
+                    color: #fff;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }}
+                QPushButton#action_button:hover {{
+                    background: {self._BLUE_DARK};
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                QFrame#split_container {{
+                    background: {self._BLUE_BG};
+                    border: none;
+                    margin: 0px;
+                    padding: 0px;
+                }}
+                QPushButton#action_button {{
+                    background: {self._BLUE};
+                    color: #fff;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }}
+                QPushButton#action_button:hover {{
+                    background: {self._BLUE_DARK};
+                }}
+            """)
 
     def _update_mode_ui(self) -> None:
         if self._mode == SplitMode.TRANSLATION:
@@ -480,8 +503,8 @@ class SplitWidget(QFrame):
             self._followup_widget.setVisible(False)
             self._input_area.setPlaceholderText("请解释此概念的含义...")
         else:
-            from src.ui.theme import SPLIT_WIDGET_STYLE
-            self.setStyleSheet(SPLIT_WIDGET_STYLE)
+            from src.ui.theme import get_split_style
+            self.setStyleSheet(get_split_style(self._current_theme))
             self._header_label.setVisible(True)
             self._header_label.setText("🔍 提问")
             self._context_label.setVisible(True)
@@ -495,11 +518,13 @@ class SplitWidget(QFrame):
         self._input_area.setEnabled(not busy)
 
     def apply_theme(self, theme: str) -> None:
-        """将主题应用到 WebView 的 HTML 内容。"""
-        if self._page_ready:
+        """将主题应用到 SplitWidget QSS 和 WebView HTML 内容。"""
+        from src.ui.theme import get_split_style
+        self._current_theme = theme
+        self.setStyleSheet(get_split_style(theme))
+        if self._page_ready and self._result_view is not None:
             self._result_view.page().runJavaScript(f"setTheme('{theme}');")
         else:
-            # 页面未加载完成时缓存，等加载完成后应用
             self._pending_theme = theme
 
     # ── WebView 截图冻结 ──

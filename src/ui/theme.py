@@ -109,6 +109,107 @@ QPushButton#action_button:hover {
 }
 """
 
+# 暗色主题 SplitWidget 样式
+SPLIT_WIDGET_STYLE_DARK: str = """
+QFrame#split_container {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 #1e1e2e,
+        stop: 1 #2a1a3a
+    );
+    border-radius: 12px;
+    border: 1px solid #3a3a5a;
+    margin: 8px 0px;
+    padding: 12px;
+    color: #cdd6f4;
+}
+
+QLabel#header_title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #cdd6f4;
+    padding: 4px 0px;
+}
+
+QLabel#context_label {
+    font-size: 11px;
+    color: #a6adc8;
+    font-style: italic;
+    padding: 2px 0px 8px 0px;
+}
+
+QTextEdit#input_area {
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 8px;
+    background: rgba(30, 30, 46, 0.75);
+    color: #cdd6f4;
+    font-size: 13px;
+    min-height: 80px;
+    max-height: 300px;
+}
+
+QPushButton#send_button {
+    background: #6c5ce7;
+    color: white;
+    border-radius: 6px;
+    padding: 6px 18px;
+    font-weight: bold;
+    min-width: 60px;
+}
+
+QPushButton#send_button:hover {
+    background: #5a4bd1;
+}
+
+QPushButton#send_button:pressed {
+    background: #4a3db0;
+}
+
+QTextBrowser#result_area {
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 8px;
+    background: rgba(30, 30, 46, 0.85);
+    color: #cdd6f4;
+    font-size: 13px;
+    min-height: 60px;
+}
+
+QPushButton#close_button {
+    background: transparent;
+    border: none;
+    font-size: 18px;
+    color: #a6adc8;
+    padding: 2px 6px;
+}
+
+QPushButton#close_button:hover {
+    color: #e74c3c;
+}
+
+QPushButton#action_button {
+    background: transparent;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: #cdd6f4;
+}
+
+QPushButton#action_button:hover {
+    background: rgba(108, 92, 231, 0.15);
+    border-color: #6c5ce7;
+}
+"""
+
+
+def get_split_style(theme_name: str) -> str:
+    """根据主题返回对应的 SplitWidget QSS。"""
+    if theme_name == "dark":
+        return SPLIT_WIDGET_STYLE_DARK
+    return SPLIT_WIDGET_STYLE
+
 # =============================================================================
 # QPalette 主题
 # =============================================================================

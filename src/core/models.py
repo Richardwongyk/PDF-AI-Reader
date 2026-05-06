@@ -143,7 +143,7 @@ class RoutingConfig(BaseModel):
 class UIConfig(BaseModel):
     """UI 配置。"""
     language: str = "zh_CN"              # 界面语言
-    theme: str = "light"                 # light / dark / sepia
+    theme: str = "dark"                  # light / dark / sepia
     split_position: str = "below"        # below / right（裂缝默认位置）
     font_size: int = 12                  # 阅读区字体大小
     line_spacing: float = 1.5            # 行距
