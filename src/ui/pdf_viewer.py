@@ -533,23 +533,9 @@ class PdfViewer(QScrollArea):
     # ── 清理 ──
 
     def clear(self) -> None:
-        _logger.info("PdfViewer.clear: 开始清理 (%d splits, %d pages)...",
+        _logger.info("PdfViewer.clear: 开始 (%d splits, %d pages)",
                      len(self._splits), len(self._page_containers))
         for block_id, s in list(self._splits.items()):
-            # 先杀 QWebChannel —— 必须在 WebView 之前销毁，避免
-            # Chromium 析构时回调已释放的 bridge 对象导致 segfault
-            try:
-                if hasattr(s, '_result_view') and s._result_view is not None:
-                    s._result_view.page().setWebChannel(None)
-            except Exception:
-                pass
-            try:
-                if hasattr(s, '_web_channel') and s._web_channel is not None:
-                    s._web_channel.deregisterObject(s._height_bridge)
-                    s._web_channel.deleteLater()
-                    s._web_channel = None
-            except Exception:
-                pass
             s.close()
             s.deleteLater()
         self._splits.clear()

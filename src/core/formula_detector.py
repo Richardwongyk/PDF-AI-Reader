@@ -76,10 +76,13 @@ class Pix2TextMFDDetector(FormulaDetector):
             公式列表。
         """
         import io, logging
+        from PySide6.QtCore import QThread
         logger = logging.getLogger("Pix2TextMFD")
         mfd = self._get_mfd()
         formulas: list[dict[str, Any]] = []
         for page_num in page_nums:
+            if QThread.currentThread().isInterruptionRequested():
+                break
             page = doc[page_num]
             pix = page.get_pixmap(dpi=self._dpi)
             # 使用内存字节流，避免磁盘 I/O

@@ -87,7 +87,10 @@ class WebViewPool:
     维护 1 个预加载模板的 WebView 热备实例。
     acquire() 即时返回已就绪的 WebView，避免冷启动延迟。
     release() 回收 WebView 作为下一轮热备。
-    将同时活跃的 Chromium 进程限制在 2 个以内。
+
+    关键设计：QWebChannel 永久绑定到 WebView 实例（创建时绑定），
+    不复用 setWebChannel，避免 Chromium IPC 崩溃。
+    只通过 registerObject/deregisterObject 动态切换 bridge。
     """
 
     _standby: QWebEngineView | None = None
@@ -101,43 +104,64 @@ class WebViewPool:
         return QUrl.fromLocalFile(template_path)
 
     @classmethod
-    def prewarm(cls) -> None:
-        """后台预热：创建 WebView 实例（不加载 URL，由调用方负责）。"""
-        if cls._standby is not None:
-            return
+    def _create_view(cls) -> QWebEngineView:
+        """创建 WebView 并永久绑定一个 QWebChannel。"""
         view = QWebEngineView()
         view.setMinimumHeight(60)
         view.page().setBackgroundColor(Qt.GlobalColor.transparent)
         view.setObjectName("result_area")
-        cls._standby = view
+        # 永久 channel —— 后续只 swap bridge，不重新 setWebChannel
+        channel = QWebChannel()
+        view.page().setWebChannel(channel)
+        view._permanent_channel = channel
+        view._current_bridge = None
+        return view
+
+    @classmethod
+    def prewarm(cls) -> None:
+        if cls._standby is not None:
+            return
+        cls._standby = cls._create_view()
 
     @classmethod
     def acquire(cls) -> QWebEngineView:
-        """获取一个 WebView：优先从热备取，否则新建。
-
-        不在此处 setUrl —— 由调用方负责加载模板。
-        避免与调用方的 setUrl 产生竞态导致 Chromium 崩溃。
-        """
         if cls._standby is not None:
             view = cls._standby
             cls._standby = None
         else:
-            view = QWebEngineView()
-            view.setMinimumHeight(60)
-            view.page().setBackgroundColor(Qt.GlobalColor.transparent)
-            view.setObjectName("result_area")
+            view = cls._create_view()
         cls._in_use += 1
         QTimer.singleShot(50, cls.prewarm)
         return view
 
     @classmethod
     def release(cls, view: QWebEngineView) -> None:
-        """回收 WebView 到热备池，超过限额则延迟销毁。"""
         cls._in_use = max(0, cls._in_use - 1)
         if cls._standby is None and cls._in_use < 2:
+            # 回收前注销旧 bridge
+            if hasattr(view, '_current_bridge') and view._current_bridge:
+                try:
+                    view._permanent_channel.deregisterObject(view._current_bridge)
+                except Exception:
+                    pass
+                view._current_bridge = None
             cls._standby = view
         else:
             view.deleteLater()
+
+    @classmethod
+    def swap_bridge(cls, view: QWebEngineView, new_bridge: QObject) -> None:
+        """在永久 channel 上切换 bridge 对象（不重新 setWebChannel）。"""
+        if not hasattr(view, '_permanent_channel'):
+            return
+        old = getattr(view, '_current_bridge', None)
+        if old is not None:
+            try:
+                view._permanent_channel.deregisterObject(old)
+            except Exception:
+                pass
+        view._permanent_channel.registerObject("bridge", new_bridge)
+        view._current_bridge = new_bridge
 
 
 class SplitWidget(QFrame):
@@ -375,12 +399,10 @@ class SplitWidget(QFrame):
         self._pending_js: str | None = None
         self._pending_theme: str | None = None
 
-        # QWebChannel — JS 内容高度变化实时推送 → Python
+        # QWebChannel — 使用 Pool 的永久 channel，只 swap bridge 对象
         self._height_bridge = _HeightBridge(self)
         self._height_bridge.height_changed.connect(self._adjust_height)
-        self._web_channel = QWebChannel(self)
-        self._web_channel.registerObject("bridge", self._height_bridge)
-        self._result_view.page().setWebChannel(self._web_channel)
+        WebViewPool.swap_bridge(self._result_view, self._height_bridge)
 
         self._result_view.loadFinished.connect(self._on_page_loaded)
         template_path = os.path.abspath(
@@ -515,12 +537,11 @@ class SplitWidget(QFrame):
         pixmap = self._result_view.grab()
         if not pixmap.isNull():
             self._frozen_label.setPixmap(pixmap)
-        # 断开信号、清除 QWebChannel（避免池中 WebView 残留旧 channel）
+        # 断开信号（永久 channel 保留，Pool.release 会注销 bridge）
         try:
             self._result_view.loadFinished.disconnect(self._on_page_loaded)
         except Exception:
             pass
-        self._result_view.page().setWebChannel(None)
         self._body_layout.removeWidget(self._result_view)
         self._result_view.setParent(None)
         WebViewPool.release(self._result_view)
@@ -539,10 +560,8 @@ class SplitWidget(QFrame):
         if idx >= 0:
             self._body_layout.insertWidget(idx, view, 1)
 
-        # 重新注册 QWebChannel（池中 WebView 之前可能连接过其他 bridge）
-        self._web_channel = QWebChannel(self)
-        self._web_channel.registerObject("bridge", self._height_bridge)
-        view.page().setWebChannel(self._web_channel)
+        # 切换 bridge 到当前 SplitWidget（永久 channel 不重新绑定）
+        WebViewPool.swap_bridge(view, self._height_bridge)
 
         view.loadFinished.connect(self._on_page_loaded)
         # 页面加载完成后恢复缓存内容
