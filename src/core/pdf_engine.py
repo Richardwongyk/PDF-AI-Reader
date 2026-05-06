@@ -599,23 +599,33 @@ class DocumentEngine(BaseService):
 
         # 清理上一个线程
         if self._thread is not None:
+            self.logger.info("清理上一解析线程...")
             if self._thread.isRunning():
                 self._thread.requestInterruption()
                 self._thread.quit()
                 if not self._thread.wait(3000):
                     self.logger.warning("上一解析线程未能在 3s 内退出，强制终止")
                     self._thread.terminate()
+            # 断开旧线程的所有信号连接
+            try:
+                self._thread.progress.disconnect()
+                self._thread.finished_parsing.disconnect()
+                self._thread.parse_error.disconnect()
+                self._thread.formula_blocks_updated.disconnect()
+            except Exception:
+                pass
             self._thread.deleteLater()
             self._thread = None
+            self.logger.info("上一解析线程已清理")
 
-        # 直接继承 QThread，信号直连最可靠
+        self.logger.info("创建新解析线程: %s", filepath)
         self._thread = _ParseThread(filepath, self._chunker)
         self._thread.progress.connect(self.parse_progress.emit)
         self._thread.finished_parsing.connect(self._on_parse_finished)
         self._thread.parse_error.connect(self.parse_error.emit)
         self._thread.formula_blocks_updated.connect(self.formula_blocks_updated.emit)
         self._thread.start()
-        self.logger.info("解析线程已启动")
+        self.logger.info("新解析线程已启动")
 
     def _on_parse_finished(self, result: ParseResult) -> None:
         """解析完成的内部处理。

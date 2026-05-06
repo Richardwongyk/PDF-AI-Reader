@@ -531,9 +531,20 @@ class PdfViewer(QScrollArea):
     # ── 清理 ──
 
     def clear(self) -> None:
-        for s in self._splits.values():
-            s.close(); s.deleteLater()
+        _logger.info("PdfViewer.clear: 开始清理 (%d splits, %d pages)...",
+                     len(self._splits), len(self._page_containers))
+        # 1. 强制关闭所有裂缝，断开 WebView 信号防止析构时回调
+        for block_id, s in list(self._splits.items()):
+            try:
+                if hasattr(s, '_result_view') and s._result_view is not None:
+                    s._result_view.loadFinished.disconnect()
+                    s._result_view.page().setWebChannel(None)
+            except Exception:
+                pass
+            s.close()
+            s.deleteLater()
         self._splits.clear()
+        # 2. 清空数据结构
         self._page_segments.clear()
         self._block_to_page.clear()
         self._overlays.clear()
@@ -544,11 +555,13 @@ class PdfViewer(QScrollArea):
         self._page_containers.clear()
         self._rendered_pages.clear()
         self._split_pages.clear()
+        # 3. 清理布局中的所有 widget
         while self._layout.count():
             item = self._layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
+        _logger.info("PdfViewer.clear: 完成")
 
     # ── Overlay 连接 ──
 
