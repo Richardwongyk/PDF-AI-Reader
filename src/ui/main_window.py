@@ -368,6 +368,9 @@ class MainWindow(QMainWindow):
         elapsed = time.time() - start
         self.logger.info("文档加载完成，耗时 %.2fs", elapsed)
 
+        # PyMuPDF4LLM 异步增强（不阻塞解析线程，避免 fitz 并发 segfault）
+        QTimer.singleShot(2000, lambda: self._run_pymupdf4llm_enhance(result))
+
     def _on_parse_progress(self, current: int, total: int) -> None:
         """解析进度更新。"""
         self._status_progress.setMaximum(total)
@@ -664,6 +667,23 @@ class MainWindow(QMainWindow):
             "本地模型: Qwen3.5:4b\n"
             "嵌入模型: BGE-M3",
         )
+
+    def _run_pymupdf4llm_enhance(self, result) -> None:
+        """异步运行 PyMuPDF4LLM 增强解析（不阻塞 UI/解析线程）。"""
+        try:
+            from src.core.pdf_engine import PyMuPDF4LLMChunker
+            import fitz
+            enhancer = PyMuPDF4LLMChunker()
+            if not enhancer.is_available:
+                return
+            doc = fitz.open(result.filepath)
+            enhancer.enhance_blocks(doc, result.blocks)
+            doc.close()
+            count = sum(1 for b in result.blocks
+                        if b.metadata.get("enhanced_by") == "pymupdf4llm")
+            self.logger.info("PyMuPDF4LLM 异步增强完成: %d 个块", count)
+        except Exception as e:
+            self.logger.warning("PyMuPDF4LLM 异步增强失败: %s", e)
 
     def _check_first_launch(self) -> None:
         """首次启动检查：验证本地模型状态。"""

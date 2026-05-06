@@ -894,7 +894,13 @@ class _ParseThread(QThread):
         self._chunker = chunker
 
     def run(self) -> None:
-        """四阶段渐进式 PDF 解析。"""
+        """三阶段渐进式 PDF 解析。
+
+        阶段一（极速呈现）：启发式分块 → finished_parsing
+        阶段二（公式检测）：Pix2Text MFD → formula_blocks_updated
+        阶段三（公式识别）：MathOCR MFR 公式→LaTeX → formula_blocks_updated
+        PyMuPDF4LLM 增强改为 main_window 异步运行，不阻塞解析线程。
+        """
         import logging as _log
         _log.getLogger("ParseThread").info("run: START %s", self._filepath)
         try:
@@ -941,28 +947,13 @@ class _ParseThread(QThread):
             import logging as _log2
             logger = _log2.getLogger("ParseThread")
 
-            # ── 阶段二：PyMuPDF4LLM 增强解析 ──
-            logger.info("run: 阶段二 PyMuPDF4LLM...")
-            if not self.isInterruptionRequested():
-                try:
-                    enhanced = PyMuPDF4LLMChunker()
-                    if enhanced.is_available:
-                        enhanced.enhance_blocks(doc, blocks)
-                        logger.info(
-                            "PyMuPDF4LLM 增强完成: %d 个块",
-                            sum(1 for b in blocks
-                                if b.metadata.get("enhanced_by") == "pymupdf4llm"),
-                        )
-                except Exception as e:
-                    logger.warning("PyMuPDF4LLM 增强失败: %s", e)
-
-            # ── 阶段三：Pix2Text MFD 公式检测 ──
+            # ── 阶段二：Pix2Text MFD 公式检测（后台，不阻塞阅读） ──
             if self.isInterruptionRequested():
                 logger.info("run: 中断, 退出")
                 doc.close()
                 return
 
-            logger.info("run: 阶段三 MFD...")
+            logger.info("run: 阶段二 MFD...")
             from src.core.formula_detector import Pix2TextMFDDetector
             try:
                 refined = Pix2TextMFDDetector(dpi=200).apply_to_blocks(blocks, doc)
@@ -984,9 +975,9 @@ class _ParseThread(QThread):
             except Exception as e:
                 logger.warning("MFD 精扫失败（不影响阅读）: %s", e)
 
-            # ── 阶段四：MFR 公式识别（CPU 批量推理） ──
+            # ── 阶段三：MFR 公式识别（CPU 批量推理） ──
             if not self.isInterruptionRequested():
-                logger.info("run: 阶段四 MFR (formulas=%d)...",
+                logger.info("run: 阶段三 MFR (formulas=%d)...",
                             sum(1 for b in refined if b.block_type.value == "formula"))
                 try:
                     from src.core.math_ocr import MathOCR
