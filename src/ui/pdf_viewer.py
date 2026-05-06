@@ -533,15 +533,23 @@ class PdfViewer(QScrollArea):
     def clear(self) -> None:
         _logger.info("PdfViewer.clear: 开始清理 (%d splits, %d pages)...",
                      len(self._splits), len(self._page_containers))
-        # 1. 强制关闭所有裂缝，断开 WebView 信号防止析构时回调
+        # 1. 彻底断开所有裂缝的信号和 WebView，再销毁
         for block_id, s in list(self._splits.items()):
             try:
+                s.question_submitted.disconnect()
+                s.translation_requested.disconnect()
+                s.close_requested.disconnect()
+            except Exception:
+                pass
+            try:
+                if hasattr(s, '_height_bridge'):
+                    s._height_bridge.height_changed.disconnect()
                 if hasattr(s, '_result_view') and s._result_view is not None:
                     s._result_view.loadFinished.disconnect()
                     s._result_view.page().setWebChannel(None)
             except Exception:
                 pass
-            s.close()
+            s.setParent(None)
             s.deleteLater()
         self._splits.clear()
         # 2. 清空数据结构
@@ -560,6 +568,7 @@ class PdfViewer(QScrollArea):
             item = self._layout.takeAt(0)
             w = item.widget()
             if w:
+                w.setParent(None)
                 w.deleteLater()
         _logger.info("PdfViewer.clear: 完成")
 

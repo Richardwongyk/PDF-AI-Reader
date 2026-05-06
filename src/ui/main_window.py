@@ -296,6 +296,9 @@ class MainWindow(QMainWindow):
         """
         self._status_page_label.setText("正在解析 PDF...")
         self._status_progress.setVisible(True)
+        # 先清理旧的 UI 状态，避免新旧 WebView 并发导致 Chromium 崩溃
+        self._pdf_viewer.clear()
+        QApplication.processEvents()
         self._doc_engine.open_document(filepath)
 
     def _on_close_document(self) -> None:
