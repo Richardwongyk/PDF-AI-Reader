@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -14,6 +15,8 @@ import yaml
 from PySide6.QtCore import QObject, Signal
 
 from src.core.models import AppConfig, ModelConfig, RoutingConfig, UIConfig
+
+_logger = logging.getLogger(__name__)
 
 
 class ConfigManager(QObject):
@@ -46,15 +49,17 @@ class ConfigManager(QObject):
         self._load_env()
 
     def load(self) -> AppConfig:
-        """从 YAML 文件加载配置。
+        """从 YAML 文件加载配置，使用 Pydantic 进行 Schema 严格校验。
 
         若文件不存在，创建默认配置并写入文件。
-        若文件存在但格式有误，使用默认配置覆盖。
+        若文件存在但格式有误或校验失败，自动备份损坏的配置文件，
+        并生成全新默认配置，确保软件永远不会因配置损坏而无法启动。
 
         Returns:
             AppConfig 实例。
         """
         if not os.path.exists(self._path):
+            _logger.info("配置文件不存在，创建默认配置: %s", self._path)
             config = AppConfig()
             self._save_to_file(config)
             return config
@@ -62,31 +67,32 @@ class ConfigManager(QObject):
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 raw: dict = yaml.safe_load(f) or {}
-        except (yaml.YAMLError, OSError):
+        except (yaml.YAMLError, OSError) as e:
+            _logger.warning("配置文件解析失败，使用默认配置: %s", e)
             raw = {}
 
-        # 深度合并 raw dict 到默认 AppConfig
-        config = AppConfig()
+        # 使用 Pydantic model_validate 进行 Schema 严格校验
+        try:
+            from pydantic import ValidationError
+            config = AppConfig.model_validate(raw)
+            _logger.info("配置文件校验通过: %s", self._path)
+            return config
+        except ValidationError as e:
+            _logger.error("配置文件 Schema 校验失败，备份并重建默认配置: %s", e)
+            self._backup_corrupt_config()
+            config = AppConfig()
+            self._save_to_file(config)
+            return config
 
-        if "model" in raw and isinstance(raw["model"], dict):
-            model_data = config.model.model_dump()
-            model_data.update(raw["model"])
-            config.model = ModelConfig(**model_data)
-
-        if "routing" in raw and isinstance(raw["routing"], dict):
-            routing_data = config.routing.model_dump()
-            routing_data.update(raw["routing"])
-            config.routing = RoutingConfig(**routing_data)
-
-        if "ui" in raw and isinstance(raw["ui"], dict):
-            ui_data = config.ui.model_dump()
-            ui_data.update(raw["ui"])
-            config.ui = UIConfig(**ui_data)
-
-        if "api_keys" in raw and isinstance(raw["api_keys"], dict):
-            config.api_keys.update(raw["api_keys"])
-
-        return config
+    def _backup_corrupt_config(self) -> None:
+        """备份损坏的配置文件，避免数据丢失。"""
+        import shutil, time
+        backup_path = self._path + f".corrupt.{int(time.time())}"
+        try:
+            shutil.copy2(self._path, backup_path)
+            _logger.warning("已备份损坏的配置到: %s", backup_path)
+        except OSError:
+            pass
 
     def save(self) -> None:
         """将当前配置写回 YAML 文件。"""
@@ -146,6 +152,7 @@ class ConfigManager(QObject):
         )
 
         self.save()
+        _logger.info("配置已更新并保存")
         self.config_changed.emit(self._config.model_copy(deep=True))
 
     def get_api_key(self, provider: str) -> str | None:
@@ -178,5 +185,6 @@ class ConfigManager(QObject):
             env_path = Path.cwd() / ".env"
             if env_path.exists():
                 load_dotenv(env_path, override=False)
+                _logger.info(".env 文件已加载")
         except ImportError:
             pass  # python-dotenv 未安装时静默跳过

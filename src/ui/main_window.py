@@ -42,7 +42,7 @@ from src.core.navigator import Navigator
 from src.core.service_registry import CoreServiceRegistry
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget
-# 主题：直接用系统原生渲染，不自定义
+from src.ui.theme import apply_theme
 
 
 class MainWindow(QMainWindow):
@@ -218,8 +218,12 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._right_dock)
 
     def _apply_theme(self) -> None:
-        """使用系统原生主题，不自定义任何颜色。"""
-        self.setStyleSheet("")  # 清空所有样式
+        """应用 QPalette 主题并广播到所有裂缝。"""
+        theme = self._config.ui.theme
+        apply_theme(theme)
+        self.setStyleSheet("")
+        if self._pdf_viewer:
+            self._pdf_viewer.apply_theme_to_splits(theme)
 
     # =========================================================================
     # 信号连接
@@ -698,6 +702,15 @@ class MainWindow(QMainWindow):
         return logging.getLogger("MainWindow")
 
     def closeEvent(self, event) -> None:
-        """窗口关闭事件：清理资源。"""
+        """窗口关闭事件：按顺序清理资源。
+
+        清理顺序：文档引擎 → 知识库引擎 → 术语表 → 配置。
+        确保 ChromaDB WAL 文件正确刷入磁盘。
+        """
+        # 1. 关闭文档（停止解析线程，关闭 PDF 文件）
         self._doc_engine.close_document()
+        # 2. 关闭知识库引擎（等待构建任务完成，关闭数据库连接）
+        self._knowledge_engine.close()
+        # 3. 保存术语表变更
+        self._glossary_manager.save()
         event.accept()

@@ -7,7 +7,10 @@ UI 层通过此注册中心获取所有 Core 服务实例，
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 class CoreServiceRegistry:
@@ -34,6 +37,7 @@ class CoreServiceRegistry:
             name: 服务名称（约定使用 snake_case，如 "document_engine"）。
             service: 服务实例。
         """
+        _logger.debug("注册服务: %s → %s", name, type(service).__name__)
         self._services[name] = service
 
     def get(self, name: str) -> Any:
@@ -49,6 +53,7 @@ class CoreServiceRegistry:
             KeyError: 服务未注册时。
         """
         if name not in self._services:
+            _logger.error("服务未注册: %s (可用: %s)", name, list(self._services.keys()))
             raise KeyError(f"服务 '{name}' 未注册。可用服务: {list(self._services.keys())}")
         return self._services[name]
 
@@ -58,6 +63,8 @@ class CoreServiceRegistry:
         Args:
             name: 服务名称。
         """
+        if name in self._services:
+            _logger.debug("注销服务: %s", name)
         self._services.pop(name, None)
 
     @property

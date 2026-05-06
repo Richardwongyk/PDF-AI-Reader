@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 from pathlib import Path
 
 from src.core.models import GlossaryEntry
+
+_logger = logging.getLogger(__name__)
 
 
 class GlossaryRepo:
@@ -75,7 +78,8 @@ class GlossaryRepo:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 data: dict = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            _logger.warning("术语表文件读取失败: %s — %s", filepath, e)
             return []
 
         # 兼容两种 JSON 结构：
@@ -140,6 +144,7 @@ class GlossaryRepo:
         elif ext == ".csv":
             return self._import_csv(filepath)
         else:
+            _logger.error("不支持的术语表文件格式: %s", ext)
             raise ValueError(f"不支持的术语表文件格式: {ext}。仅支持 JSON 和 CSV。")
 
     def _import_json(self, filepath: str) -> list[GlossaryEntry]:

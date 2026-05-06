@@ -7,8 +7,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from src.core.models import GlossaryEntry
 from src.data.glossary_repo import GlossaryRepo
+
+_logger = logging.getLogger(__name__)
 
 
 class GlossaryManager:
@@ -37,6 +41,7 @@ class GlossaryManager:
     def _load_builtin_glossaries(self) -> None:
         """加载内置学科术语包到内存。"""
         self._terms = self._repo.load_all()
+        _logger.info("术语表加载完成: %d 个领域", len(self._terms))
 
     def reload(self) -> None:
         """重新加载所有术语表（用于文件变更后刷新）。"""
@@ -59,10 +64,15 @@ class GlossaryManager:
         Returns:
             成功导入的术语条数。
         """
-        entries = self._repo.import_from_file(filepath)
+        try:
+            entries = self._repo.import_from_file(filepath)
+        except ValueError as e:
+            _logger.error("术语表导入失败: %s", e)
+            raise
         if "imported" not in self._terms:
             self._terms["imported"] = []
         self._terms["imported"].extend(entries)
+        _logger.info("术语表导入成功: %s (%d 条)", filepath, len(entries))
         return len(entries)
 
     def add_term(
@@ -207,3 +217,4 @@ class GlossaryManager:
         """将所有术语表保存到 JSON 文件。"""
         for domain, entries in self._terms.items():
             self._repo.save_domain(domain, entries)
+        _logger.info("术语表已保存: %d 个领域", len(self._terms))

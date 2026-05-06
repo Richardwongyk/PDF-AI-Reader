@@ -7,7 +7,7 @@ KnowledgeEngine: 知识库构建与语义检索的协调者
 
 from __future__ import annotations
 
-from PySide6.QtCore import QMutex, QMutexLocker, QObject, QThreadPool, Signal
+from PySide6.QtCore import QObject, QReadLocker, QReadWriteLock, QThreadPool, QWriteLocker, Signal
 
 from src.core.base_service import BaseService
 from src.core.models import (
@@ -146,7 +146,7 @@ class KnowledgeEngine(BaseService):
         self._repo = chroma_repo
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(2)  # 最多 2 个并行嵌入线程
-        self._db_lock = QMutex()  # 防止 ChromaDB SQLite 并发写入锁死
+        self._db_lock = QReadWriteLock()  # 防止 ChromaDB SQLite 并发读写锁死
 
     @property
     def embedding_service(self) -> EmbeddingService:
@@ -205,9 +205,10 @@ class KnowledgeEngine(BaseService):
             按相似度降序的结果列表。
         """
         query_vector = self._embed.embed_single(query)
-        return self._repo.query_relevant(
-            doc_hash, query_vector, top_k=top_k, exclude_ids=exclude_ids
-        )
+        with QReadLocker(self._db_lock):
+            return self._repo.query_relevant(
+                doc_hash, query_vector, top_k=top_k, exclude_ids=exclude_ids
+            )
 
     def delete_knowledge_base(self, doc_hash: str) -> None:
         """删除指定文档的知识库。
@@ -244,6 +245,15 @@ class KnowledgeEngine(BaseService):
             is_ready=exists,
         )
 
+    def close(self) -> None:
+        """关闭知识库引擎，释放线程池和数据库连接。"""
+        # 1. 等待所有构建任务完成
+        if self._pool.activeThreadCount() > 0:
+            self._pool.waitForDone(5000)
+        # 2. 关闭 ChromaDB 连接
+        self._repo.close()
+        self.logger.info("知识库引擎已关闭")
+
 
 # =============================================================================
 # _BuildWorker —— 知识库构建 Worker
@@ -261,7 +271,7 @@ class _BuildWorker(QRunnable):
         chroma_repo: ChromaRepo,
         blocks: list[DocumentBlock],
         doc_hash: str,
-        db_lock: QMutex | None = None,
+        db_lock: QReadWriteLock | None = None,
     ) -> None:
         """初始化构建 Worker。
 
@@ -340,7 +350,7 @@ class _BuildWorker(QRunnable):
             for batch_start in range(0, total, _BATCH_SIZE):
                 batch_end = min(batch_start + _BATCH_SIZE, total)
                 if self._db_lock:
-                    with QMutexLocker(self._db_lock):
+                    with QWriteLocker(self._db_lock):
                         self._repo.upsert_blocks(
                             self._doc_hash,
                             block_ids=block_ids[batch_start:batch_end],

@@ -75,19 +75,18 @@ class Pix2TextMFDDetector(FormulaDetector):
         Returns:
             公式列表。
         """
-        import logging, tempfile, os
+        import io, logging
         logger = logging.getLogger("Pix2TextMFD")
         mfd = self._get_mfd()
         formulas: list[dict[str, Any]] = []
-        tmpdir = tempfile.gettempdir()
         for page_num in page_nums:
             page = doc[page_num]
             pix = page.get_pixmap(dpi=self._dpi)
-            img_path = os.path.join(tmpdir, f"_mfd_p{page_num}.png")
-            pix.save(img_path)
+            # 使用内存字节流，避免磁盘 I/O
+            img_bytes = pix.tobytes("png")
             try:
                 from PIL import Image
-                img = Image.open(img_path)
+                img = Image.open(io.BytesIO(img_bytes))
                 iw, ih = img.size
                 results = mfd.detect(img)
                 page_w = page.rect.width
@@ -114,10 +113,6 @@ class Pix2TextMFDDetector(FormulaDetector):
                 logger.info("Page %d/%d: %d formulas", page_num + 1, doc.page_count, len(results))
             except Exception as e:
                 logger.warning("Page %d failed: %s", page_num, e)
-            try:
-                os.unlink(img_path)
-            except OSError:
-                pass
         return formulas
 
     def _page_has_formulas(self, blocks: list[DocumentBlock], page_num: int) -> bool:

@@ -180,6 +180,9 @@ class DocumentChunker:
         """
         all_blocks: list[DocumentBlock] = []
         for page_num in range(doc.page_count):
+            # 响应线程中断请求（用户关闭文档时及时退出）
+            if QThread.currentThread().isInterruptionRequested():
+                break
             page_blocks = self._extract_page_blocks(doc[page_num], page_num)
             if not page_blocks:
                 continue
@@ -296,8 +299,7 @@ class DocumentChunker:
             indices[min_col] += 1
         return result
 
-    @staticmethod
-    def _is_formula_from_spans(spans: list) -> bool:
+    def _is_formula_from_spans(self, spans: list) -> bool:
         """基于 span 级别检测数学公式。"""
         full_text = "".join(s.get("text", "") for s in spans)
         fonts = [s.get("font", "") for s in spans]
@@ -315,21 +317,13 @@ class DocumentChunker:
             for kw in ("CM", "Math", "Symbol", "Cambria", "STIX", "XITS", "TeX"):
                 if kw.lower() in f.lower() and len(full_text) > 10:
                     return True
-        # LaTeX 命令（至少匹配2个才认为是公式，减少误判）
-        latex_count = sum(1 for pat in (
-            r"\frac", r"\sum", r"\int", r"\prod", r"\sqrt",
-            r"\alpha", r"\beta", r"\gamma", r"\delta", r"\theta",
-            r"\lambda", r"\mu", r"\pi", r"\sigma", r"\omega",
-            r"\mathbf", r"\mathcal", r"\mathbb",
-            r"\begin", r"\end", r"\left", r"\right",
-            r"\infty", r"\partial", r"\nabla",
-        ) if pat in full_text)
+        # LaTeX 命令（使用预编译正则，至少匹配2个才认为是公式，减少误判）
+        latex_count = len(self._LATEX_COMMAND_PATTERN.findall(full_text))
         if latex_count >= 2:
             return True
         # 数学 Unicode 占比很高（排除 ∗ ◦ • 等常见标点）
-        MATH_RANGES = [(0x2202, 0x2233), (0x2260, 0x22FF), (0x27C0, 0x27EF),
-                       (0x2980, 0x29FF), (0x2A00, 0x2AFF)]
-        math_count = sum(1 for c in full_text if any(lo <= ord(c) <= hi for lo, hi in MATH_RANGES))
+        math_count = sum(1 for c in full_text
+                         if any(lo <= ord(c) <= hi for lo, hi in self._MATH_UNICODE_RANGES))
         total = len(full_text)
         if total > 0 and math_count / total > 0.15 and total < 300:
             return True
@@ -496,6 +490,8 @@ class DocumentEngine(BaseService):
         Args:
             filepath: PDF 文件的绝对路径。
         """
+        self.logger.info("打开文档: %s", filepath)
+
         # 清理上一个线程
         if self._thread is not None:
             if self._thread.isRunning():
@@ -514,6 +510,7 @@ class DocumentEngine(BaseService):
         self._thread.parse_error.connect(self.parse_error.emit)
         self._thread.formula_blocks_updated.connect(self.formula_blocks_updated.emit)
         self._thread.start()
+        self.logger.info("解析线程已启动")
 
     def _on_parse_finished(self, result: ParseResult) -> None:
         """解析完成的内部处理。
@@ -521,20 +518,40 @@ class DocumentEngine(BaseService):
         Args:
             result: ParseResult 对象。
         """
+        self.logger.info("解析完成: %s (%d 页, %d 块)", result.title or result.filepath, result.page_count, len(result.blocks))
+
         # 重新打开文档（供渲染使用）
         try:
             self._doc = fitz.open(result.filepath)
-        except Exception:
+        except Exception as e:
+            self.logger.warning("重新打开文档失败: %s", e)
             self._doc = None
         self._pixmap_cache.clear()
         self.parse_finished.emit(result)
 
     def close_document(self) -> None:
-        """关闭当前文档，释放资源。"""
+        """关闭当前文档，释放所有相关资源。"""
+        self.logger.info("关闭文档...")
+
+        # 1. 停止解析线程
+        if self._thread is not None:
+            if self._thread.isRunning():
+                self._thread.requestInterruption()
+                self._thread.quit()
+                if not self._thread.wait(3000):
+                    self.logger.warning("解析线程未能在 3s 内退出，强制终止")
+                    self._thread.terminate()
+            self._thread.deleteLater()
+            self._thread = None
+
+        # 2. 关闭 PDF 文档
         if self._doc:
             self._doc.close()
             self._doc = None
+
+        # 3. 清空渲染缓存
         self._pixmap_cache.clear()
+        self.logger.info("文档已关闭，资源已释放")
 
     def get_page_pixmap(
         self, page_num: int, dpi: int = 150

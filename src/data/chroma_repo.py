@@ -233,3 +233,20 @@ class ChromaRepo:
             for chunk in iter(lambda: f.read(8192), b""):
                 sha.update(chunk)
         return sha.hexdigest()[:16]
+
+    def close(self) -> None:
+        """关闭 ChromaDB 客户端连接，确保 WAL 文件正确刷入磁盘。"""
+        if self._client is None:
+            return
+        try:
+            # 尝试停止 ChromaDB 内部服务器以释放 SQLite WAL 锁
+            import logging
+            _logger = logging.getLogger(__name__)
+            _server = getattr(self._client, '_server', None)
+            if _server is not None and hasattr(_server, 'stop'):
+                _server.stop()
+                _logger.debug("ChromaDB 服务已停止")
+        except Exception:
+            pass
+        finally:
+            self._client = None

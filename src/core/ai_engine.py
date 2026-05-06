@@ -359,18 +359,34 @@ class HybridModelRouter:
         if strategy == "local_only":
             if self._local.check_availability():
                 return self._local
+            import logging
+            logging.getLogger("HybridModelRouter").error(
+                "本地模型不可用 (策略=local_only): task=%s", task.value
+            )
             raise RuntimeError("本地模型不可用。请启动 Ollama 服务后再试。")
 
         if strategy == "cloud_only":
             if self._cloud and self._cloud.check_availability():
                 return self._cloud
+            import logging
+            logging.getLogger("HybridModelRouter").error(
+                "云端模型不可用 (策略=cloud_only): task=%s", task.value
+            )
             raise RuntimeError("云端模型不可用。请检查 API Key 配置和网络连接。")
 
         # local_first（默认）：优先本地，回退云端
         if self._local.check_availability():
             return self._local
         if self._cloud and self._cloud.check_availability():
+            import logging
+            logging.getLogger("HybridModelRouter").warning(
+                "本地模型不可用，回退到云端: task=%s", task.value
+            )
             return self._cloud
+        import logging
+        logging.getLogger("HybridModelRouter").error(
+            "本地和云端模型均不可用: task=%s", task.value
+        )
         raise RuntimeError("本地和云端模型均不可用。")
 
     @property
@@ -833,7 +849,9 @@ class AIEngine(BaseService):
         thread.error_signal.connect(
             lambda e, bid=block.id: self.translation_error.emit(e, bid)
         )
-        thread.finished.connect(lambda t=thread: self._active_threads.remove(t))
+        thread.finished.connect(
+            lambda t=thread: self._active_threads.remove(t) if t in self._active_threads else None
+        )
         self._active_threads.append(thread)
         thread.start()
 
@@ -859,7 +877,9 @@ class AIEngine(BaseService):
         thread.error_signal.connect(
             lambda e, sid=split_id: self.answer_error.emit(e, sid)
         )
-        thread.finished.connect(lambda t=thread: self._active_threads.remove(t))
+        thread.finished.connect(
+            lambda t=thread: self._active_threads.remove(t) if t in self._active_threads else None
+        )
         self._active_threads.append(thread)
         thread.start()
 

@@ -279,3 +279,335 @@ class KnowledgeEngine(BaseService):
 1. 全面实施 Lazy Import，将启动时间压缩至 1 秒内。
 2. 实现 `QWebEngineView` 预热池与动态挂载机制，解决多裂缝内存爆炸问题。
 3. 修复并发锁和悬空指针 Bug，确保软件 7x24 小时稳定运行。
+
+
+-- 这个是另一个大模型的回复，请用批判性的思路好好进行分析、斟酌，给出回应，然后进行更为深入的规划分析、回复。有些知识，比如PEP750可以上网搜索一下！！！
+
+
+-- 这是一个非常专业且切中要害的探讨。你提供的“另一个大模型的回复”以及你自己的“批判性分析”都非常有价值。
+
+首先，**我完全赞同你对“另一个大模型”的批判性分析**。那个模型虽然指出了痛点，但给出的药方存在**“过度设计”（如 QGraphicsScene）**和**“脱离实际”（如全量 Marker 解析导致卡死）**的问题。
+
+不过，在开始深度规划之前，我必须先**纠正你关于 PEP 750 的一个事实**，然后我们将基于 2026 年最新的 Python 3.14 和 PySide6 生态，为你提供一套**真正可落地的生产级重构方案**。
+
+---
+
+### 零、关于 PEP 750 的事实核查 (Web Search 结果)
+
+你提到：“*PEP 750 在 Python 3.14 中仍是 Draft 状态，并未落地。这个建议纯属幻觉。*”
+
+**这是不准确的。** 根据我刚刚检索的 Python 3.14 官方发布文档 [1][3][4]：
+*   **PEP 750 (Template String Literals, t-strings)** 已经被**正式接受 (Final)**，并且是 Python 3.14 的**核心主打新特性之一**。
+*   它允许使用 `t"Hello {name}"` 语法，返回一个 `Template` 对象，允许在字符串拼接前拦截和处理变量。
+*   **在本项目中的应用**：这对于你的 `TranslationService` 组装 Prompt、以及防止 Markdown/HTML 渲染时的 XSS 注入或格式破坏**极其有用**。你可以安全地使用 t-strings 来构建安全的 Prompt 模板。
+
+---
+
+### 一、对“另一个大模型”方案的批判与修正
+
+| 痛点 | 另一个大模型的方案 | 你的批判 | 我的最终系统级判定与方案 |
+| :--- | :--- | :--- | :--- |
+| **PDF 模糊** | 彻底抛弃 PyMuPDF，全换 QtPdf | 赞同：PyMuPDF 必须保留做数据提取。 | **双轨制架构**：UI 渲染层使用 `PySide6.QtPdf.QPdfDocument` + `QPdfView`（矢量高清，Chrome同款引擎）；数据层使用 `PyMuPDF` 在后台静默提取 BBox、TOC 和文本。两者通过页码和归一化坐标 (0.0~1.0) 完美对齐。 |
+| **UI 僵硬** | 重写为 `QGraphicsScene` | 赞同：杀鸡用牛刀，过度设计。 | **QPropertyAnimation 动态推挤**：保留 `QVBoxLayout`，对裂缝的 `maximumHeight` 应用 `QEasingCurve.OutCubic` 动画。利用 Qt 的 Layout 自动推挤下半页，实现 60fps 丝滑展开。 |
+| **解析拉胯** | 引入 Marker/Docling 全量后台转换 | 赞同：Marker 纯 CPU 推理极慢，全量转换违背“秒开”体验。 | **增量渐进式解析 + 轻量级免费库**：首选 `PyMuPDF4LLM`（极快）作为基线，`Docling` 作为按需增强。见下文详述。 |
+| **内存爆炸** | 单例 WebView 动态 `setParent` | 赞同：动态 reparent 极易导致 Chromium 渲染进程崩溃或白屏。 | **WebView 热备池 + 截图冻结**：维护 1 个隐藏的预热 WebView。裂缝展开时取用；折叠时，将 WebView 渲染结果**截图 (`QPixmap`)** 贴在 `QLabel` 上，然后回收 WebView。既省内存又保留视觉。 |
+
+---
+
+### 二、文档解析与公式识别：免费、高效的系统方法
+
+你提到 MinerU 需要 Token 太麻烦，且现在的公式识别效果一般。我们需要一个**免费、纯本地、CPU 友好**的系统方案。
+
+#### 1. 免费好用的 PDF 解析库选型 (2026 现状)
+
+*   **首选基线：`PyMuPDF4LLM` (免费，极快，CPU 友好)**
+    *   **优势**：PyMuPDF 官方推出的专为 LLM 设计的提取库。它直接输出 Markdown，能够较好地处理多栏排版，且速度极快（几乎是瞬间）。
+    *   **缺点**：对极其复杂的嵌套表格或手写体公式支持有限。
+*   **进阶增强：`Docling` (IBM 开源，免费，无 Token)**
+    *   **优势**：专为 RAG 设计，企业级稳定性。完美还原双栏、表格，输出结构化的 `DoclingDocument`。纯本地运行，支持 CPU。
+    *   **缺点**：比 PyMuPDF4LLM 稍重，CPU 下每页可能需要 1-2 秒。
+*   **放弃：`Marker`**
+    *   虽然公式提取完美，但严重依赖 GPU。在普通轻薄本 (CPU) 上一页要跑 10 秒以上，不适合桌面阅读器。
+
+#### 2. 增量渐进式解析架构 (Progressive Parsing)
+
+绝对不能“解析完才让用户看”，必须采用**渐进式架构**：
+
+1.  **T+0s (瞬时)**：`QtPdf` 瞬间渲染出高清 PDF 页面，用户立刻可以滚动阅读。
+2.  **T+1s (基线数据)**：后台使用 `PyMuPDF4LLM` 快速扫过全文，生成基础的 Markdown 文本和 BBox 映射。此时用户双击段落，已经可以进行基础翻译。
+3.  **T+Ns (按需精扫)**：当用户停留在某页，或者主动框选某个复杂公式时，后台触发 `Docling` 或轻量级视觉模型（如 `Pix2Text` 的轻量版）对该区域进行**局部精扫**，提取完美的 LaTeX。
+
+#### 3. 公式识别与渲染的系统方法
+
+*   **识别端 (OCR)**：
+    *   放弃手写正则 `$$...$$`。
+    *   使用 `PyMuPDF4LLM` 提取标准文本。
+    *   对于独立公式块，使用 `Pix2Text` 的纯公式检测模型（ONNX 格式，CPU 推理极快，完全免费本地）。检测到 BBox 后，将其标记为 `FORMULA` 块。
+*   **渲染端 (KaTeX 优化)**：
+    *   当前代码每次翻译都在 `QWebEngineView` 里全量重载 HTML，导致闪烁。
+    *   **系统方法**：在 HTML 模板中预加载 KaTeX。通过 JavaScript 暴露 `appendToken(text)` 接口。Python 端流式接收 LLM 的 token 时，直接调用 JS 接口增量更新 DOM，遇到 `$` 符号闭合时，局部触发 `katex.render()`。
+
+---
+
+### 三、核心痛点深度优化方案
+
+#### 1. 启动极慢的终极解法 (Sub-second Startup)
+
+**问题**：Python 导入 `litellm`, `chromadb`, `torch` 等重型库会锁死主线程 3-8 秒。
+**方案**：**极致懒加载 (Lazy Initialization)**。
+
+```python
+# src/main.py
+def main():
+    # 1. 仅导入 GUI 相关的轻量库
+    from PySide6.QtWidgets import QApplication
+    from src.ui.main_window import MainWindow
+  
+    app = QApplication(sys.argv)
+  
+    # 2. 瞬间显示主窗口（此时只有 UI 壳子和 QtPdf 渲染器）
+    window = MainWindow()
+    window.show()
+  
+    # 3. 在主事件循环启动后，利用 QTimer 在后台线程加载重型 AI 服务
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(100, window.async_init_heavy_services)
+  
+    return app.exec()
+```
+
+#### 2. 裂缝交互的丝滑动画 (Smooth Split Animation)
+
+**问题**：`QVBoxLayout` 插入 Widget 导致生硬跳变。
+**方案**：利用 `QPropertyAnimation` 控制裂缝的 `maximumHeight`。
+
+```python
+# src/ui/split_widget.py
+class SplitWidget(QFrame):
+    def expand_with_animation(self, target_height):
+        self.setVisible(True)
+        self.setMaximumHeight(0) # 初始高度为0
+      
+        self.anim = QPropertyAnimation(self, b"maximumHeight")
+        self.anim.setDuration(300) # 300ms 动画
+        self.anim.setStartValue(0)
+        self.anim.setEndValue(target_height)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic) # 丝滑减速曲线
+        self.anim.start()
+```
+配合外层的 `QScrollArea`，Qt 会自动将下半页平滑推挤下去，完全不需要复杂的 `QGraphicsScene`。
+
+#### 3. 内存爆炸与 WebView 池化 (WebView Pool)
+
+**问题**：10 个裂缝 = 10 个 Chromium 进程 = 内存 OOM。
+**方案**：**热备池 + 视觉冻结 (Visual Freezing)**。
+
+```python
+class WebViewPool:
+    def __init__(self):
+        self._hot_view = QWebEngineView()
+        self._hot_view.load(QUrl("local://template.html")) # 提前加载好 JS/CSS
+      
+    def acquire(self) -> QWebEngineView:
+        # 取出热备，并立即在后台补充一个新的热备
+        view = self._hot_view
+        self._hot_view = QWebEngineView() 
+        self._hot_view.load(...)
+        return view
+
+# 在 SplitWidget 中：
+    def collapse(self):
+        # 1. 将当前 WebView 渲染的内容截图
+        pixmap = self._webview.grab()
+        self._frozen_label.setPixmap(pixmap)
+        self._frozen_label.show()
+      
+        # 2. 销毁或归还 WebView，释放 Chromium 进程内存
+        self._webview.setParent(None)
+        self._webview.deleteLater()
+      
+        # 3. 执行折叠动画...
+```
+
+---
+
+### 四、补全被遗漏的系统性工程短板
+
+你提供的“批判性分析”中指出了几个极其重要的工程缺陷，这些是决定软件能否稳定运行的关键：
+
+#### 1. 全局异常捕获与日志系统 (Sentry/Loguru 替代)
+当前代码只有简单的 `print` 和基础 `logging`，一旦崩溃用户一头雾水。
+*   **方案**：引入 `loguru` 进行异步、带颜色的日志记录。
+*   **全局钩子**：重写 `sys.excepthook`，捕获致命错误，弹出包含堆栈信息的友好对话框，并允许用户一键复制日志。
+
+#### 2. 资源生命周期管理 (RAII)
+*   **问题**：关闭文档时，ChromaDB 的 SQLite 连接可能未释放，导致下次打开报错。
+*   **方案**：在 `CoreServiceRegistry` 中实现 `shutdown()` 方法。当 `MainWindow.closeEvent` 触发时，依次调用 `knowledge_engine.close()` -> `chroma_repo.close()`，确保数据库 WAL 文件正确刷入磁盘。
+
+#### 3. 配置文件 Schema 严格校验
+*   **问题**：`config.yaml` 如果被用户改错（比如缩进错误、类型错误），程序会在深层逻辑中崩溃。
+*   **方案**：利用已有的 Pydantic 模型，在 `ConfigManager.load()` 时使用 `AppConfig.model_validate(yaml_dict)` 进行严格校验。如果校验失败，自动备份损坏的配置，并生成一份全新的默认配置，防止软件无法启动。
+
+---
+
+### 五、重构实施路线图 (Step-by-Step Action Plan)
+
+为了稳妥推进，建议按以下三个阶段进行重构：
+
+#### Phase 1: 视觉与体验重塑 (1周)
+1.  **引入 QtPdf**：将 `PdfViewer` 的底层替换为 `QPdfView`，实现矢量高清渲染。
+2.  **动画与池化**：实现 `SplitWidget` 的 `QPropertyAnimation` 展开动画，以及 `QWebEngineView` 的截图冻结与池化机制。
+3.  **懒加载启动**：重构 `main.py`，实现 1 秒内闪电启动。
+
+#### Phase 2: 解析引擎大换血 (1-2周)
+1.  **引入 PyMuPDF4LLM**：替换掉原有的 `DocumentChunker`，使用其直接提取高质量的 Markdown 文本。
+2.  **坐标映射层**：建立 `PyMuPDF4LLM` 输出的 Markdown 段落与 `QtPdf` 视觉坐标之间的映射关系。
+3.  **局部精扫**：集成 `Pix2Text` (ONNX版) 或 `Docling`，仅在用户需要时对复杂公式/表格进行后台精扫。
+
+#### Phase 3: 工程化与稳定性底座 (1周)
+1.  **并发锁修复**：在 `KnowledgeEngine` 和 `ChromaRepo` 中全面引入 `QReadWriteLock`。
+2.  **日志与异常**：集成 `loguru`，完善 `sys.excepthook` 崩溃收集。
+3.  **PEP 750 升级**：利用 Python 3.14 的 `t-strings` 重写 `TranslationService` 中的 Prompt 组装逻辑，提升安全性与代码可读性。
+
+通过这套方案，你的 PDF AI Reader 将彻底摆脱“学生大作业”的标签，成为一款在性能、清晰度、解析准确率和交互体验上都能媲美商业软件的生产级工具。
+
+-- 请结合源代码再好好想想，有些东西，比如扫描方案等等感觉要再想想
+
+-- 这是一个非常务实且直击痛点的问题！你提到的 **“MinerU 需要申请 token、配置麻烦”** 以及 **“当前基于文本正则的公式识别效果拉胯”**，是所有做本地 PDF 解析开发者都会遇到的“两座大山”。
+
+PDF 底层是一堆毫无逻辑的绝对坐标绘制指令，根本不存在 `$$` 这种 Markdown 标记。试图用 `PyMuPDF` 提取纯文本再用正则去套公式，**在原理上就是死胡同**（遇到上下标、矩阵、积分号必定乱码）。
+
+结合 2024-2026 年最新的开源生态，我为你深度梳理了**完全免费、纯本地运行、无需 Token、且易于安装**的 Python 库，并为你量身定制了一套**“高性能文档解析与公式渲染的系统方法”**。
+
+---
+
+### 一、 免费、纯本地的 PDF 解析库选型 (替代 MinerU)
+
+根据最新的开源社区评估 [1]，以下三款工具是目前本地 PDF 解析的“三剑客”，它们各有侧重，完全免费且无需 API Token：
+
+#### 1. 综合王者：`Docling` (IBM 开源)
+*   **定位**：目前 RAG（检索增强生成）领域最火的文档解析库。
+*   **优势**：
+    *   **极简安装**：`pip install docling`，开箱即用。
+    *   **排版还原极佳**：完美处理双栏、多栏、页眉页脚过滤。
+    *   **纯本地/CPU友好**：底层使用轻量级视觉模型进行版面分析，在普通轻薄本上也能快速运行。
+    *   **输出标准**：直接输出包含层级结构的 Markdown 或 JSON。
+*   **适用场景**：作为你软件的**主力后台解析引擎**。
+
+#### 2. 学术/公式特化：`Marker` (VikParuchuri 开源)
+*   **定位**：专为学术论文（PDF 转 Markdown）打造的“瑞士军刀” [1]。
+*   **优势**：
+    *   **公式识别天花板**：内置了专门的公式检测和 `texify` 模型，能将 PDF 中的公式区域**直接转换为完美的 LaTeX 源码**。
+    *   **完全开源**：模型权重全开源，纯本地推理。
+*   **劣势**：模型较重，如果纯 CPU 推理，一页可能需要几秒到十几秒。
+*   **适用场景**：作为**深度解析引擎**，在用户需要极高精度（特别是满篇复杂公式）时调用。
+
+#### 3. 速度极致：`PyMuPDF4LLM`
+*   **定位**：PyMuPDF 官方推出的轻量级 Markdown 提取库。
+*   **优势**：**快到离谱**（毫秒级），不需要加载任何深度学习模型。
+*   **劣势**：对复杂表格和手写体/复杂公式的还原度不如前两者。
+*   **适用场景**：作为**首屏秒开的基线解析器**。
+
+---
+
+### 二、 彻底解决“公式识别与渲染”的系统方法
+
+既然现有的“启发式正则匹配”效果不好，我们需要将其升级为**“视觉版面分析 (Layout Analysis) + 专用数学 OCR”**的现代架构。
+
+以下是这套**系统方法**的标准流水线：
+
+#### 第一步：版面分析 (Layout Detection) —— 找准位置
+**不要再从文本里找公式！** 
+使用视觉模型（如 Docling 或 Surya）对 PDF 页面进行版面分析。模型会返回页面上所有元素的**包围框 (Bounding Box, BBox)** 和类型。
+*   模型会明确告诉你：`[x0, y0, x1, y1]` 这个区域是一个 `Formula`（公式），那个区域是 `Text`（正文）。
+
+#### 第二步：图像裁剪 (Cropping) —— 提取视觉特征
+拿到公式的 BBox 后，使用 PyMuPDF 将该特定区域的 PDF 渲染为高清图片（局部渲染，速度极快且省内存）。
+```python
+# 伪代码示例
+rect = fitz.Rect(x0, y0, x1, y1)
+pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=rect) # 300 DPI 局部截图
+img_bytes = pix.tobytes("png")
+```
+
+#### 第三步：专用数学 OCR (Math OCR) —— 图像转 LaTeX
+将裁剪出的公式图片，送入专门的本地数学 OCR 模型。
+*   **推荐库：`Pix2Text` (ONNX 版)** 或 **`LaTeX-OCR`**。
+*   **优势**：ONNX 格式的模型在 CPU 上推理极快（通常 < 0.5秒/公式），且完全免费本地。它能将图片精准转换为 `\int_{0}^{\infty} e^{-x^2} dx` 这样的标准 LaTeX 源码。
+
+#### 第四步：Markdown 组装与前端渲染
+将 OCR 得到的 LaTeX 源码，用 `$$...$$` 包裹，按阅读顺序与正文文本重新组装成 Markdown。
+最后，交由前端的 `QWebEngineView` + `KaTeX` 进行渲染。
+
+---
+
+### 三、 落地到你软件的“渐进式”架构设计
+
+为了兼顾**“启动极快”**和**“识别极准”**，你的 PDF AI Reader 应该采用**“渐进式增强 (Progressive Enhancement)”**架构：
+
+#### 1. 瞬时层 (T+0s)：视觉呈现
+*   用户打开 PDF，立刻使用 `PySide6.QtPdf` 渲染出矢量高清页面。用户可以毫无卡顿地滚动、缩放。
+
+#### 2. 基线层 (T+1s)：快速文本提取
+*   后台线程启动 `PyMuPDF4LLM`，瞬间扫过当前页，提取出基础的 Markdown 文本。
+*   此时，用户双击普通段落，已经可以弹出裂缝进行翻译和问答。
+
+#### 3. 深度层 (后台静默 / 按需触发)：精准公式解析
+*   **策略 A（后台静默）**：后台线程使用 `Docling` 或 `Marker` 逐页进行深度解析。解析完一页，就将内存中该页的“基线 Markdown”替换为“包含完美 LaTeX 的深度 Markdown”。
+*   **策略 B（按需触发 - 推荐）**：提供一个**“框选解释”**工具。当用户发现某个复杂公式基线解析乱码时，按住 `Alt` 键框选该公式。
+    *   软件截取该框选区域的图片。
+    *   调用本地 `Pix2Text (ONNX)` 瞬间识别出 LaTeX。
+    *   在裂缝中渲染出完美公式，并自动附带 Prompt：“请解释这个数学公式的物理/数学含义：[LaTeX源码]”，发送给本地 Qwen 模型。
+
+---
+
+### 四、 核心代码重构示例 (Python 3.14)
+
+以下是如何将上述系统方法落地到代码中的核心逻辑：
+
+#### 1. 引入轻量级本地 Math OCR (Pix2Text ONNX)
+```python
+# src/core/math_ocr.py
+import io
+from PIL import Image
+from pix2text import Pix2Text
+
+class LocalMathOCR:
+    def __init__(self):
+        # 初始化纯公式识别模型，使用 ONNX 引擎，CPU 推理极快
+        self.p2t = Pix2Text(analyzer_config={'model_name': 'mfd'}, device='cpu')
+
+    def recognize_formula(self, image_bytes: bytes) -> str:
+        """将公式图片字节流转换为 LaTeX 源码"""
+        img = Image.open(io.BytesIO(image_bytes))
+        # 仅识别公式 (mfr = Math Formula Recognition)
+        result = self.p2t.recognize_formula(img) 
+        return result
+```
+
+#### 2. 结合 PyMuPDF 进行局部裁剪与识别
+```python
+# src/core/pdf_engine.py
+class DocumentEngine:
+    def extract_formula_latex(self, page_num: int, bbox: tuple[float, float, float, float]) -> str:
+        """根据 BBox 提取完美 LaTeX"""
+        page = self._doc[page_num]
+        rect = fitz.Rect(*bbox)
+      
+        # 1. 局部高分辨率截图 (300 DPI)
+        mat = fitz.Matrix(4.0, 4.0) 
+        pix = page.get_pixmap(matrix=mat, clip=rect)
+      
+        # 2. 零拷贝转为字节流
+        img_bytes = pix.tobytes("png")
+      
+        # 3. 调用本地 Math OCR
+        latex_code = self.math_ocr.recognize_formula(img_bytes)
+        return f"$$ {latex_code} $$"
+```
+
+### 五、 总结与建议
+
+1.  **放弃正则，拥抱视觉**：PDF 解析的尽头是 CV（计算机视觉）。不要再试图用正则去修补 PyMuPDF 提取的乱码文本。
+2.  **拥抱 Docling / Marker**：它们是 2026 年最优秀的开源本地解析库，完全免费，没有 MinerU 的 Token 烦恼。
+3.  **按需 OCR 体验最佳**：对于桌面软件，全量跑重型 OCR 会让风扇狂转。最好的体验是：**默认用轻量库提取正文，遇到公式或用户主动框选时，再调用 Pix2Text 进行局部精准 OCR**。这能将性能和准确率完美平衡。

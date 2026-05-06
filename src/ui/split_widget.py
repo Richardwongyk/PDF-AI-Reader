@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from PySide6.QtCore import (
@@ -30,6 +31,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.models import DocumentBlock, SplitMode, SplitState
+
+_logger = logging.getLogger(__name__)
 
 
 class _ResizeHandle(QWidget):
@@ -141,8 +144,7 @@ class SplitWidget(QFrame):
         self._state = SplitState.READY
         self._collapsed = False
         self._user_resized = False
-        self.setVisible(True)
-        self.setFixedHeight(self._saved_height)
+        self._animate_expand()
         if self._mode == SplitMode.QUESTION:
             self._input_area.setFocus()
 
@@ -154,21 +156,45 @@ class SplitWidget(QFrame):
         self.setVisible(False)
 
     def collapse(self) -> None:
-        """折叠裂缝：彻底隐藏自身，让上下半页无缝闭合。"""
+        """折叠裂缝：动画收缩至消失。"""
         if self._collapsed:
             return
         self._collapsed = True
         self._page_width = max(self._page_width, self.width())
-        self.setVisible(False)  # 彻底隐藏，消除任何线条
+        self._animate_collapse()
 
     def expand(self) -> None:
-        """展开裂缝：恢复显示。"""
+        """展开裂缝：动画展开。"""
         if not self._collapsed:
             return
         self._collapsed = False
-        self.setVisible(True)
-        self.setFixedHeight(self._saved_height)
+        self._animate_expand()
         self._update_mode_ui()
+
+    def _animate_expand(self) -> None:
+        """动画展开：从 0 到 _saved_height。"""
+        self.setVisible(True)
+        self.setMaximumHeight(0)
+        target = self._saved_height
+        anim = QPropertyAnimation(self, b"maximumHeight")
+        anim.setDuration(250)
+        anim.setStartValue(0)
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.start()
+        self._expand_anim = anim
+
+    def _animate_collapse(self) -> None:
+        """动画折叠：从当前高度到 0，完成后隐藏。"""
+        current = self.height()
+        anim = QPropertyAnimation(self, b"maximumHeight")
+        anim.setDuration(200)
+        anim.setStartValue(current)
+        anim.setEndValue(0)
+        anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        anim.finished.connect(lambda: self.setVisible(False))
+        anim.start()
+        self._collapse_anim = anim
 
     def display_answer_stream(self, token: str) -> None:
         self._current_answer += token
@@ -268,6 +294,8 @@ class SplitWidget(QFrame):
         self._result_view.page().setBackgroundColor(Qt.GlobalColor.transparent)
         self._page_ready = False
         self._pending_js: str | None = None
+        self._pending_theme: str | None = None
+        self._is_finished_render: bool = False
         self._result_view.loadFinished.connect(self._on_page_loaded)
         template_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "markdown_template.html")
@@ -283,7 +311,9 @@ class SplitWidget(QFrame):
         self._followup_widget.setVisible(False)
         body_layout.addWidget(self._followup_widget)
 
-        # 操作栏：右对齐
+        # 动画引用（防 GC 回收）
+        self._expand_anim: QPropertyAnimation | None = None
+        self._collapse_anim: QPropertyAnimation | None = None
         self._action_widget = QWidget()
         action_layout = QHBoxLayout(self._action_widget)
         action_layout.setContentsMargins(0, 0, 0, 0)
@@ -370,6 +400,14 @@ class SplitWidget(QFrame):
         self._state = SplitState.BUSY if busy else SplitState.READY
         self._input_area.setEnabled(not busy)
 
+    def apply_theme(self, theme: str) -> None:
+        """将主题应用到 WebView 的 HTML 内容。"""
+        if self._page_ready:
+            self._result_view.page().runJavaScript(f"setTheme('{theme}');")
+        else:
+            # 页面未加载完成时缓存，等加载完成后应用
+            self._pending_theme = theme
+
     # ── 拖拽 ──
 
     def _on_resize_drag(self, delta: int) -> None:
@@ -385,11 +423,12 @@ class SplitWidget(QFrame):
     def _update_webview(self, is_finished: bool = False) -> None:
         safe_text = json.dumps(self._current_answer)
         js_bool = "true" if is_finished else "false"
-        # 更新内容后返回 document.documentElement.scrollHeight
+        # 更新内容后返回 ResizeObserver 记录的准确高度
         js_code = f"""
             updateContent({safe_text}, {js_bool});
-            document.documentElement.scrollHeight;
+            window.contentHeight || document.documentElement.scrollHeight;
         """
+        self._is_finished_render = is_finished
         if self._page_ready:
             self._result_view.page().runJavaScript(js_code, self._adjust_height)
         else:
@@ -407,13 +446,39 @@ class SplitWidget(QFrame):
                 self._saved_height = new_h
                 self.setFixedHeight(new_h)
 
+        # KaTeX 渲染有延迟，完成后需要重新检查高度
+        if self._is_finished_render:
+            self._is_finished_render = False
+            self._schedule_height_recheck(delays_ms=[150, 400, 800])
+
+    def _schedule_height_recheck(self, delays_ms: list[int]) -> None:
+        """在指定延迟后重新检查 WebView 内容高度（捕获 KaTeX 延迟渲染）。"""
+        from PySide6.QtCore import QTimer
+        for delay in delays_ms:
+            QTimer.singleShot(delay, self._recheck_height)
+
+    def _recheck_height(self) -> None:
+        """从 JS 读取 ResizeObserver 记录的高度。"""
+        if self._collapsed or self._user_resized:
+            return
+        if self._page_ready:
+            self._result_view.page().runJavaScript(
+                "window.contentHeight || document.documentElement.scrollHeight;",
+                self._adjust_height,
+            )
+
     def _on_page_loaded(self, ok: bool) -> None:
         if ok:
             self._page_ready = True
             self._result_view.page().runJavaScript("window.pageReady = true;")
+            if self._pending_theme:
+                self._result_view.page().runJavaScript(f"setTheme('{self._pending_theme}');")
+                self._pending_theme = None
             if self._pending_js:
                 self._result_view.page().runJavaScript(self._pending_js)
                 self._pending_js = None
+        else:
+            _logger.warning("WebView 页面加载失败: block=%s", self._block.id)
 
     # ── 事件 ──
 
