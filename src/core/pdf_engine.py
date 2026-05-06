@@ -949,7 +949,7 @@ class _ParseThread(QThread):
             except Exception as e:
                 logger.warning("MFD 精扫失败（不影响阅读）: %s", e)
 
-            # ── 阶段四：MFR 公式识别（MFD 检测到的公式 → LaTeX） ──
+            # ── 阶段四：MFR 公式识别（CPU 批量推理） ──
             if not self.isInterruptionRequested():
                 try:
                     from src.core.math_ocr import MathOCR
@@ -962,35 +962,45 @@ class _ParseThread(QThread):
                             if b.block_type == BT.FORMULA
                             and b.metadata.get("formula_detector") == "pix2text-mfd"
                         ]
-                        mfr_updated: list[dict] = []
-                        for fb in formula_blocks:
-                            if self.isInterruptionRequested():
-                                break
-                            try:
-                                page = doc[fb.page_num]
-                                rect = fitz.Rect(*fb.bbox)
-                                # 216 DPI 局部渲染，保证公式细节清晰
-                                mat = fitz.Matrix(3.0, 3.0)
-                                pix = page.get_pixmap(matrix=mat, clip=rect)
-                                latex = math_ocr.recognize(pix.tobytes("png"))
-                                if latex:
-                                    fb.content = f"$$\n{latex}\n$$"
-                                    fb.metadata["latex"] = latex
-                                    fb.metadata["mfr_recognized"] = True
-                                    mfr_updated.append({
-                                        "id": fb.id,
-                                        "block_type": fb.block_type.value,
-                                        "metadata": fb.metadata,
-                                        "content": fb.content,
-                                    })
-                            except Exception:
-                                pass
-                        if mfr_updated and not self.isInterruptionRequested():
-                            self.formula_blocks_updated.emit(mfr_updated)
-                        logger.info(
-                            "MFR 完成: %d/%d 个公式被识别为 LaTeX",
-                            len(mfr_updated), len(formula_blocks),
-                        )
+                        if formula_blocks:
+                            # 收集所有公式截图
+                            crops: list[bytes] = []
+                            crop_map: list[int] = []  # index → formula_blocks index
+                            for i, fb in enumerate(formula_blocks):
+                                if self.isInterruptionRequested():
+                                    break
+                                try:
+                                    page = doc[fb.page_num]
+                                    rect = fitz.Rect(*fb.bbox)
+                                    mat = fitz.Matrix(3.0, 3.0)
+                                    pix = page.get_pixmap(matrix=mat, clip=rect)
+                                    crops.append(pix.tobytes("png"))
+                                    crop_map.append(i)
+                                except Exception:
+                                    pass
+
+                            # 批量识别 → 大幅加速
+                            if crops and not self.isInterruptionRequested():
+                                latex_results = math_ocr.recognize_batch(crops)
+                                mfr_updated: list[dict] = []
+                                for j, latex in enumerate(latex_results):
+                                    if latex:
+                                        fb = formula_blocks[crop_map[j]]
+                                        fb.content = f"$$\n{latex}\n$$"
+                                        fb.metadata["latex"] = latex
+                                        fb.metadata["mfr_recognized"] = True
+                                        mfr_updated.append({
+                                            "id": fb.id,
+                                            "block_type": fb.block_type.value,
+                                            "metadata": fb.metadata,
+                                            "content": fb.content,
+                                        })
+                                if mfr_updated and not self.isInterruptionRequested():
+                                    self.formula_blocks_updated.emit(mfr_updated)
+                                logger.info(
+                                    "MFR 完成: %d/%d 个公式 → LaTeX",
+                                    len(mfr_updated), len(formula_blocks),
+                                )
                 except Exception as e:
                     logger.warning("MFR 阶段失败（不影响阅读）: %s", e)
 
