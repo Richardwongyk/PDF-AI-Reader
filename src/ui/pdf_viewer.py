@@ -542,8 +542,9 @@ class PdfViewer(QScrollArea):
         self._page_segments.clear()
         self._block_to_page.clear()
         self._overlays.clear()
-        for ind in self._trans_indicators.values():
-            ind.deleteLater()
+        for ind in list(self._trans_indicators.values()):
+            if _isValid(ind):
+                ind.deleteLater()
         self._trans_indicators.clear()
         self._all_blocks.clear()
         self._page_containers.clear()
