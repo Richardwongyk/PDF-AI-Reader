@@ -146,15 +146,11 @@ class Pix2TextMFDDetector(FormulaDetector):
         return False
 
     def apply_to_blocks(self, blocks: list[DocumentBlock], doc: fitz.Document) -> list[DocumentBlock]:
-        # 只对有公式特征的页面跑 MFD
-        candidate_pages = [pn for pn in range(doc.page_count)
-                           if self._page_has_formulas(blocks, pn)]
-        if not candidate_pages:
-            return blocks
+        # 对所有页面跑 MFD 视觉检测（Pix2Text YOLO11 模型，~1.5s/页）
         import logging
         logger = logging.getLogger("Pix2TextMFD")
-        logger.info("需检测页: %d/%d (%s)", len(candidate_pages), doc.page_count,
-                     ','.join(str(p+1) for p in candidate_pages))
+        candidate_pages = list(range(doc.page_count))
+        logger.info("MFD 视觉检测: %d 页", len(candidate_pages))
         formulas = self.detect_specific_pages(doc, candidate_pages)
         matched = 0
         for block in blocks:
