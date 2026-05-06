@@ -670,7 +670,14 @@ class MainWindow(QMainWindow):
         )
 
     def _run_pymupdf4llm_enhance(self, result) -> None:
-        """异步运行 PyMuPDF4LLM 增强解析。"""
+        """后台线程运行 PyMuPDF4LLM 增强解析。"""
+        import threading
+        thread = threading.Thread(
+            target=self._run_pymupdf4llm_thread, args=(result,), daemon=True
+        )
+        thread.start()
+
+    def _run_pymupdf4llm_thread(self, result) -> None:
         try:
             from src.core.pdf_engine import PyMuPDF4LLMChunker
             import fitz
@@ -682,12 +689,20 @@ class MainWindow(QMainWindow):
             doc.close()
             count = sum(1 for b in result.blocks
                         if b.metadata.get("enhanced_by") == "pymupdf4llm")
-            self.logger.info("PyMuPDF4LLM 异步增强完成: %d 个块", count)
+            self.logger.info("PyMuPDF4LLM 后台线程完成: %d 个块", count)
         except Exception as e:
-            self.logger.warning("PyMuPDF4LLM 异步增强失败: %s", e)
+            self.logger.warning("PyMuPDF4LLM 后台线程失败: %s", e)
 
     def _run_mfr_async(self, result) -> None:
-        """异步运行 MFR 公式识别（不阻塞 UI/解析线程）。"""
+        """后台线程运行 MFR 公式识别（完全不阻塞 UI）。"""
+        import threading
+        thread = threading.Thread(
+            target=self._run_mfr_thread, args=(result,), daemon=True
+        )
+        thread.start()
+
+    def _run_mfr_thread(self, result) -> None:
+        """MFR 工作线程：加载模型 + 识别公式。"""
         try:
             from src.core.math_ocr import MathOCR
             from src.core.models import BlockType
@@ -702,7 +717,7 @@ class MainWindow(QMainWindow):
             ]
             if not formula_blocks:
                 return
-            self.logger.info("MFR 异步: %d 个公式待识别", len(formula_blocks))
+            self.logger.info("MFR 后台线程: %d 个公式待识别", len(formula_blocks))
             ocr._ensure_model()
             doc = fitz.open(result.filepath)
             crops: list[bytes] = []
@@ -726,11 +741,11 @@ class MainWindow(QMainWindow):
                         fb.metadata["latex"] = latex
                         fb.metadata["mfr_recognized"] = True
                         mfr_count += 1
-                self.logger.info("MFR 异步完成: %d/%d 公式 → LaTeX",
+                self.logger.info("MFR 后台线程完成: %d/%d 公式 → LaTeX",
                                  mfr_count, len(formula_blocks))
             doc.close()
         except Exception as e:
-            self.logger.warning("MFR 异步失败: %s", e)
+            self.logger.warning("MFR 后台线程失败: %s", e)
 
     def _check_first_launch(self) -> None:
         """首次启动检查：验证本地模型状态。"""
