@@ -266,6 +266,13 @@ class MainWindow(QMainWindow):
 
         # 首次启动检查
         QTimer.singleShot(500, self._check_first_launch)
+        # WebView 热备池预热：后台加载模板 HTML，消除首次打开裂缝的延迟
+        QTimer.singleShot(800, self._prewarm_webview_pool)
+
+    def _prewarm_webview_pool(self) -> None:
+        """后台预热 WebViewPool 热备实例。"""
+        from src.ui.split_widget import WebViewPool
+        WebViewPool.prewarm()
 
     # =========================================================================
     # 文件操作

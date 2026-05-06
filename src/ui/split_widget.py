@@ -13,6 +13,7 @@ import os
 from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
+    QTimer,
     Qt,
     QUrl,
     Signal,
@@ -65,6 +66,67 @@ class _ResizeHandle(QWidget):
         if self._dragging:
             self._dragging = False
             event.accept()
+
+
+class WebViewPool:
+    """QWebEngineView 热备池。
+
+    维护 1 个预加载模板的 WebView 热备实例。
+    acquire() 即时返回已就绪的 WebView，避免冷启动延迟。
+    release() 回收 WebView 作为下一轮热备。
+    将同时活跃的 Chromium 进程限制在 2 个以内。
+    """
+
+    _standby: QWebEngineView | None = None
+    _in_use: int = 0
+
+    @classmethod
+    def _template_url(cls) -> QUrl:
+        template_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "markdown_template.html")
+        )
+        return QUrl.fromLocalFile(template_path)
+
+    @classmethod
+    def prewarm(cls) -> None:
+        """后台预热：创建并加载模板 HTML 的隐藏 WebView。"""
+        if cls._standby is not None:
+            return
+        view = QWebEngineView()
+        view.setMinimumHeight(60)
+        view.page().setBackgroundColor(Qt.GlobalColor.transparent)
+        view.setUrl(cls._template_url())
+        view.setObjectName("result_area")
+        cls._standby = view
+
+    @classmethod
+    def acquire(cls) -> QWebEngineView:
+        """获取一个 WebView：优先从热备取，否则新建。"""
+        if cls._standby is not None:
+            view = cls._standby
+            cls._standby = None
+        else:
+            view = QWebEngineView()
+            view.setMinimumHeight(60)
+            view.page().setBackgroundColor(Qt.GlobalColor.transparent)
+            view.setUrl(cls._template_url())
+            view.setObjectName("result_area")
+        cls._in_use += 1
+        # 后台补充热备
+        QTimer.singleShot(50, cls.prewarm)
+        return view
+
+    @classmethod
+    def release(cls, view: QWebEngineView) -> None:
+        """回收 WebView 到热备池，超过限额则销毁。"""
+        cls._in_use = max(0, cls._in_use - 1)
+        if cls._standby is None and cls._in_use < 2:
+            # 重新加载模板，留作热备
+            view.setUrl(cls._template_url())
+            cls._standby = view
+        else:
+            view.setParent(None)
+            view.deleteLater()
 
 
 class SplitWidget(QFrame):
@@ -251,6 +313,7 @@ class SplitWidget(QFrame):
         body_layout = QVBoxLayout(self._body_widget)
         body_layout.setContentsMargins(2, 0, 2, 0)
         body_layout.setSpacing(0)
+        self._body_layout = body_layout  # 保存引用，供 WebView 动态替换
 
         # 标题栏
         header_widget = QWidget()
@@ -293,16 +356,14 @@ class SplitWidget(QFrame):
         input_layout.addLayout(send_layout)
         body_layout.addWidget(self._input_widget)
 
-        # QWebEngineView
-        self._result_view = QWebEngineView()
-        self._result_view.setObjectName("result_area")
-        self._result_view.setMinimumHeight(60)
-        self._result_view.page().setBackgroundColor(Qt.GlobalColor.transparent)
+        # QWebEngineView — 从热备池获取，避免冷启动延迟
+        self._result_view = WebViewPool.acquire()
         self._page_ready = False
         self._pending_js: str | None = None
         self._pending_theme: str | None = None
         self._is_finished_render: bool = False
         self._result_view.loadFinished.connect(self._on_page_loaded)
+        # 重新加载模板以确保 loadFinished 触发（池中的 WebView 已加载过）
         template_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "markdown_template.html")
         )
@@ -425,22 +486,42 @@ class SplitWidget(QFrame):
     # ── WebView 截图冻结 ──
 
     def _freeze_webview(self) -> None:
-        """截图 WebView 内容并冻结，释放 Chromium 渲染资源。"""
+        """截图 WebView 内容，回收 WebView 到热备池，显示截图占位。"""
         if self._result_view is None or not self._page_ready:
             return
         # 截图当前 WebView 内容
         pixmap = self._result_view.grab()
         if not pixmap.isNull():
             self._frozen_label.setPixmap(pixmap)
-        # 隐藏 WebView，显示截图
-        self._result_view.setVisible(False)
+        # 断开信号，从布局移除，回收
+        try:
+            self._result_view.loadFinished.disconnect(self._on_page_loaded)
+        except Exception:
+            pass
+        self._body_layout.removeWidget(self._result_view)
+        WebViewPool.release(self._result_view)
+        self._result_view = None
+        self._page_ready = False
         self._frozen_label.setVisible(True)
 
     def _thaw_webview(self) -> None:
-        """解冻：隐藏截图，恢复 WebView。"""
-        self._frozen_label.setVisible(False)
+        """从热备池获取 WebView 并恢复显示。"""
         if self._result_view is not None:
-            self._result_view.setVisible(True)
+            return
+        view = WebViewPool.acquire()
+        self._result_view = view
+        # 插入布局（在 frozen_label 之前）
+        idx = self._body_layout.indexOf(self._frozen_label)
+        if idx >= 0:
+            self._body_layout.insertWidget(idx, view, 1)
+        view.loadFinished.connect(self._on_page_loaded)
+        # 确保 loadFinished 触发
+        template_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "markdown_template.html")
+        )
+        view.setUrl(QUrl.fromLocalFile(template_path))
+        view.setVisible(True)
+        self._frozen_label.setVisible(False)
 
     # ── 拖拽 ──
 
