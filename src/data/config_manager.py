@@ -52,8 +52,9 @@ class ConfigManager(QObject):
         """从 YAML 文件加载配置，使用 Pydantic 进行 Schema 严格校验。
 
         若文件不存在，创建默认配置并写入文件。
-        若文件存在但格式有误或校验失败，自动备份损坏的配置文件，
-        并生成全新默认配置，确保软件永远不会因配置损坏而无法启动。
+        若文件存在但 YAML 解析失败或 Schema 校验失败，
+        自动备份损坏的配置文件并生成全新默认配置，
+        确保软件永远不会因配置损坏而无法启动。
 
         Returns:
             AppConfig 实例。
@@ -64,30 +65,34 @@ class ConfigManager(QObject):
             self._save_to_file(config)
             return config
 
+        yaml_ok = True
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 raw: dict = yaml.safe_load(f) or {}
         except (yaml.YAMLError, OSError) as e:
-            _logger.warning("配置文件解析失败，使用默认配置: %s", e)
-            raw = {}
+            _logger.warning("配置文件 YAML 解析失败: %s", e)
+            yaml_ok = False
 
-        # 使用 Pydantic model_validate 进行 Schema 严格校验
-        try:
-            from pydantic import ValidationError
-            config = AppConfig.model_validate(raw)
-            _logger.info("配置文件校验通过: %s", self._path)
-            return config
-        except ValidationError as e:
-            _logger.error("配置文件 Schema 校验失败，备份并重建默认配置: %s", e)
-            self._backup_corrupt_config()
-            config = AppConfig()
-            self._save_to_file(config)
-            return config
+        if yaml_ok:
+            try:
+                from pydantic import ValidationError
+                config = AppConfig.model_validate(raw)
+                _logger.info("配置文件校验通过: %s", self._path)
+                return config
+            except ValidationError as e:
+                _logger.error("配置文件 Schema 校验失败: %s", e)
+
+        # YAML 解析失败 或 Pydantic 校验失败 → 备份并重建
+        self._backup_corrupt_config()
+        config = AppConfig()
+        self._save_to_file(config)
+        _logger.info("已重建默认配置: %s", self._path)
+        return config
 
     def _backup_corrupt_config(self) -> None:
         """备份损坏的配置文件，避免数据丢失。"""
         import shutil, time
-        backup_path = self._path + f".corrupt.{int(time.time())}"
+        backup_path = self._path + f".corrupt.{time.strftime('%Y%m%d_%H%M%S')}"
         try:
             shutil.copy2(self._path, backup_path)
             _logger.warning("已备份损坏的配置到: %s", backup_path)
