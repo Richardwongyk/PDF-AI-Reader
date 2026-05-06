@@ -907,6 +907,9 @@ class _ParseThread(QThread):
             )
             self.finished_parsing.emit(result)
 
+            import logging
+            logger = logging.getLogger("ParseThread")
+
             # ── 阶段二：PyMuPDF4LLM 增强解析（后台，提升文本质量） ──
             if not self.isInterruptionRequested():
                 try:
@@ -927,8 +930,6 @@ class _ParseThread(QThread):
                 return
 
             from src.core.formula_detector import Pix2TextMFDDetector
-            import logging
-            logger = logging.getLogger("ParseThread")
             try:
                 refined = Pix2TextMFDDetector(dpi=200).apply_to_blocks(blocks, doc)
                 # 收集被 ML 修正的块
