@@ -139,6 +139,10 @@ class PdfViewer(QScrollArea):
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setBackgroundRole(QPalette.ColorRole.Base)
+
+        # 异步渲染：连接 DocumentEngine 的完成信号
+        self._doc_engine.page_rendered.connect(self._on_page_rendered_async)
+
         app = QApplication.instance()
         if app:
             app.setStyleSheet(app.styleSheet() + " QToolTip { color: #4a3f6b; }")
@@ -307,7 +311,10 @@ class PdfViewer(QScrollArea):
         return h
 
     def _render_page(self, page_num: int) -> None:
-        """渲染指定页：获取 pixmap 并填充到容器。"""
+        """渲染指定页：异步提交到 QThreadPool，不阻塞主线程。
+
+        页面渲染完成后通过 page_rendered 信号回调 _on_page_rendered_async。
+        """
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
@@ -318,15 +325,27 @@ class PdfViewer(QScrollArea):
 
         # 只有单段（未裂开）的页面才用懒加载渲染
         if len(segs) == 1 and segs[0].get("widget") is container:
-            blocks = segs[0]["blocks"]
-            pixmap = self._doc_engine.get_page_pixmap(page_num, dpi=self._dpi)
-            if pixmap is None:
-                return
-            container.render(pixmap, blocks, self._scale, self._connect_overlay)
-            # 恢复翻译指示器
-            for b in blocks:
-                if b.id in self._trans_indicators:
-                    self._set_translation_marker(b.id, True)
+            self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
+
+    def _on_page_rendered_async(self, page_num: int, qpixmap: object) -> None:
+        """异步渲染完成回调：将 QPixmap 设置到容器并恢复翻译指示器。"""
+        container = self._page_containers.get(page_num)
+        if container is None or container.rendered:
+            return
+
+        segs = self._page_segments.get(page_num, [])
+        if len(segs) != 1 or segs[0].get("widget") is not container:
+            return
+
+        blocks = segs[0]["blocks"]
+        pixmap = qpixmap if isinstance(qpixmap, QPixmap) else None
+        if pixmap is None or pixmap.isNull():
+            return
+        container.render(pixmap, blocks, self._scale, self._connect_overlay)
+        # 恢复翻译指示器
+        for b in blocks:
+            if b.id in self._trans_indicators:
+                self._set_translation_marker(b.id, True)
 
     def _unrender_page(self, page_num: int) -> None:
         """释放页面 pixmap 和 overlay，保留占位。"""

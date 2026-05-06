@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QObject, QSize, QThread, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, QThread, QThreadPool, Signal
 from PySide6.QtGui import QPixmap
 
 # QtPdf (PDFium) — 矢量渲染引擎，PySide6 自带
@@ -449,6 +449,7 @@ class DocumentEngine(BaseService):
     parse_progress = Signal(int, int)  # (当前页, 总页数)
     parse_error = Signal(str)
     formula_blocks_updated = Signal(list)  # list[dict] — MFD 精扫修正的块
+    page_rendered = Signal(int, object)  # (page_num, QPixmap) — 异步渲染完成
 
     def __init__(self, config: AppConfig, parent: QObject | None = None) -> None:
         """初始化文档引擎。
@@ -465,6 +466,10 @@ class DocumentEngine(BaseService):
         self._qtpdf_ready: bool = False
         self._chunker = DocumentChunker()
         self._preprocessor = TextPreprocessor()
+        # 异步渲染
+        self._render_pool = QThreadPool()
+        self._render_pool.setMaxThreadCount(2)
+        self._pending_renders: set[int] = set()
         self._thread: QThread | None = None
         # 渲染缓存: {page_num: {dpi: QPixmap}}
         self._pixmap_cache: dict[int, dict[int, QPixmap]] = {}
@@ -587,7 +592,12 @@ class DocumentEngine(BaseService):
             self._qtpdf_doc = None
             self._qtpdf_ready = False
 
-        # 4. 清空渲染缓存
+        # 4. 取消所有待处理的异步渲染
+        self._pending_renders.clear()
+        self._render_pool.clear()
+        self._render_pool.waitForDone(2000)
+
+        # 5. 清空渲染缓存
         self._pixmap_cache.clear()
         self.logger.info("文档已关闭，资源已释放")
 
@@ -655,14 +665,96 @@ class DocumentEngine(BaseService):
         return qpixmap
 
     def preload_pages(self, page_nums: list[int], dpi: int = 150) -> None:
-        """预加载指定页面到渲染缓存。
+        """预加载指定页面到渲染缓存（异步，不阻塞主线程）。
 
         Args:
             page_nums: 需要预加载的页码列表。
             dpi: 渲染分辨率。
         """
         for pn in page_nums:
-            self.get_page_pixmap(pn, dpi)
+            self.request_page_render_async(pn, dpi)
+
+    def request_page_render_async(self, page_num: int, dpi: int = 150) -> None:
+        """异步请求渲染页面，完成后通过 page_rendered 信号通知。
+
+        如果页面已在缓存中，直接发射信号。
+        如果页面正在渲染中，跳过重复请求。
+
+        Args:
+            page_num: 页码（0-based）。
+            dpi: 渲染分辨率。
+        """
+        # 已在缓存 → 立即通知
+        if page_num in self._pixmap_cache and dpi in self._pixmap_cache[page_num]:
+            self.page_rendered.emit(page_num, self._pixmap_cache[page_num][dpi])
+            return
+        # 正在渲染 → 跳过
+        if page_num in self._pending_renders:
+            return
+        # 文档已关闭
+        if not self._doc:
+            return
+
+        self._pending_renders.add(page_num)
+        task = _PageRenderTask(self._doc.name, page_num, dpi)
+        task.result.connect(self._on_async_page_rendered)
+        self._render_pool.start(task)
+
+    def _on_async_page_rendered(self, page_num: int, dpi: int, qpixmap: QPixmap) -> None:
+        """异步渲染完成回调（主线程）。"""
+        self._pending_renders.discard(page_num)
+        if qpixmap.isNull():
+            return
+        # 存入缓存
+        if page_num not in self._pixmap_cache:
+            self._pixmap_cache[page_num] = {}
+        self._pixmap_cache[page_num][dpi] = qpixmap
+        # LRU 清理
+        if len(self._pixmap_cache) > 20:
+            oldest = min(self._pixmap_cache.keys())
+            del self._pixmap_cache[oldest]
+        # 通知 UI
+        self.page_rendered.emit(page_num, qpixmap)
+
+
+# =============================================================================
+# _PageRenderTask —— 后台页面渲染 Worker
+# =============================================================================
+
+class _PageRenderTask(QRunnable):
+    """在后台线程中渲染单个 PDF 页面为 QPixmap。
+
+    每个 Worker 创建独立的 PyMuPDF Document 实例以确保线程安全。
+    渲染完成后通过信号将结果传回主线程。
+    """
+
+    class _Signals(QObject):
+        result = Signal(int, int, QPixmap)  # page_num, dpi, QPixmap
+
+    def __init__(self, filepath: str, page_num: int, dpi: int) -> None:
+        super().__init__()
+        self._filepath = filepath
+        self._page_num = page_num
+        self._dpi = dpi
+        self._signals = self._Signals()
+
+    @property
+    def result(self) -> Signal:
+        return self._signals.result
+
+    def run(self) -> None:
+        try:
+            doc = fitz.open(self._filepath)
+            page = doc[self._page_num]
+            zoom = self._dpi / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+            qpixmap = QPixmap()
+            qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
+            doc.close()
+            self._signals.result.emit(self._page_num, self._dpi, qpixmap)
+        except Exception:
+            self._signals.result.emit(self._page_num, self._dpi, QPixmap())
 
 
 # =============================================================================
