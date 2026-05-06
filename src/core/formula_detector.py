@@ -119,30 +119,17 @@ class Pix2TextMFDDetector(FormulaDetector):
         return formulas
 
     def _page_has_formulas(self, blocks: list[DocumentBlock], page_num: int) -> bool:
-        """判断页面是否可能包含公式（LaTeX 命令、数学 Unicode、低英文比例）。"""
-        page_blocks = [b for b in blocks
-                       if b.page_num == page_num
-                       and b.block_type in (BlockType.PARAGRAPH, BlockType.FORMULA)]
+        """粗略判断页面是否可能包含公式。"""
+        page_blocks = [b for b in blocks if b.page_num == page_num and b.block_type == BlockType.PARAGRAPH]
         if not page_blocks:
             return False
+        import re
+        math_patterns = [r'\\frac', r'\\sum', r'\\int', r'\\sqrt', r'\\alpha', r'\\beta',
+                         r'\\theta', r'\\mathbf', r'\\mathcal', r'\$\$', r'\\begin', r'\\end']
         for b in page_blocks:
-            text = b.content
-            # LaTeX 命令
-            for pat in (r'\frac', r'\sum', r'\int', r'\sqrt', r'\alpha', r'\beta',
-                        r'\theta', r'\mathbf', r'\mathcal', r'\begin', r'\end',
-                        r'\\(', r'\\[', r'\langle', r'\rangle'):
-                if pat in text:
+            for pat in math_patterns:
+                if pat in b.content:
                     return True
-            # 多单字符 token + 少英文 = 数学表达式
-            tokens = text.split()
-            english = sum(1 for w in tokens if w.isalpha() and len(w) > 2)
-            single = sum(1 for w in tokens if len(w) == 1)
-            if single >= 3 and english <= 3 and len(text) > 15:
-                return True
-            # 高比例数学 Unicode
-            math = sum(1 for c in text if ord(c) > 0x2000 and ord(c) < 0x2B00)
-            if len(text) > 0 and math / len(text) > 0.1:
-                return True
         return False
 
     def apply_to_blocks(self, blocks: list[DocumentBlock], doc: fitz.Document) -> list[DocumentBlock]:
