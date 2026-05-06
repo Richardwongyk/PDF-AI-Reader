@@ -114,16 +114,21 @@ class WebViewPool:
 
     @classmethod
     def acquire(cls) -> QWebEngineView:
-        """获取一个 WebView：优先从热备取，否则新建。"""
+        """获取一个 WebView：优先从热备取，否则新建。
+
+        热备 WebView 需要重新加载模板以重置状态。
+        """
         if cls._standby is not None:
             view = cls._standby
             cls._standby = None
+            # 重新加载模板以重置 JS 状态
+            view.setUrl(cls._template_url())
         else:
             view = QWebEngineView()
             view.setMinimumHeight(60)
             view.page().setBackgroundColor(Qt.GlobalColor.transparent)
-            view.setUrl(cls._template_url())
             view.setObjectName("result_area")
+            view.setUrl(cls._template_url())
         cls._in_use += 1
         # 后台补充热备
         QTimer.singleShot(50, cls.prewarm)
@@ -133,9 +138,13 @@ class WebViewPool:
     def release(cls, view: QWebEngineView) -> None:
         """回收 WebView 到热备池，超过限额则销毁。"""
         cls._in_use = max(0, cls._in_use - 1)
+        # 停止正在进行的页面加载，避免 Chromium 崩溃
+        try:
+            view.page().triggerAction(view.page().WebAction.Stop)
+        except Exception:
+            pass
         if cls._standby is None and cls._in_use < 2:
-            # 重新加载模板，留作热备
-            view.setUrl(cls._template_url())
+            # 作为热备保留（不在此处 setUrl，由 acquire 端负责重载）
             cls._standby = view
         else:
             view.setParent(None)
