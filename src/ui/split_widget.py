@@ -12,13 +12,16 @@ import os
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QObject,
     QPropertyAnimation,
     QTimer,
     Qt,
     QUrl,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import QKeyEvent, QMouseEvent
+from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QFrame,
@@ -66,6 +69,16 @@ class _ResizeHandle(QWidget):
         if self._dragging:
             self._dragging = False
             event.accept()
+
+
+class _HeightBridge(QObject):
+    """QWebChannel 桥接对象：接收 JS 推送的内容高度变化。"""
+
+    height_changed = Signal(int)
+
+    @Slot(int)
+    def onHeightChanged(self, h: int) -> None:
+        self.height_changed.emit(h)
 
 
 class WebViewPool:
@@ -361,9 +374,15 @@ class SplitWidget(QFrame):
         self._page_ready = False
         self._pending_js: str | None = None
         self._pending_theme: str | None = None
-        self._is_finished_render: bool = False
+
+        # QWebChannel — JS 内容高度变化实时推送 → Python
+        self._height_bridge = _HeightBridge(self)
+        self._height_bridge.height_changed.connect(self._adjust_height)
+        self._web_channel = QWebChannel(self)
+        self._web_channel.registerObject("bridge", self._height_bridge)
+        self._result_view.page().setWebChannel(self._web_channel)
+
         self._result_view.loadFinished.connect(self._on_page_loaded)
-        # 重新加载模板以确保 loadFinished 触发（池中的 WebView 已加载过）
         template_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "markdown_template.html")
         )
@@ -505,7 +524,7 @@ class SplitWidget(QFrame):
         self._frozen_label.setVisible(True)
 
     def _thaw_webview(self) -> None:
-        """从热备池获取 WebView 并恢复显示。"""
+        """从热备池获取 WebView，设置 QWebChannel 并恢复显示。"""
         if self._result_view is not None:
             return
         view = WebViewPool.acquire()
@@ -514,8 +533,13 @@ class SplitWidget(QFrame):
         idx = self._body_layout.indexOf(self._frozen_label)
         if idx >= 0:
             self._body_layout.insertWidget(idx, view, 1)
+
+        # 重新注册 QWebChannel（池中 WebView 之前可能连接过其他 bridge）
+        self._web_channel = QWebChannel(self)
+        self._web_channel.registerObject("bridge", self._height_bridge)
+        view.page().setWebChannel(self._web_channel)
+
         view.loadFinished.connect(self._on_page_loaded)
-        # 确保 loadFinished 触发
         template_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "markdown_template.html")
         )
@@ -538,49 +562,24 @@ class SplitWidget(QFrame):
     def _update_webview(self, is_finished: bool = False) -> None:
         safe_text = json.dumps(self._current_answer)
         js_bool = "true" if is_finished else "false"
-        # 更新内容后返回 ResizeObserver 记录的准确高度
-        js_code = f"""
-            updateContent({safe_text}, {js_bool});
-            window.contentHeight || document.documentElement.scrollHeight;
-        """
-        self._is_finished_render = is_finished
+        # 更新内容；高度变化由 ResizeObserver → QWebChannel 实时推送
+        js_code = f"updateContent({safe_text}, {js_bool});"
         if self._page_ready:
-            self._result_view.page().runJavaScript(js_code, self._adjust_height)
+            self._result_view.page().runJavaScript(js_code)
         else:
             self._pending_js = js_code
 
     def _adjust_height(self, content_height: int) -> None:
-        """内容超出当前框高度时自动撑高；用户拖拽后锁定。"""
+        """QWebChannel 推送的内容高度变化回调。"""
         if self._user_resized or self._collapsed:
             return
         if content_height and content_height > 0:
             chrome_h = self._action_widget.height() + 20
             needed = content_height + chrome_h
-            if needed > self.height():  # 仅在内容超出时才生长
+            if needed > self.height():
                 new_h = min(needed, 600)
                 self._saved_height = new_h
                 self.setFixedHeight(new_h)
-
-        # KaTeX 渲染有延迟，完成后需要重新检查高度
-        if self._is_finished_render:
-            self._is_finished_render = False
-            self._schedule_height_recheck(delays_ms=[150, 400, 800])
-
-    def _schedule_height_recheck(self, delays_ms: list[int]) -> None:
-        """在指定延迟后重新检查 WebView 内容高度（捕获 KaTeX 延迟渲染）。"""
-        from PySide6.QtCore import QTimer
-        for delay in delays_ms:
-            QTimer.singleShot(delay, self._recheck_height)
-
-    def _recheck_height(self) -> None:
-        """从 JS 读取 ResizeObserver 记录的高度。"""
-        if self._collapsed or self._user_resized:
-            return
-        if self._page_ready:
-            self._result_view.page().runJavaScript(
-                "window.contentHeight || document.documentElement.scrollHeight;",
-                self._adjust_height,
-            )
 
     def _on_page_loaded(self, ok: bool) -> None:
         if ok:
