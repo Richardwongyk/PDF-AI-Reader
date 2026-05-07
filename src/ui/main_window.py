@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +33,7 @@ from src.core.models import (
     BlockType,
     DocumentBlock,
     SplitMode,
+    TaskType,
 )
 from src.core.pdf_engine import DocumentEngine
 from src.core.ai_engine import AIEngine
@@ -375,9 +376,8 @@ class MainWindow(QMainWindow):
         elapsed = time.time() - start
         self.logger.info("文档加载完成，耗时 %.2fs", elapsed)
 
-        # PyMuPDF4LLM + MFR 异步增强（不阻塞解析线程）
+        # PyMuPDF4LLM 异步增强（不阻塞解析线程）
         QTimer.singleShot(2000, lambda: self._run_pymupdf4llm_enhance(result))
-        QTimer.singleShot(3000, lambda: self._run_mfr_async(result))
 
     def _on_parse_progress(self, current: int, total: int) -> None:
         """解析进度更新。"""
@@ -467,22 +467,33 @@ class MainWindow(QMainWindow):
     def _on_block_translate(self, block_id: str) -> None:
         """右键 → 翻译段落。"""
         self.logger.info("翻译请求: %s", block_id)
+        block = self._find_block(block_id)
         split = self._pdf_viewer.open_split_widget(block_id, SplitMode.TRANSLATION)
-        if split is None:
+
+        if not split or not block:
             return
-        # 已有内容的 split 不重复翻译（除非已折叠则展开）
         if split.collapsed:
             split.expand()
             return
         if split._current_answer:
             return
-        block = self._find_block(block_id)
-        if block and split:
-            split.set_busy(True)
-            self._ai_engine.request_translation(block)
-        else:
-            self.logger.warning("翻译请求失败: block=%s found=%s split=%s",
-                                block_id, block is not None, split is not None)
+
+        split.set_busy(True)
+
+        # 按需插队识别：公式未识别 → VIP 线程单独识别，识别完自动翻译
+        if block.block_type == BlockType.FORMULA and not block.metadata.get("mfr_recognized"):
+            split.display_answer_stream("⏳ 正在启动视觉 AI 提取高精度公式，请稍候 1~2 秒...\n\n")
+
+            thread = _OnDemandOcrThread(self._doc_engine.document.name, block)
+            thread.finished_signal.connect(
+                lambda latex, err: self._on_demand_ocr_finished(latex, err, block, split, TaskType.TRANSLATION)
+            )
+            thread.finished.connect(lambda t=thread: self._ai_engine._active_threads.remove(t) if t in self._ai_engine._active_threads else None)
+            self._ai_engine._active_threads.append(thread)
+            thread.start()
+            return
+
+        self._ai_engine.request_translation(block)
 
     def _on_block_question(self, block_id: str) -> None:
         """右键 → 提问。"""
@@ -495,12 +506,44 @@ class MainWindow(QMainWindow):
     def _on_block_explain(self, block_id: str) -> None:
         """右键 → 解释概念。"""
         block = self._find_block(block_id)
-        if block:
-            split = self._pdf_viewer.open_split_widget(block_id, SplitMode.EXPLANATION)
-            if split:
-                # 自动发送解释请求
-                question = f"请解释这个概念的含义：{block.content[:100]}"
-                self._on_split_ask(question, block_id)
+        split = self._pdf_viewer.open_split_widget(block_id, SplitMode.EXPLANATION)
+
+        if not split or not block:
+            return
+
+        split.set_busy(True)
+
+        # 按需插队识别：公式未识别 → VIP 线程单独识别，识别完自动解释
+        if block.block_type == BlockType.FORMULA and not block.metadata.get("mfr_recognized"):
+            split.display_answer_stream("⏳ 正在启动视觉 AI 提取高精度公式，请稍候 1~2 秒...\n\n")
+
+            thread = _OnDemandOcrThread(self._doc_engine.document.name, block)
+            thread.finished_signal.connect(
+                lambda latex, err: self._on_demand_ocr_finished(latex, err, block, split, TaskType.QA)
+            )
+            thread.finished.connect(lambda t=thread: self._ai_engine._active_threads.remove(t) if t in self._ai_engine._active_threads else None)
+            self._ai_engine._active_threads.append(thread)
+            thread.start()
+            return
+
+        question = f"请解释这个概念的含义：{block.content[:100]}"
+        self._on_split_ask(question, block_id)
+
+    def _on_demand_ocr_finished(self, latex: str, err: str, block: DocumentBlock, split: SplitWidget, task_type: TaskType) -> None:
+        """VIP 专属线程识别完成后的回调，无缝衔接大模型任务。"""
+        if latex:
+            block.content = f"$$\n{latex}\n$$"
+            block.metadata["latex"] = latex
+            block.metadata["mfr_recognized"] = True
+
+            split.clear()
+            if task_type == TaskType.TRANSLATION:
+                self._ai_engine.request_translation(block)
+            else:
+                question = f"请详细解释这个公式的物理/数学含义，并说明各个符号代表什么：\n$$\n{latex}\n$$"
+                self._on_split_ask(question, block.id)
+        else:
+            split.show_error(f"公式提取失败: {err}")
 
     def _on_split_ask(self, question: str, block_id: str) -> None:
         """裂缝中提交问题 → 调用 AI 问答。"""
@@ -677,84 +720,24 @@ class MainWindow(QMainWindow):
         )
 
     def _run_pymupdf4llm_enhance(self, result) -> None:
-        """后台线程运行 PyMuPDF4LLM 增强解析。"""
-        import threading
-        thread = threading.Thread(
-            target=self._run_pymupdf4llm_thread, args=(result,), daemon=True
-        )
+        """启动 QThread 运行 PyMuPDF4LLM 增强解析，完成后通过 Signal 回到主线程。"""
+        # 仅拷贝非图片块，避免跨线程读写 UI 持有的原对象
+        text_blocks = [b for b in result.blocks if b.block_type != BlockType.IMAGE]
+        thread = _PyMuPDF4LLMThread(result.filepath, text_blocks)
+        thread.finished_signal.connect(self._on_pymupdf4llm_finished)
+        thread.finished.connect(lambda t=thread: self._ai_engine._active_threads.remove(t) if t in self._ai_engine._active_threads else None)
+        self._ai_engine._active_threads.append(thread)
         thread.start()
 
-    def _run_pymupdf4llm_thread(self, result) -> None:
-        try:
-            from src.core.pdf_engine import PyMuPDF4LLMChunker
-            import fitz
-            enhancer = PyMuPDF4LLMChunker()
-            if not enhancer.is_available:
-                return
-            doc = fitz.open(result.filepath)
-            enhancer.enhance_blocks(doc, result.blocks)
-            doc.close()
-            count = sum(1 for b in result.blocks
-                        if b.metadata.get("enhanced_by") == "pymupdf4llm")
-            self.logger.info("PyMuPDF4LLM 后台线程完成: %d 个块", count)
-        except Exception as e:
-            self.logger.warning("PyMuPDF4LLM 后台线程失败: %s", e)
+    def _on_pymupdf4llm_finished(self, enhanced_data: list[tuple[str, str]]) -> None:
+        """主线程槽函数：安全更新 block.content。"""
+        update_map = dict(enhanced_data)
+        for block in self._current_blocks:
+            if block.id in update_map:
+                block.content = update_map[block.id]
+                block.metadata["enhanced_by"] = "pymupdf4llm"
+        self.logger.info("PyMuPDF4LLM 增强完成: %d 个块", len(enhanced_data))
 
-    def _run_mfr_async(self, result) -> None:
-        """后台线程运行 MFR 公式识别（完全不阻塞 UI）。"""
-        import threading
-        thread = threading.Thread(
-            target=self._run_mfr_thread, args=(result,), daemon=True
-        )
-        thread.start()
-
-    def _run_mfr_thread(self, result) -> None:
-        """MFR 工作线程：加载模型 + 识别公式。"""
-        try:
-            from src.core.math_ocr import MathOCR
-            from src.core.models import BlockType
-            import fitz
-            ocr = MathOCR()
-            if not ocr.is_available:
-                return
-            # 收集所有 FORMULA 块：chunker 检测的 + MFD 视觉检测的
-            formula_blocks = [
-                b for b in result.blocks
-                if b.block_type == BlockType.FORMULA
-            ]
-            if not formula_blocks:
-                self.logger.info("MFR: 无公式块")
-                return
-            self._status_model_label.setText(f"🔬 MFR 识别 {len(formula_blocks)} 个公式...")
-            self.logger.info("MFR 后台线程: %d 个公式待识别", len(formula_blocks))
-            ocr._ensure_model()
-            doc = fitz.open(result.filepath)
-            crops: list[bytes] = []
-            crop_map: list[int] = []
-            for i, fb in enumerate(formula_blocks):
-                try:
-                    page = doc[fb.page_num]
-                    rect = fitz.Rect(*fb.bbox)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0), clip=rect)
-                    crops.append(pix.tobytes("png"))
-                    crop_map.append(i)
-                except Exception:
-                    pass
-            if crops:
-                latex_results = ocr.recognize_batch(crops)
-                mfr_count = 0
-                for j, latex in enumerate(latex_results):
-                    if latex:
-                        fb = formula_blocks[crop_map[j]]
-                        fb.content = f"$$\n{latex}\n$$"
-                        fb.metadata["latex"] = latex
-                        fb.metadata["mfr_recognized"] = True
-                        mfr_count += 1
-                self.logger.info("MFR 后台线程完成: %d/%d 公式 → LaTeX",
-                                 mfr_count, len(formula_blocks))
-            doc.close()
-        except Exception as e:
-            self.logger.warning("MFR 后台线程失败: %s", e)
 
     def _check_first_launch(self) -> None:
         """首次启动检查：验证本地模型状态。"""
@@ -824,3 +807,78 @@ class MainWindow(QMainWindow):
         # 3. 保存术语表变更
         self._glossary_manager.save()
         event.accept()
+
+
+class _PyMuPDF4LLMThread(QThread):
+    """后台运行 PyMuPDF4LLM 增强，完成后通过 Signal 将结果发回主线程。"""
+    finished_signal = Signal(list)  # list[tuple[str, str]]
+
+    def __init__(self, filepath: str, blocks: list[DocumentBlock]) -> None:
+        super().__init__()
+        self._filepath = filepath
+        self._blocks_copy = [b.model_copy() for b in blocks]
+
+    def run(self) -> None:
+        try:
+            from src.core.pdf_engine import PyMuPDF4LLMChunker
+            import fitz
+
+            enhancer = PyMuPDF4LLMChunker()
+            if not enhancer.is_available:
+                return
+
+            doc = fitz.open(self._filepath)
+            enhancer.enhance_blocks(doc, self._blocks_copy)
+            doc.close()
+
+            enhanced = [
+                (b.id, b.content) for b in self._blocks_copy
+                if b.metadata.get("enhanced_by") == "pymupdf4llm"
+            ]
+            if enhanced:
+                self.finished_signal.emit(enhanced)
+        except Exception:
+            pass
+
+
+class _OnDemandOcrThread(QThread):
+    """按需插队 OCR 线程：专门为用户当前点击的公式提供 VIP 极速识别。"""
+    finished_signal = Signal(str, str)  # (latex_result, error_message)
+
+    def __init__(self, filepath: str, block: DocumentBlock):
+        super().__init__()
+        self.filepath = filepath
+        self.block = block
+
+    def run(self) -> None:
+        try:
+            import fitz
+            from src.core.math_ocr import MathOCR
+            ocr = MathOCR()  # 单例模式，瞬间返回
+            ocr._ensure_model()
+
+            doc = fitz.open(self.filepath)
+            page = doc[self.block.page_num]
+
+            # 1. 获取原始边界框
+            rect = fitz.Rect(*self.block.bbox)
+
+            # 2. 【核心修复：防截断 Padding】向外扩展 8 个像素
+            rect.x0 = max(0, rect.x0 - 8)
+            rect.y0 = max(0, rect.y0 - 8)
+            rect.x1 = min(page.rect.width, rect.x1 + 8)
+            rect.y1 = min(page.rect.height, rect.y1 + 8)
+
+            # 3. 【核心修复：动态缩放】
+            zoom_w = 768.0 / max(rect.width, 1)
+            zoom_h = 96.0 / max(rect.height, 1)
+            zoom = max(1.5, min(4.0, min(zoom_w, zoom_h)))
+
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=rect)
+            img_bytes = pix.tobytes("png")
+            doc.close()
+
+            latex = ocr.recognize(img_bytes)
+            self.finished_signal.emit(latex, "")
+        except Exception as e:
+            self.finished_signal.emit("", str(e))

@@ -31,6 +31,10 @@ def should_include(filepath: Path, root: Path, output_name: str) -> bool:
     if filepath.name == output_name or filepath.name == Path(__file__).name:
         return False
 
+    # 排除敏感/不必要文件
+    if filepath.name in {"config.yaml", "极简设计报告.md"}:
+        return False
+
     # 获取相对于根目录的路径
     try:
         rel = filepath.relative_to(root)

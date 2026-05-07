@@ -12,15 +12,8 @@ import re
 from typing import Any
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QObject, QRunnable, QSize, QThread, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal
 from PySide6.QtGui import QPixmap
-
-# QtPdf (PDFium) — 矢量渲染引擎，PySide6 自带
-try:
-    from PySide6.QtPdf import QPdfDocument
-    _HAS_QTPDF = True
-except ImportError:
-    _HAS_QTPDF = False
 
 from src.core.base_service import BaseService
 from src.core.models import (
@@ -495,16 +488,15 @@ class PyMuPDF4LLMChunker:
     def _align_markdown_to_blocks(
         self, md_text: str, blocks: list[DocumentBlock]
     ) -> None:
-        """将 Markdown 文本按段落匹配回 block，替换 content。
-
-        策略：对每个块，在 Markdown 中查找最长公共子串，
-        若匹配度 > 60% 则用 Markdown 版本替换。
-        """
+        """将 Markdown 文本按段落匹配回 block，替换 content。"""
         from difflib import SequenceMatcher
         md_paragraphs = [p.strip() for p in md_text.split("\n\n") if p.strip()]
 
         for block in blocks:
             if block.block_type.value == "image":
+                continue
+            # 【修复】防覆盖：跳过已被 MFR 识别的公式块，防止 Markdown 破坏 LaTeX 结果
+            if block.block_type == BlockType.FORMULA and block.metadata.get("mfr_recognized"):
                 continue
             best_ratio = 0.0
             best_text = ""
@@ -543,18 +535,9 @@ class DocumentEngine(BaseService):
     page_rendered = Signal(int, object)  # (page_num, QPixmap) — 异步渲染完成
 
     def __init__(self, config: AppConfig, parent: QObject | None = None) -> None:
-        """初始化文档引擎。
-
-        Args:
-            config: 应用配置对象。
-            parent: Qt 父对象。
-        """
         super().__init__(parent)
         self._config = config
         self._doc: fitz.Document | None = None
-        # QtPdf (PDFium) 渲染后端 — 矢量高清显示
-        self._qtpdf_doc: QPdfDocument | None = None
-        self._qtpdf_ready: bool = False
         self._chunker = DocumentChunker()
         self._preprocessor = TextPreprocessor()
         # 异步渲染
@@ -592,8 +575,8 @@ class DocumentEngine(BaseService):
 
     @property
     def using_qtpdf(self) -> bool:
-        """是否正在使用 QtPdf (PDFium) 进行矢量渲染。"""
-        return self._qtpdf_ready
+        """是否正在使用 QtPdf (已废弃，始终返回 False 保持接口兼容)。"""
+        return False
 
     def open_document(self, filepath: str) -> None:
         """打开 PDF 文件并在工作线程中执行解析流水线。
@@ -631,60 +614,29 @@ class DocumentEngine(BaseService):
         self.logger.info("新解析线程已启动")
 
     def _on_parse_finished(self, result: ParseResult) -> None:
-        """解析完成的内部处理。
-
-        Args:
-            result: ParseResult 对象。
-        """
+        """解析完成的内部处理。"""
         self.logger.info("解析完成: %s (%d 页, %d 块)", result.title or result.filepath, result.page_count, len(result.blocks))
 
-        # 重新打开 PyMuPDF 文档（供文本提取 / BBox 查询）
+        # 重新打开 PyMuPDF 文档（供文本提取 / BBox 查询 / 渲染）
         try:
             self._doc = fitz.open(result.filepath)
         except Exception as e:
             self.logger.warning("PyMuPDF 重新打开文档失败: %s", e)
             self._doc = None
 
-        # 释放旧的 QtPdf 实例（避免双文档冲突）
-        if self._qtpdf_doc is not None:
-            self._qtpdf_doc.deleteLater()
-            self._qtpdf_doc = None
-        self._qtpdf_ready = False
-
-        # 加载 QtPdf (PDFium) 文档（供矢量渲染）
-        if _HAS_QTPDF:
-            try:
-                self._qtpdf_doc = QPdfDocument(self)
-                self._qtpdf_doc.load(result.filepath)
-                if self._qtpdf_doc.status() == QPdfDocument.Status.Ready:
-                    self._qtpdf_ready = True
-                    self.logger.info("QtPdf (PDFium) 矢量渲染就绪")
-                elif self._qtpdf_doc.status() == QPdfDocument.Status.Error:
-                    self.logger.warning("QtPdf 加载失败，回退到 PyMuPDF 渲染")
-            except Exception as e:
-                self.logger.warning("QtPdf 初始化失败 (%s)，回退到 PyMuPDF 渲染", e)
-        else:
-            self.logger.info("QtPdf 模块不可用，使用 PyMuPDF 渲染")
-
         self._pixmap_cache.clear()
         self.parse_finished.emit(result)
 
     def close_document(self) -> None:
         """关闭当前文档，释放所有相关资源。"""
-        self.logger.info("close_document: START (has_thread=%s, has_doc=%s, has_qtpdf=%s)",
-                         self._thread is not None, self._doc is not None,
-                         self._qtpdf_doc is not None)
+        self.logger.info("close_document: START")
 
         # 1. 停止解析线程
         if self._thread is not None:
-            self.logger.info("close_document: 停止解析线程 (running=%s)...",
-                             self._thread.isRunning())
             if self._thread.isRunning():
                 self._thread.requestInterruption()
                 self._thread.quit()
-                self.logger.info("close_document: wait 5s...")
                 self._thread.wait(5000)
-                self.logger.info("close_document: wait done")
             try:
                 self._thread.progress.disconnect()
                 self._thread.finished_parsing.disconnect()
@@ -694,48 +646,25 @@ class DocumentEngine(BaseService):
                 pass
             self._thread.deleteLater()
             self._thread = None
-            self.logger.info("close_document: 线程已清理")
 
         # 2. 关闭 PyMuPDF
         if self._doc:
-            self.logger.info("close_document: 关闭 fitz.Document...")
             self._doc.close()
             self._doc = None
 
-        # 3. 释放 QtPdf
-        if self._qtpdf_doc is not None:
-            self.logger.info("close_document: 释放 QPdfDocument...")
-            self._qtpdf_doc.deleteLater()
-            self._qtpdf_doc = None
-            self._qtpdf_ready = False
-
-        # 4. 取消异步渲染
-        self.logger.info("close_document: 取消异步渲染 (pending=%d)...",
-                         len(self._pending_renders))
+        # 3. 取消异步渲染
         self._pending_renders.clear()
         self._render_pool.clear()
         self._render_pool.waitForDone(2000)
-        self.logger.info("close_document: 渲染池已清空")
 
-        # 5. 清空缓存
+        # 4. 清空缓存
         self._pixmap_cache.clear()
         self.logger.info("close_document: END")
 
     def get_page_pixmap(
         self, page_num: int, dpi: int = 150
     ) -> QPixmap | None:
-        """获取指定页面的渲染图像（主线程安全）。
-
-        优先使用 QtPdf (PDFium) 进行矢量渲染，品质更高；
-        若 QtPdf 不可用则回退到 PyMuPDF 光栅化。
-
-        Args:
-            page_num: 页码（0-based）。
-            dpi: 渲染分辨率。
-
-        Returns:
-            QPixmap 对象，若页面不存在则返回 None。
-        """
+        """获取指定页面的渲染图像（主线程安全）。"""
         if not self._doc or page_num < 0 or page_num >= self._doc.page_count:
             return None
 
@@ -745,32 +674,18 @@ class DocumentEngine(BaseService):
 
         qpixmap: QPixmap | None = None
 
-        # 优先使用 QtPdf (PDFium) 矢量渲染
-        if self._qtpdf_ready and self._qtpdf_doc is not None:
-            try:
-                page = self._doc[page_num]
-                zoom = dpi / 72.0
-                pixel_w = max(int(page.rect.width * zoom), 1)
-                pixel_h = max(int(page.rect.height * zoom), 1)
-                image = self._qtpdf_doc.render(page_num, QSize(pixel_w, pixel_h))
-                if not image.isNull():
-                    qpixmap = QPixmap.fromImage(image)
-            except Exception:
-                self.logger.debug(
-                    "QtPdf 渲染失败 page=%d, 回退到 PyMuPDF", page_num
-                )
-
-        # 回退：PyMuPDF 光栅化
-        if qpixmap is None:
-            try:
-                page = self._doc[page_num]
-                zoom = dpi / 72.0
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-                qpixmap = QPixmap()
-                qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
-            except Exception:
-                return None
+        # 【修复】统一使用 PyMuPDF 2x 超分渲染 + devicePixelRatio
+        # 内部以 2 倍 DPI 渲染物理像素，setDevicePixelRatio 保证逻辑尺寸不变
+        try:
+            page = self._doc[page_num]
+            zoom = (dpi * 2) / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+            qpixmap = QPixmap()
+            qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
+            qpixmap.setDevicePixelRatio(2.0)
+        except Exception:
+            return None
 
         # 存入缓存
         if page_num not in self._pixmap_cache:
@@ -816,7 +731,7 @@ class DocumentEngine(BaseService):
             return
 
         self._pending_renders.add(page_num)
-        task = _PageRenderTask(self._doc.name, page_num, dpi)
+        task = _PageRenderTask(self._doc, page_num, dpi)
         task.result.connect(self._on_async_page_rendered)
         self._render_pool.start(task)
 
@@ -844,16 +759,16 @@ class DocumentEngine(BaseService):
 class _PageRenderTask(QRunnable):
     """在后台线程中渲染单个 PDF 页面为 QPixmap。
 
-    每个 Worker 创建独立的 PyMuPDF Document 实例以确保线程安全。
+    直接共享主线程已打开的 fitz.Document（PyMuPDF ≥ 1.18 允许多线程只读并发）。
     渲染完成后通过信号将结果传回主线程。
     """
 
     class _Signals(QObject):
         result = Signal(int, int, QPixmap)  # page_num, dpi, QPixmap
 
-    def __init__(self, filepath: str, page_num: int, dpi: int) -> None:
+    def __init__(self, doc: fitz.Document, page_num: int, dpi: int) -> None:
         super().__init__()
-        self._filepath = filepath
+        self._doc = doc
         self._page_num = page_num
         self._dpi = dpi
         self._signals = self._Signals()
@@ -864,14 +779,13 @@ class _PageRenderTask(QRunnable):
 
     def run(self) -> None:
         try:
-            doc = fitz.open(self._filepath)
-            page = doc[self._page_num]
-            zoom = self._dpi / 72.0
+            page = self._doc[self._page_num]
+            zoom = (self._dpi * 2) / 72.0  # 2x 超分
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             qpixmap = QPixmap()
             qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
-            doc.close()
+            qpixmap.setDevicePixelRatio(2.0)
             self._signals.result.emit(self._page_num, self._dpi, qpixmap)
         except Exception:
             self._signals.result.emit(self._page_num, self._dpi, QPixmap())
