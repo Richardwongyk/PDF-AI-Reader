@@ -28,24 +28,11 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
 from src.core.models import AppConfig
-from src.core.pdf_engine import DocumentEngine
-from src.core.ai_engine import (
-    AIEngine,
-    BaseLLMClient,
-    HybridModelRouter,
-    LiteLLMClient,
-    MockLLMClient,
-    OllamaClient,
-    QAService,
-    TranslationService,
-)
-from src.core.knowledge_engine import EmbeddingService, KnowledgeEngine
-from src.core.glossary_manager import GlossaryManager
-from src.core.navigator import Navigator
 from src.core.service_registry import CoreServiceRegistry
-from src.data.chroma_repo import ChromaRepo
 from src.data.config_manager import ConfigManager
-from src.ui.main_window import MainWindow
+# 以下重型模块延迟到 build_services() 中导入，加速启动：
+# DocumentEngine, AIEngine, KnowledgeEngine, GlossaryManager, Navigator,
+# ChromaRepo, EmbeddingService, LiteLLMClient, MockLLMClient 等
 
 
 def setup_logging() -> None:
@@ -117,16 +104,20 @@ def build_services() -> CoreServiceRegistry:
 
     config: AppConfig = config_manager.get()
 
-    # --- 2. 数据层 ---
+    # --- 2. 数据层（延迟导入 chromadb） ---
     data_dir = Path(__file__).parent.parent / "data"
     knowledge_dir = data_dir / "knowledge_bases"
     glossary_dir = data_dir / "glossary"
 
+    from src.data.chroma_repo import ChromaRepo  # 触发 chromadb 导入
     chroma_repo = ChromaRepo(str(knowledge_dir))
     registry.register("chroma_repo", chroma_repo)
 
-    # --- 3. AI 客户端 ---
-    # 主客户端：有 API Key→LiteLLM云端，无→Mock模拟
+    # --- 3. AI 客户端（延迟导入 ollama/litellm） ---
+    from src.core.ai_engine import (
+        BaseLLMClient, HybridModelRouter, LiteLLMClient,
+        MockLLMClient, OllamaClient, QAService, TranslationService,
+    )
     primary_client: BaseLLMClient
     default_cloud_provider = config.model.cloud
     cloud_api_key = config_manager.get_api_key(default_cloud_provider)
@@ -137,16 +128,15 @@ def build_services() -> CoreServiceRegistry:
         logging.info("未配置云端API Key，使用模拟客户端（测试模式）")
         primary_client = MockLLMClient()
 
-    # 模型路由器（Mock 作为最终回退，保证不崩溃）
     fallback_client = MockLLMClient()
     router = HybridModelRouter(primary_client, fallback_client, config)
 
     # --- 4. 核心引擎 ---
-    # 文档引擎
+    from src.core.pdf_engine import DocumentEngine
     document_engine = DocumentEngine(config)
     registry.register("document_engine", document_engine)
 
-    # 嵌入服务：本地 Ollama (bge-m3) 优先，不可用时使用模拟向量
+    from src.core.knowledge_engine import EmbeddingService, KnowledgeEngine
     embed_client: BaseLLMClient
     try:
         embed_client = OllamaClient(
@@ -160,28 +150,29 @@ def build_services() -> CoreServiceRegistry:
     except Exception:
         logging.info("本地嵌入模型不可用，使用模拟向量（语义检索精度降低）")
         embed_client = MockLLMClient()
+        # 状态栏提示由 MainWindow._check_first_launch 负责
     embed_service = EmbeddingService(embed_client)
     knowledge_engine = KnowledgeEngine(embed_service, chroma_repo)
     registry.register("knowledge_engine", knowledge_engine)
 
     # 术语表管理器
+    from src.core.glossary_manager import GlossaryManager
     glossary_manager = GlossaryManager(str(glossary_dir))
     registry.register("glossary_manager", glossary_manager)
 
-    # 翻译服务
     translation_service = TranslationService(
         router,
         glossary_entries=glossary_manager.get_entries(["math", "cs_ml", "physics"]),
     )
-
-    # 问答服务
     qa_service = QAService(router)
 
     # AI 引擎
+    from src.core.ai_engine import AIEngine
     ai_engine = AIEngine(router, translation_service, qa_service, config)
     registry.register("ai_engine", ai_engine)
 
     # --- 5. 辅助服务 ---
+    from src.core.navigator import Navigator
     navigator = Navigator()
     registry.register("navigator", navigator)
 
@@ -203,18 +194,16 @@ def main() -> int:
     # 创建 Qt 应用
     app = QApplication(sys.argv)
     app.setApplicationName("PDF AI Reader")
-    app.setOrganizationName("PDF AI Reader")
     app.setApplicationVersion("1.0.0")
 
     # 初始化 WebEngine 默认配置（避免白屏）
+    from PySide6.QtWebEngineCore import QWebEngineProfile
     profile = QWebEngineProfile.defaultProfile()
     profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
 
     try:
-        # 构建服务
         services = build_services()
-
-        # 创建主窗口
+        from src.ui.main_window import MainWindow
         window = MainWindow(services)
         window.show()
 
