@@ -479,20 +479,6 @@ class MainWindow(QMainWindow):
             return
 
         split.set_busy(True)
-
-        # 按需插队识别：公式未识别 → VIP 线程单独识别，识别完自动翻译
-        if block.block_type == BlockType.FORMULA and not block.metadata.get("mfr_recognized"):
-            split.display_answer_stream("⏳ 正在启动视觉 AI 提取高精度公式，请稍候 1~2 秒...\n\n")
-
-            thread = _OnDemandOcrThread(self._doc_engine.document.name, block)
-            thread.finished_signal.connect(
-                lambda latex, err: self._on_demand_ocr_finished(latex, err, block, split, TaskType.TRANSLATION)
-            )
-            thread.finished.connect(lambda t=thread: self._ai_engine._active_threads.remove(t) if t in self._ai_engine._active_threads else None)
-            self._ai_engine._active_threads.append(thread)
-            thread.start()
-            return
-
         self._ai_engine.request_translation(block)
 
     def _on_block_question(self, block_id: str) -> None:
