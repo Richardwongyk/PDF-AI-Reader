@@ -307,6 +307,13 @@ class MainWindow(QMainWindow):
     def _on_close_document(self) -> None:
         """关闭当前文档。"""
         self.logger.info("_on_close_document: START")
+        # 停止所有正在运行的 AI 线程，防止 token 信号刷屏
+        for t in list(self._ai_engine._active_threads):
+            if t.isRunning():
+                t.requestInterruption()
+                t.quit()
+                t.wait(1000)
+        self._ai_engine._active_threads.clear()
         self.logger.info("_on_close_document: close_document...")
         self._doc_engine.close_document()
         self.logger.info("_on_close_document: pdf_viewer.clear...")
@@ -533,7 +540,7 @@ class MainWindow(QMainWindow):
         if split:
             split.display_answer_stream(token)
         else:
-            self.logger.warning("翻译token到达但找不到SplitWidget: %s", block_id)
+            self.logger.debug("翻译token SplitWidget已关闭: %s", block_id)
 
     def _on_translation_finished(self, full_text: str, block_id: str) -> None:
         """翻译完成——渲染 Markdown/LaTeX。"""
@@ -716,7 +723,9 @@ class MainWindow(QMainWindow):
                 if b.block_type == BlockType.FORMULA
             ]
             if not formula_blocks:
+                self.logger.info("MFR: 无公式块")
                 return
+            self._status_model_label.setText(f"🔬 MFR 识别 {len(formula_blocks)} 个公式...")
             self.logger.info("MFR 后台线程: %d 个公式待识别", len(formula_blocks))
             ocr._ensure_model()
             doc = fitz.open(result.filepath)
