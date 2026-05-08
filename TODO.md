@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 51 次提交 + 7 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (重构 Phase 1+2 已完成)
+> 基于 git 日志 55 次提交 + 7 个新增文件 + 5 个开源项目深度调研
+> 最后更新：2026-05-08 (DPR 清晰度修复完成，开始方向预渲染)
 
 ---
 
@@ -87,13 +87,17 @@
 | `main_window.py` | `_OnDemandOcrThread` 按需 OCR；动态缩放；`_on_demand_ocr_finished` 回调 | ✅ 已提交 |
 | `pdf_viewer.py` | DPR 感知：`_build_segment_widget` 物理/逻辑像素隔离；`open_split_widget` 逻辑宽度 | ✅ 已提交 |
 
-### 阶段 8：系统重构 — 四层架构基础设施 (3 commits, 本次会话)
+### 阶段 8：系统重构 — 四层架构基础设施 (7 commits, 本次会话)
 
 | Commit | 说明 |
 |--------|------|
-| `0b0f4b3` | **重构 Phase 1+2: ServiceContainer 懒加载 + 四级错误处理 + 瓦片化渲染架构**。新建 7 个文件 (+1818/-264)：`service_container.py` (借鉴 PDFCrop)、`error_handler.py` (借鉴 PDFCrop)、`page_cache.py` (借鉴 PDFCrop)、`ai_cache.py` (SQLite)、`tile_cache.py` (借鉴 qpageview)、`tile_renderer.py` (借鉴 qpageview+Syncfusion)。`main.py` 中重量级服务全部懒加载，`build_services()` 从 ~13s 降至 0.33s。 |
-| `94549d6` | **修复瓦片化渲染：QPainter 绘制模式**（借鉴 qpageview `AbstractRenderer.paint()`）。`_LazyPageWidget` 改用 `paintEvent` + `QPainter.drawPixmap()` 绘制瓦片，全页 pixmap 渲染后切片存入 TileCache。 |
-| `058e52a` | **修复画质退化**：paintEvent 改为直接绘制全页 pixmap（借鉴 qpageview `PdfRenderer.draw()` 单 tile 模式），消除瓦片切片精度损失。瓦片切片保留（存入 TileCache）但仅作后台缓存预热，不参与显示。 |
+| `0b0f4b3` | **重构 Phase 1+2: ServiceContainer 懒加载 + 四级错误处理 + 瓦片化渲染架构**。新建 7 个文件 (+1818/-264)。 |
+| `94549d6` | **QPainter 绘制模式**（借鉴 qpageview `AbstractRenderer.paint()`）。`_LazyPageWidget` 改用 `paintEvent` + `QPainter.drawPixmap()`。 |
+| `058e52a` | **修复画质退化**：paintEvent 改为直接绘制全页 pixmap（借鉴 qpageview `PdfRenderer.draw()` 单 tile 模式）。 |
+| `9482d54` | **更新 TODO.md**：记录 Phase 1+2 完成状态 + `pack_code.py` 排除 `开源借鉴/` 目录。 |
+| `482e3f0` | **修复清晰度 (第一轮)**：删除硬编码 DPR=2.0，渲染到屏幕物理 DPI。`drawPixmap(x,y,pixmap)` 不加宽高。 |
+| `25d4ab6` | **修复清晰度 (第二轮)**：使用真实屏幕 DPR 替代硬编码 2.0。pixmap 设置 `devicePixelRatio(screen_dpr)` 后逻辑尺寸匹配 widget。 |
+| `fbf3dbb` | **修复渲染失败**：分离 `_scale`(逻辑DPI) 和 `_dpi`(物理DPI)。widget 用逻辑 DPI 计算尺寸，pixmap 用物理 DPI 渲染。 |
 
 **新增文件 (7 个)**：
 
