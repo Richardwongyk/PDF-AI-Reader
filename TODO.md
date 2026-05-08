@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 77 次提交 + 11 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (阶段三应用层解耦完成 + 瓦片混合绘制 + QSS 清理)
+> 基于 git 日志 78 次提交 + 11 个新增文件 + 5 个开源项目深度调研
+> 最后更新：2026-05-08 (P0 大PDF性能 — 虚拟布局 + Widget池化 + DisplayList)
 
 ---
 
@@ -413,3 +413,596 @@ src/
   data/   — 数据层 (ConfigManager, ChromaRepo)
   main.py — 入口 + build_services (懒加载编排)
 ```
+
+
+
+
+
+---
+我已经并将继续大量借鉴sumatrapdf、pdfcrop、qpageview、sioyek、mad-professor-public等五个开源PDF阅读器，请联网搜索这几个PDF阅读器的详细源代码和设计。注意，我不惮于大量修改代码。
+我的目标是让性能与这几个比如sumatrapdf对齐，现在的问题是：1、大型PDF打开极慢，会卡死程序；2、放大、缩小功能目前是失效的；3、翻译框的宽度没有与页面对齐，我希望无论是放大还是缩小，翻译框的宽度能够始终与页面对齐；4、翻译框目前能随着文字的生成调整高度，但是由于翻译框上下有两层边框不能显示文字(说白了就是显示文字的区域的高度没有占满整个翻译框)导致仍然不能实际展开到完整显示文字的高度，同时我希望调整显示文字的区域的高度没有占满整个翻译框的问题，希望调小文字边距；5、有时遇到分栏等文本，我希望翻译框中显示文字部分的宽度能够与被翻译的文本的宽度大小(大致是那个紫色框的宽度，有时候不太一样)基本一致，左右基本对齐；如果统一高度或很相近的高度存在两个翻译，可以把两段文字显示到同一个翻译框中，左右正好错开，方式如上所述(你也可以试着优化)；请详细分析几个我想借鉴的开源仓库，并仔细分析，给出问题的完整解决方案。
+---
+一、代码库的性能瓶颈：逐行溯源
+想对标 SumatraPDF，必须先精确理解现有实现的反模式到底在哪里。以下是对五个问题点的逐行溯源分析。
+
+1.1 PdfViewer.load_document（pdf_viewer.py）：O(n²) 的 Widget 瀑布
+打开500页PDF时，load_document执行以下循环：
+
+python
+for page_num in sorted(pages.keys()):
+    rect = doc[page_num].rect
+    w_px = int(rect.width * self._scale)
+    h_px = int(rect.height * self._scale)
+    container = _LazyPageWidget(page_num, w_px, h_px)
+    self._layout.addWidget(container)
+这段看似无害的代码实际上触发了 Qt 底层一连串的昂贵操作：
+
+_LazyPageWidget 构造——每次调用 QWidget.__init__ 都必须分配底层的 C++ QWidgetPrivate 数据结构。setFixedSize(w_px, h_px) 紧接着发出一个 LayoutRequest 事件到父布局。500个 Widget 意味着500次 QWidgetPrivate 的 heap 分配 + 500 个 LayoutRequest 排队。
+
+QVBoxLayout::addWidget ——Qt 的 QVBoxLayout 在其内部用 QList<QLayoutItem*> 保存条目。每次 addWidget 将条目追加到 list 末尾，然后调用 invalidate()，触发父 widget 的 updateGeometry() 一路冒泡到顶层窗口。此时的 cost 不是——单个 addWidget 本身——而在于 layout 的重复激活：Qt 的布局系统在每次 invalidate() 后并不会立即重算，但会在事件循环空闲时进行 activation。500次 addWidget 意味着500次 activation 排队，每次 activation 遍历已有的所有布局条目来重新计算 size hint 和分布。总复杂度为 ∑(1..500) = O(n²)，n=500时约为 125,000次 QLayoutItem 遍历。
+
+更隐蔽的问题：当 _update_visible_pages 在 50ms 后被调用，它访问 _compute_page_y_offsets，这个方法用 self._layout.itemAt(i) 遍历每个 widget 的 height()，触发 500次 Python→C++ 跨语言调用。而 QLayoutItem::widget()->height() 需要在 C++ 端查询 widget 的 geometry，这又可能导致 QWidget 内部的一次 ensurePolished() 检查。
+
+1.2 _compute_page_y_offsets（pdf_viewer.py）：缓存失效风暴
+python
+def _compute_page_y_offsets(self) -> dict[int, int]:
+    layout_version = self._layout.count()
+    if layout_version == getattr(self, '_cached_layout_version', -1):
+        return getattr(self, '_cached_offsets', {})
+    # ... 全量遍历
+这个缓存机制的核心缺陷在于 layout_version 以 self._layout.count() 为版本号。_layout 是一个 QVBoxLayout，它的 count() 在以下任一操作时变化：① _LazyPageWidget 的创建，② open_split_widget 的裂开（增加3个子 widget），③ _merge_segments 的合并（增加或减少 widget 数量）。每次 SplitWidget 创建或关闭，布局版本号就变化一次，然后触发下一次滚动事件的全量重算——全量重算的开销对大文档非常显著。
+
+1.3 get_page_pixmap（pdf_engine.py）：每次解释 PDF 指令流
+DocumentEngine.get_page_pixmap 调用 page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)。从PyMuPDF/MuPDF内部原理来看，Page.get_pixmap() 在每次调用时都要执行页面源码解释 → 中间对象构建 → 光栅化的完整流程。而MuPDF提供了 DisplayList 抽象——一条可以由页面解释一次、然后无限次重放的绘图指令序列。SumatraPDF 在打开文档后就立即为每一页生成 fz_display_list，之后缩放、滚动都只是重放这条指令序列。首次解释的开销是 O(页面复杂度)，而重放只需 O(输出像素数)，速度差距可达 10-50倍。
+
+当前的代码完全没有利用 DisplayList。每次缩放都要走完整的解释链路，500页文档意味着缩放一次需要500次完整的页面解释（虽然只有视口内的页面会被渲染，但潜在的 cache miss 仍然存在）。
+
+1.4 ChromaRepo 的锁竞争：读写锁被用成了互斥锁
+在 KnowledgeEngine.__init__ 中声明了 self._db_lock = QReadWriteLock()。_BuildWorker 在 upsert_blocks 时获取写锁，retrieve 方法获取读锁：
+
+python
+# KnowledgeEngine.retrieve
+with QReadLocker(self._db_lock):
+    return self._repo.query_relevant(...)
+
+# _BuildWorker.run
+with QWriteLocker(self._db_lock):
+    self._repo.upsert_blocks(...)
+关键问题：QReadWriteLock 的"写优先"策略下，当有一个写者在等待时，后续所有读者都会被阻塞，直到写者完成并释放写锁。在知识库构建期间（持续数千次 upsert 调用），每次 upsert_blocks 都独占写锁。同时 retrieve 虽然只是查询（理论上可以并发），却在写锁持有期间被完全阻塞。QReadWriteLock 本身没问题——问题在于 SQLite 的 WAL 模式虽然允许一个写者和多个读者并发，但 ChromaRepo.query_relevant 内部调用 collection.query() 时，ChromaDB 的 PersistentClient 在 C++ 端（通过 Rust binding）会获取自己的内部锁。QReadWriteLock 的外部锁 和 ChromaDB 的内部锁叠加在一起，构成了两层锁的同步开销。
+
+1.5 QReadLocker 和 QWriteLocker 的 with 作用域
+QReadLocker 在构造时调用 lockForRead()，在析构时调用 unlock()。在 Python 的 with 语句中，__exit__ 确保析构。但 QReadWriteLock::lockForWrite() 的语义是：当线程 A 持有写锁时，任何其他线程的 lockForRead() 或 lockForWrite() 都会阻塞。在当前实现中，QThreadPool 中的 worker 和主线程中的 retrieve 调用会对同一把锁竞争。而 QThreadPool 的默认最大线程数取决于 QThread::idealThreadCount()，通常是 CPU 核心数。如果这些线程都在竞争同一把锁，实际并发度就退化为1。
+
+1.6 qpageview 零 Widget 架构的数据支撑
+qpageview 应用在显示一个500页PDF时，通常只有 10-30 个 QWidget 实例（View、ScrollArea、Overview、若干 Page 对象）。而当前代码库为500页PDF创建 500个 _LazyPageWidget + 若干 SplitWidget，即 500+ 个 QWidget 实例。这部分开销反映在：
+
+内存：每个 QWidget 对象占用 ~400-600 字节的 C++ 内存（QWidgetPrivate + painting system 元数据），500个合计算 ~250KB，虽然不大，但加上 QPixmap 的 backing store，快速增长。
+
+事件分发：Qt 在 processEvents 时，会检查所有已注册 Widget 的 testAttribute 标志。Widget 数量增加时，事件循环的空闲成本也会增加。
+
+二、五个开源项目的深度设计剖析
+2.1 SumatraPDF：DisplayList 即一切
+核心数据结构：
+
+在 MuPDF 的 C 源码中，fz_display_list 被定义为一个链表节点，串联了页面上的所有绘图命令（fz_fill_path、fz_stroke_text、fz_fill_image 等）。DisplayList 的关键特性是不可变性——一旦从 Page 生成，其内容就不再改变。这使得 DisplayList 可以：
+
+被多个线程同时读取（只读共享）
+
+被无限次重放，而无需重新解释 PDF 源码
+
+渲染管线：
+
+SumatraPDF 内部维护一个全局的 DisplayList 缓存，索引是 (page_num, rotation)。当用户缩放时，SumatraPDF 不重新从 PDF 提取文本——它直接使用已缓存的 DisplayList，只改变渲染矩阵：
+
+text
+fz_device *dev = fz_new_draw_device(ctx, matrix, pixmap);
+fz_run_display_list(ctx, display_list, dev, &ctm, &scissor, NULL);
+fz_close_device(ctx, dev);
+这个过程没有文本提取、没有字体解析——只有绘图命令的重放。
+
+SumatraPDF 的零 Widget 架构的另一个关键点：它的整个视图窗口是一个单一的 HWND（Windows GDI 窗口）。所有页面的渲染都在一个 WM_PAINT 消息处理器中完成，通过 BitBlt 直接拷贝到屏幕。没有 Qt 的 Widget 树结构，没有信号槽在绘制路径中，没有 QEvent 在 paint 阶段被处理。
+
+对当前项目的指导意义：
+
+用 Page.get_displaylist() 生成 DisplayList 缓存，在 DocumentEngine 级别管理
+
+缩放时通过 dl.get_pixmap(matrix=...) 重放，避免重复解释
+
+逐步将 Widget 数量从 O(n_pages) 降到 O(1)（即只有可视页面的 widget）
+
+2.2 qpageview：三层信息分离和 key 设计
+qpageview 的 render.py 核心抽象：
+
+python
+RenderInfo = namedtuple("RenderInfo", "images missing key target ratio")
+images 是一个 dict[Tile, QImage]，表示当前已缓存且可用于显示的瓦片。
+missing 是一个 set[Tile]，表示需要后台渲染的瓦片。
+target 是渲染请求的 QRectF（在 viewport 坐标中）。
+ratio 是缩放比例。
+
+调用方（View 的 paintEvent）的行为是：
+
+调用 renderer.info(page, viewport_rect) 获取 RenderInfo
+
+遍历 images，直接用 QPainter.drawImage() 绘制瓦片
+
+对 missing 中的瓦片，启动后台渲染线程
+
+关键：后台线程渲染完成后，通过 Qt 信号在主线程更新 ImageCache，然后只 update() 受影响区域
+
+qpageview 的 AbstractRenderer.tiles() 方法是一个生成器，它接收一个 rect（视口范围）和一个 pagesize（页面目标尺寸），逐个 yield 出 Tile(x, y, w, h)。这个生成器延迟计算：只有被请求的瓦片坐标才会被计算，不在视口内的区域完全不消耗计算资源。
+
+ImageCache 的 key 设计：
+
+python
+Key = namedtuple("Key", "group ident rotation width height")
+这个 Key 的每个维度都有具体用途：
+
+group：区分不同文档（如文档ID或文件路径哈希）
+
+ident：页码
+
+rotation：旋转角度——同一页旋转90°后需要完全不同的瓦片集
+
+width / height：缩放后的页面尺寸——同样一页在1倍和2倍缩放下的瓦片完全不同
+
+当前代码库的 TileKey(page_num, tile_x, tile_y, zoom_level) 缺少 group 和 rotation 维度，这导致在不同文档之间切换时，缓存键可能冲突。
+
+ImageCache 内部的 Eviction 策略：
+
+qpageview 的 ImageCache 继承自 WeakKeyDictionary，将 Key 映射到 set[Tile]，再将 Tile 映射到 QImage。这种双层映射允许在文档关闭时，直接删除整个 group 对应的所有条目，而无需遍历。
+
+qpageview 的 PdfRenderer.draw() 中使用 QPainter 直接绘制瓦片。View.paintEvent() 中：
+
+python
+for page in self.pages():
+    rect = page_rect_in_viewport(page)
+    info = page.renderer.info(page, rect)
+    for tile, image in info.images.items():
+        painter.drawImage(tile.x, tile.y, image)
+没有 QLabel、没有 QWidget 代理——QPainter 直接在 View 的 paint device 上绘制。这就是 零 Widget 架构 的核心：整个文档的显示内容都在同一个 widget 的 paintEvent 中处理。
+
+指导意义：
+
+逐步将每个 _LazyPageWidget 的独立绘制合并到一个 View 的 paintEvent 中
+
+用 RenderInfo 抽象分离 "有哪些瓦片可用" 和 "哪些瓦片需要渲染"
+
+缓存 Key 增加 group（文档哈希）维度
+
+用 WeakKeyDictionary 实现按文档清理缓存
+
+2.3 Sioyek：方向感知预渲染 + 切片渲染
+Sioyek 在处理大页面时的两个核心策略（来源自其源码结构分析）：
+
+第一：预渲染窗口远大于视口。prerendered_page_count 默认值不是 4 而是 5-10。Sioyek 在用户浏览方向的前方预渲染 5-10 页，后方保留 2-3 页。这意味着即使用户快速翻页，90% 的情况下目标页面已在缓存中。
+
+第二：sliced_rendering 机制。对于超大 PDF 页面（如A0工程图），sliced_rendering=1 启用后，渲染器将单页分割为多个 W×H 像素的切片，每个切片独立渲染和缓存。这解决了两个问题：
+
+单页 pixmap 太大时 GPU 纹理分配失败（部分老显卡单纹理上限 4096×4096）
+
+内存分配峰值降低——不需要一次分配整个页面的位图
+
+当前代码库的方向感知预渲染只预取 4 页。但 Sioyek 的实际数据表明，在 prerendered_page_count=8 时，翻页命中率从 60% 提升到 92%。这意味着需要将预加载范围扩大到 6-8 页，而不是当前的 4 页。
+
+2.4 PDFCrop：DI 容器 + 线程安全的 PageCache
+ServiceContainer 的三级注册:
+
+register_instance：直接注入已创建的对象（如配置管理器）
+
+register_singleton：懒加载工厂函数，首次调用时创建，之后返回同一实例
+
+register_factory：每次调用都创建新实例（适用于文档级别的对象）
+
+当前代码库已经完全复刻了这个模式，但关键差异在于——PDFCrop 的 ServiceContainer.shutdown() 会按注册的反序调用每个 singleton 的 close() 方法，确保资源释放顺序正确。当前代码库的 ServiceContainer.shutdown() 只做简单的遍历，没有考虑依赖顺序。
+
+PageCache 的 LRU 实现细节:
+
+缓存键 (doc_path, page_num, scale_factor)
+
+内存上限 1024MB（通过 QPixmap.width * height * 4 估算占用）
+
+驱逐时按 last_accessed 选择最久未访问的条目
+
+高分辨率缓存命中时可 downscale 给低分辨率请求使用
+
+但有一个重要限制：PDFCrop 的 PageCache 在主线程中运行，写操作（put()）也限制在主线程中。当前代码库中 _PageRenderTask 在工作线程中调用 put_pixmap()，这在 Qt 6.x 中可能触发 QPixmap 的跨线程警告或崩溃。虽然 PySide6 6.11 做了一些线程安全改进，但 QPixmap 本质上仍然不是线程安全对象。
+
+2.5 Mad Professor：信号驱动的四层协调器
+AIManager 的核心设计:
+
+AIManager 通过信号驱动全程。当用户请求一次翻译时：
+
+UI 发射 request_translation(block_id) 信号
+
+AIManager 接收信号后，检查缓存 → 若命中则直接发射 translation_ready
+
+若未缓存，创建 AIResponseThread，启动线程
+
+线程中流式接收 token，每个 token 通过 token_ready 信号发回主线程
+
+翻译完成后，AIManager 将结果写入缓存，发射 translation_ready
+
+当前代码库中的 TranslationFlow 已经很好地实现了这个模式。但有一点区别——Mad Professor 的 AIManager 在 接收到新请求时，会检查是否已有同一 block 的进行中请求，如果有则取消旧请求。这避免了用户快速双击导致的多个翻译线程并发竞争。当前代码库中的 _on_block_translate 没有做这个去重检查：
+
+python
+def _on_block_translate(self, block_id: str) -> None:
+    # 没有检查是否已有进行中的翻译线程
+    block = self._find_block(block_id)
+    split = self._pdf_viewer.open_split_widget(block_id, SplitMode.TRANSLATION)
+    ...
+    hit = self._translate_flow.request_translation(block, self._current_doc_hash)
+这可能导致同一个 block 被重复翻译——旧线程还在流式输出，新线程又创建了。
+
+三、五个问题的完整修复方案
+对问题 1 的解决方案
+根因总结：Widget 全量创建触发 O(n²) 布局运算 + 无 DisplayList 缓存导致每次缩放重复解释 PDF + 锁竞争导致 ChromaDB 查询串行化 + QReadWriteLock 退化为互斥锁 + QThreadPool 中 QPixmap 跨线程操作。
+
+第一步：引入 _VirtualPageLayout——纯数学布局
+
+用纯 Python 数据结构替代 QWidget 做位置计算，彻底消除 "每次滚动触发500次widget遍历" 的问题：
+
+python
+@dataclass
+class _VirtualPageEntry:
+    page_num: int
+    logical_height: float       # 页面在逻辑坐标系下的高度
+    rendered_pixmaps: dict[float, QPixmap] = field(default_factory=dict)
+    split_extra_height: int = 0
+    content_version: int = 0    # 页面内容变更计数，用于判断是否需要重新渲染
+
+class _VirtualPageLayout:
+    def __init__(self, page_heights: dict[int, float]):
+        self._entries: list[_VirtualPageEntry] = []
+        self._page_index: dict[int, int] = {}  # page_num → entries列表中的索引
+        self._offsets: dict[int, float] = {}
+        self._total_height: float = 0.0
+        self._dirty: bool = True
+        for pn, h in sorted(page_heights.items()):
+            idx = len(self._entries)
+            self._entries.append(_VirtualPageEntry(pn, h))
+            self._page_index[pn] = idx
+        self._recalc()
+
+    def _recalc(self):
+        y = 0.0
+        self._offsets.clear()
+        for entry in self._entries:
+            self._offsets[entry.page_num] = y
+            y += entry.logical_height + entry.split_extra_height
+        self._total_height = y
+        self._dirty = False
+
+    def page_y(self, page_num: int) -> float:
+        if self._dirty:
+            self._recalc()
+        return self._offsets.get(page_num, 0.0)
+
+    def register_split(self, page_num: int, extra_height: int):
+        idx = self._page_index.get(page_num)
+        if idx is not None:
+            self._entries[idx].split_extra_height += extra_height
+            self._dirty = True
+
+    def page_range_for_viewport(
+        self, scroll_y: float, viewport_h: float, margin: float = 0
+    ) -> list[int]:
+        if self._dirty:
+            self._recalc()
+        lo = scroll_y - margin
+        hi = scroll_y + viewport_h + margin
+        result = []
+        for entry in self._entries:
+            y = self._offsets[entry.page_num]
+            h = entry.logical_height + entry.split_extra_height
+            if y + h > lo and y < hi:
+                result.append(entry.page_num)
+        return result
+然后在 PdfViewer._update_visible_pages 中用 _VirtualPageLayout 替代 _compute_page_y_offsets。关键改动：
+
+_content widget 中不预放500个 _LazyPageWidget，只放视口内+前后各2页的活跃 widget
+
+离开视口的页面 widget.hide() 并释放 QPixmap，但保留 widget 对象复用
+
+Widget 池大小保持在 visible_pages + 2*margin_pages，通常 ≤ 10 个
+
+性能收益：_update_visible_pages 从 O(n_pages) 的 widget 遍历变为 O(log n_pages) 的虚拟布局查询（用二分查找代替线性扫描，在上述简化实现中仍是线性扫描但访问的是纯 Python 列表而非跨 C++ 边界）。对 500页文档，滚动成本从 30-50ms 降至 < 5ms。
+
+第二步：引入 DisplayList 缓存
+
+python
+class DocumentEngine(BaseService):
+    def __init__(self, ...):
+        ...
+        self._display_lists: dict[int, object] = {}  # page_num → fitz.DisplayList
+        self._dl_lock = threading.Lock()
+
+    def get_page_display_list(self, page_num: int) -> fitz.DisplayList:
+        with self._dl_lock:
+            if page_num not in self._display_lists:
+                page = self._doc[page_num]
+                self._display_lists[page_num] = page.get_displaylist()
+            return self._display_lists[page_num]
+
+    def get_page_pixmap_cached(self, page_num: int, dpi: int = 150) -> QPixmap:
+        dl = self.get_page_display_list(page_num)
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = dl.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        ...
+    def clear_display_lists(self):
+        with self._dl_lock:
+            self._display_lists.clear()
+在 close_document 中调用 clear_display_lists() 释放缓存。DisplayList 的 get_pixmap 重放不需要持有 fitz 的全局解释器锁，因此多个页面的渲染可以真正并发——与当前 Page.get_pixmap 因 MuPDF 内部互斥锁导致的串行化形成对比。
+
+第三步：调整 ChromaDB 的外部锁粒度
+
+python
+class KnowledgeEngine(BaseService):
+    def __init__(self, ...):
+        ...
+        # 改用独立的读写锁，避免持续阻塞检索
+        self._db_write_lock = threading.Lock()  # 仅保护写入
+        # 对于检索：不使用外部锁，依赖 ChromaDB 自身的并发控制
+
+    def retrieve(self, query, doc_hash, top_k=3, exclude_ids=None):
+        query_vector = self._embed.embed_single(query)
+        # 不获取 self._db_write_lock —— SQLite WAL 模式已允许并发读
+        return self._repo.query_relevant(doc_hash, query_vector, top_k, exclude_ids)
+这确保知识库构建期间的写入操作不会阻塞用户的问答检索。
+
+对问题 2 的解决方案
+根因总结：MainWindow._create_menu_bar 中 zoom_in_action.triggered 未连接；PdfViewer 的渲染参数 self._scale 和 self._dpi 在 __init__ 中固化；缩放后无重建页面 Widget 尺寸的机制；Page.get_pixmap 每次走完整解释链路。
+
+第一步：连接缩放信号
+
+python
+# MainWindow._create_menu_bar()
+zoom_in_action.triggered.connect(lambda: self._pdf_viewer.zoom_in())
+zoom_out_action.triggered.connect(lambda: self._pdf_viewer.zoom_out())
+第二步：在 PdfViewer 中实现缩放逻辑
+
+python
+class PdfViewer(QScrollArea):
+    MIN_ZOOM = 0.3
+    MAX_ZOOM = 5.0
+    ZOOM_FACTOR = 1.2
+
+    def __init__(self, ...):
+        ...
+        self._base_scale = self._logical_dpi / 72.0
+        self._zoom_multiplier: float = 1.0
+
+    @property
+    def effective_scale(self) -> float:
+        return self._base_scale * self._zoom_multiplier
+
+    @property
+    def effective_dpi(self) -> int:
+        return int(self._logical_dpi * self._zoom_multiplier * self._screen_dpr)
+
+    def zoom_in(self):
+        self._set_zoom(self._zoom_multiplier * self.ZOOM_FACTOR)
+
+    def zoom_out(self):
+        self._set_zoom(self._zoom_multiplier / self.ZOOM_FACTOR)
+
+    def _set_zoom(self, new_zoom: float):
+        new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, new_zoom))
+        if abs(new_zoom - self._zoom_multiplier) < 0.001:
+            return
+        old_zoom = self._zoom_multiplier
+        self._zoom_multiplier = new_zoom
+        # 1. 重建虚拟布局（页面尺寸随缩放变化）
+        self._rebuild_virtual_layout()
+        # 2. 重建所有可见页面的 Widget 尺寸、Overlay 位置
+        for pn in list(self._rendered_pages):
+            self._unrender_page(pn)
+        self._rendered_pages.clear()
+        # 3. 更新 SplitWidget 宽度
+        for split in self._splits.values():
+            page_num = self._block_to_page.get(split.block_id)
+            if page_num is not None:
+                split.setFixedWidth(self._get_page_display_width(page_num))
+        # 4. 保持滚动位置比例
+        ratio = (self.verticalScrollBar().value() /
+                 max(self.verticalScrollBar().maximum(), 1))
+        QTimer.singleShot(100, lambda: self._restore_scroll(ratio))
+        self._update_visible_pages()
+缩放时利用 DisplayList 缓存重放渲染，避免每次缩放触发全量 PDF 解释。
+
+对问题 3 的解决方案
+根因总结：open_split_widget 中 split.setFixedWidth(pixmap.width()) 使用的是打开裂缝时的 pixmap 宽度，缩放后该值不变，导致宽度不一致。
+
+方案：宽度始终从当前页面的逻辑显示宽度推导，不依赖快照 pixmap：
+
+python
+def _get_page_display_width(self, page_num: int) -> int:
+    doc = self._doc_engine.document
+    if doc:
+        return int(doc[page_num].rect.width * self.effective_scale)
+    return 600
+
+def open_split_widget(self, block_id: str, mode=SplitMode.TRANSLATION) -> SplitWidget | None:
+    ...
+    page_width = self._get_page_display_width(page_num)
+    split.setFixedWidth(page_width)
+    ...
+在 _set_zoom 中同步更新所有已存在的 SplitWidget 宽度。这样确保无论缩放到哪个级别，翻译框始终与页面同宽。
+
+对问题 4 的解决方案
+根因总结：_adjust_height 中 chrome_h 只估算操作栏+20px，实际 chrome 约 100-130px。内容高度来自 JS document.body.scrollHeight，不含边框和 padding 空间。CSS 默认文字边距（h1/h2/p 的 margin）占用额外空间。
+
+第一步：精确计算 Chrome 高度
+
+python
+def _compute_chrome_height(self) -> int:
+    h = 0
+    # QVBoxLayout 的 margins
+    lm = self._body_layout.contentsMargins()
+    h += lm.top() + lm.bottom()
+    # QVBoxLayout 的 spacing × (子组件数-1)
+    visible_widgets = [w for w in [
+        self._header_label, self._context_label, self._input_widget,
+        self._result_view, self._followup_widget, self._action_widget
+    ] if w.isVisible()]
+    h += self._body_layout.spacing() * max(0, len(visible_widgets) - 1)
+    # 每个可见 widget 的高度
+    if self._header_label.isVisible():
+        h += self._header_label.sizeHint().height()
+    if self._context_label.isVisible():
+        h += self._context_label.sizeHint().height()
+    if self._input_widget.isVisible():
+        h += self._input_widget.sizeHint().height()
+    if self._followup_widget.isVisible():
+        h += self._followup_widget.sizeHint().height()
+    if self._action_widget.isVisible():
+        h += self._action_widget.sizeHint().height()
+    h += self._resize_handle.height()
+    return h
+第二步：调整 HTML 模板中的文字边距
+
+在 markdown_template.html 中，将默认的文字间距最小化：
+
+css
+body {
+    padding: 2px 4px;  /* 极小内边距 */
+    margin: 0;
+}
+#content {
+    padding: 0;
+    margin: 0;
+}
+h1 { margin: 4px 0 2px; font-size: 1.4em; }
+h2 { margin: 3px 0 2px; font-size: 1.2em; }
+h3 { margin: 2px 0 1px; font-size: 1.1em; }
+p  { margin: 0 0 2px 0; }
+ul, ol { margin: 2px 0; padding-left: 20px; }
+blockquote { margin: 2px 0; }
+第三步：修正 _adjust_height
+
+python
+def _adjust_height(self, content_height: int) -> None:
+    if self._user_resized or self._collapsed:
+        return
+    if not content_height or content_height <= 0:
+        return
+    chrome = self._compute_chrome_height()
+    needed = content_height + chrome + 4  # 4px 安全缓冲
+    if needed > self.height():
+        self._saved_height = min(needed, 800)
+        self.setFixedHeight(self._saved_height)
+对问题 5 的解决方案
+根因总结：段落翻译的 SplitWidget 宽度固定为页面全宽，但段落本身可能只占页面的部分宽度（如双栏论文的一栏）。需要将翻译框的宽度限制为段落所属栏的宽度，并将两栏的翻译错开。
+
+方案（基于 BBox 的列感知裂开）：
+
+段落宽度映射：从 DocumentBlock.bbox 获取段落显示坐标，用 BBox 宽度作为翻译框的宽度，而不使用页面全宽。
+
+左右位置偏移：SplitWidget 需要能以 block.bbox[0] * scale 为左偏移进行水平定位。在当前的 QVBoxLayout 堆叠模式下，用 QWidget.setContentsMargins(left, 0, 0, 0) 实现偏移；在未来的绝对定位模式下，直接 split.move(block_left, y)。
+
+多栏并排：当在相近的 y 位置检测到两个不同 x 列的段落时，两个 SplitWidget 各自以各自的 BBox 宽度和 BBox 左偏移显示，自然错开。
+
+python
+def _get_block_display_bbox(self, block_id: str) -> tuple[int, int, int, int]:
+    block = self._find_block(block_id)
+    if block is None:
+        return (0, 0, 0, 0)
+    scale = self.effective_scale
+    return (
+        int(block.bbox[0] * scale),
+        int(block.bbox[1] * scale),
+        int(block.bbox[2] * scale),
+        int(block.bbox[3] * scale),
+    )
+
+def open_split_widget(self, block_id: str, mode=SplitMode.TRANSLATION) -> SplitWidget | None:
+    ...
+    x0, y0, x1, y1 = self._get_block_display_bbox(block_id)
+    block_width = x1 - x0
+    split.setFixedWidth(block_width)
+    split._origin_x = x0  # 标记 x 偏移
+    # 后续在水平布局中应用此偏移
+四、实施路线图
+优先级	问题	核心改动	涉及文件数	预估工时
+P0	大PDF卡死	DisplayList 缓存 + _VirtualPageLayout + 两阶段解析 + ChromaDB 锁优化	3	3.5天
+P1	缩放失效	zoom_multiplier + 重建布局 + 信号连接 + 利用 DisplayList 重放	2	1天
+P1	翻译框对齐	宽度动态推导（从 effective_scale）+ 缩放同步更新 SplitWidget	1	0.5天
+P2	翻译框高度+CSS边距	chrome 精确计算 + HTML 最小 padding	2	0.5天
+P2	段落宽度对齐	BBox → 显示宽度映射 + 水平偏移	1	0.5天
+总计				6天
+建议从 P0 的 Widget 架构改造和 DisplayList 缓存同时开始——这两个是性能提升最大的改动，也是所有其他问题的基础。完成这个重构后，P1 和 P3 的缩放和宽度对齐修复将变得非常简单——一切尺寸都由 effective_scale 和 _VirtualPageLayout 统一推导。
+
+---
+## 十二、代码交叉验证与补充分析 (2026-05-08)
+
+### 12.1 用户分析的验证结果
+
+| 用户分析 | 实际代码验证 | 结论 |
+|---------|------------|------|
+| O(n²) Widget 创建 (1.1) | `load_document()` L410-411 确实逐页 `addWidget()` | ✅ 准确 |
+| 缓存失效风暴 (1.2) | `_compute_page_y_offsets` L442 用 `layout.count()` 作版本号 | ✅ 准确 |
+| "完全没有利用 DisplayList" (1.3) | **PageCache.put() L93 已用 `page.get_displaylist().get_pixmap()`** | ⚠️ 部分准确 — 同步路径已用 DL，异步路径未用 |
+| ChromaDB 锁竞争 (1.4) | `knowledge_engine.py:149` `QReadWriteLock` + `retrieve()` L208 用 `QReadLocker` | ✅ 准确 |
+| QPixmap 跨线程 (2.4) | `_PageRenderTask.run()` L781-783 在工作线程创建 QPixmap | ✅ 准确（PySide6 6.11 尚可容忍，但不推荐） |
+
+### 12.2 额外发现的 4 个问题
+
+**A. 重复翻译请求无防护**
+- `TranslationFlow.request_translation()` (translate_flow.py:57) 不检查 block_id 是否已有进行中请求
+- `AIEngine.request_translation()` (ai_engine.py:847) 不检查重复，每次创建新 `_TranslationThread`
+- 用户快速双击同一段落 → 多个翻译线程并发竞争
+
+**B. 异步渲染路径未用 DisplayList**
+- `_PageRenderTask.run()` (pdf_engine.py:781) 调用 `page.get_pixmap()` 而非 `page.get_displaylist().get_pixmap()`
+- 每次异步渲染都重新解释 PDF 指令流，与 PageCache.put() 的 DL 路径不一致
+- 修复：改为 `page.get_displaylist().get_pixmap()`
+
+**C. 大页面渲染时序竞态**
+- `_render_page()` L589-599：大页面直接设 `container._rendered = True`（无 `_full_pixmap`），然后用 `QTimer.singleShot(0, ...)` 延迟调度瓦片
+- 如果 `_update_visible_pages` 在瓦片就绪前再次触发，`container.rendered` 返回 True → 跳过渲染 → paintEvent 中 TileCache 可能为空 → 灰块
+
+**D. ServiceContainer.shutdown() 无逆序关闭**
+- PDFCrop 的 shutdown() 按注册反序调用 close()
+- 当前 `ServiceContainer.shutdown()` 无此逻辑
+- 当前由 `MainWindow.closeEvent()` 手动管理顺序，容器单独使用时会出问题
+
+### 12.3 P0 精化实施计划
+
+**P0-1: _VirtualPageLayout（纯 Python 布局计算）**
+- 文件：`src/ui/pdf_viewer.py`（新增类）
+- 数据结构：`_VirtualPageEntry(page_num, logical_height, split_extra_height)`
+- 核心方法：`page_y()`, `page_height()`, `page_range_for_viewport()`, `register_split()`, `unregister_split()`, `rebuild()`
+- 替代：`_compute_page_y_offsets()` + `_get_page_height()` 的 QLayoutItem 遍历
+- 关键：`page_range_for_viewport()` 用纯 Python 列表扫描（500页 < 1ms），消除 C++ 跨语言调用
+
+**P0-2: Widget 池化**
+- `load_document()` 不再创建 N 个 `_LazyPageWidget`，只存储元数据到 `_page_metas: dict[int, dict]`
+- 新增 `_widget_pool: dict[int, _LazyPageWidget]` 管理活跃 widget
+- `_update_visible_pages()` 变更：
+  - needed ← `_vlayout.page_range_for_viewport()` + 预渲染页
+  - entering ← needed - pool → 创建新 widget，insert 到 layout 正确位置
+  - leaving ← pool - needed → hide + unrender，保留在 pool 复用
+- 活跃 widget 数 ≤ visible_pages + 2*margin + preload ≈ 15-20 个
+
+**P0-3: SplitWidget 适配**
+- `open_split_widget()`：不再用 `_layout.indexOf()` 定位，改为基于 `_vlayout.page_y()` 找到插入点
+- `_merge_segments()`：不再用 `_layout.removeWidget()`，改为基于虚拟偏移找到并移除 segment widget
+- SplitWidget 始终保留在 layout 中（用户正在交互）
+
+**P0-4: 异步渲染 DisplayList 修复**
+- `_PageRenderTask.run()` 改用 `page.get_displaylist().get_pixmap()`
+- 与 PageCache.put() 路径保持一致
+
+**P0-5: 运行测试**
+- 打开 100+ 页 PDF，验证打开速度、滚动性能、SplitWidget 功能
+
+### 12.4 P1/P2 概览（P0 完成后执行）
+
+| 优先级 | 问题 | 核心改动 | 预估工时 |
+|--------|------|---------|---------|
+| P1 | 缩放失效 | `zoom_multiplier` + `effective_scale/dpi` + 信号连接 | 0.5天 |
+| P1 | 翻译框宽度对齐 | `_get_page_display_width()` + 缩放同步 | 0.3天 |
+| P2 | 翻译框高度+CSS | `_compute_chrome_height()` + HTML margin 调小 | 0.5天 |
+| P2 | 段落宽度对齐 | BBox → 显示宽度 + 水平偏移 | 0.5天 |
+| P2 | 重复翻译防护 | `_pending` 去重检查 | 0.2天 |

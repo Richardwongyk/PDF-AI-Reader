@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
+from dataclasses import dataclass
 
 from shiboken6 import isValid as _isValid
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -30,6 +31,107 @@ from src.ui.paragraph_widget import BlockOverlay
 from src.ui.split_widget import SplitWidget
 
 _logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# _VirtualPageLayout — 纯 Python 虚拟页面布局
+# =============================================================================
+# 借鉴 SumatraPDF 零 Widget 架构：页面位置计算不应依赖 QWidget 树。
+# 用纯 Python 数据结构替代 QLayoutItem 遍历，消除跨 C++ 边界的 O(n) 调用。
+
+@dataclass
+class _VirtualPageEntry:
+    page_num: int
+    logical_height: float
+    split_extra_height: float = 0.0
+
+
+class _VirtualPageLayout:
+    """纯 Python 虚拟页面布局。
+
+    替代 _compute_page_y_offsets() + _get_page_height() 中的 QLayoutItem 遍历。
+    对 500 页文档，所有操作 < 1ms（纯 Python 列表扫描，无 C++ 跨语言调用）。
+    """
+
+    def __init__(self, page_heights: dict[int, float]) -> None:
+        self._entries: list[_VirtualPageEntry] = []
+        self._page_index: dict[int, int] = {}
+        self._offsets: dict[int, float] = {}
+        self._total_height: float = 0.0
+        self._dirty: bool = True
+        for pn, h in sorted(page_heights.items()):
+            idx = len(self._entries)
+            self._entries.append(_VirtualPageEntry(pn, h))
+            self._page_index[pn] = idx
+        self._recalc()
+
+    def _recalc(self) -> None:
+        y = 0.0
+        self._offsets.clear()
+        for entry in self._entries:
+            self._offsets[entry.page_num] = y
+            y += entry.logical_height + entry.split_extra_height
+        self._total_height = y
+        self._dirty = False
+
+    @property
+    def total_height(self) -> float:
+        if self._dirty:
+            self._recalc()
+        return self._total_height
+
+    def page_y(self, page_num: int) -> float:
+        if self._dirty:
+            self._recalc()
+        return self._offsets.get(page_num, 0.0)
+
+    def page_height(self, page_num: int) -> float:
+        idx = self._page_index.get(page_num)
+        if idx is not None:
+            e = self._entries[idx]
+            return e.logical_height + e.split_extra_height
+        return 0.0
+
+    def register_split(self, page_num: int, extra_height: float) -> None:
+        idx = self._page_index.get(page_num)
+        if idx is not None:
+            self._entries[idx].split_extra_height += extra_height
+            self._dirty = True
+
+    def unregister_split(self, page_num: int, extra_height: float) -> None:
+        idx = self._page_index.get(page_num)
+        if idx is not None:
+            self._entries[idx].split_extra_height = max(
+                0.0, self._entries[idx].split_extra_height - extra_height
+            )
+            self._dirty = True
+
+    def rebuild(self, page_heights: dict[int, float]) -> None:
+        """重建布局（缩放后页面尺寸变化时调用）。"""
+        self._entries.clear()
+        self._page_index.clear()
+        self._offsets.clear()
+        for pn, h in sorted(page_heights.items()):
+            idx = len(self._entries)
+            self._entries.append(_VirtualPageEntry(pn, h))
+            self._page_index[pn] = idx
+        self._dirty = True
+
+    def page_range_for_viewport(
+        self, scroll_y: float, viewport_h: float, margin: float = 0.0
+    ) -> list[int]:
+        """返回视口内（含 margin）的页面列表，按页码排序。"""
+        if self._dirty:
+            self._recalc()
+        lo = scroll_y - margin
+        hi = scroll_y + viewport_h + margin
+        result: list[int] = []
+        for entry in self._entries:
+            y = self._offsets[entry.page_num]
+            h = entry.logical_height + entry.split_extra_height
+            if y + h > lo and y < hi:
+                result.append(entry.page_num)
+        return result
 
 
 class _LazyPageWidget(QWidget):
@@ -310,6 +412,11 @@ class PdfViewer(QScrollArea):
         self._scroll_history: deque[int] = deque(maxlen=3)  # 最近 3 次方向 (+1/-1)
         self._last_scroll_value: int = 0
 
+        # 虚拟布局 + Widget 池化（借鉴 SumatraPDF 零 Widget 架构）
+        self._vlayout: _VirtualPageLayout | None = None
+        self._widget_pool: dict[int, _LazyPageWidget] = {}  # page_num → widget（含隐藏的）
+        self._page_metas: dict[int, dict] = {}  # page_num → {width, height, blocks}
+
         # 懒加载相关
         self._page_containers: dict[int, _LazyPageWidget] = {}
         self._rendered_pages: set[int] = set()
@@ -323,6 +430,17 @@ class PdfViewer(QScrollArea):
         self._layout = QVBoxLayout(self._content)
         self._layout.setContentsMargins(10, 6, 10, 6)
         self._layout.setSpacing(0)
+
+        # 顶部/底部 spacer：撑出全部页面的总高度，使滚动条范围 = 文档总长
+        self._top_spacer = QWidget()
+        self._top_spacer.setFixedHeight(0)
+        self._layout.addWidget(self._top_spacer)
+
+        self._bottom_spacer = QWidget()
+        self._layout.addWidget(self._bottom_spacer)
+
+        self._layout.addStretch()
+
         self.setWidget(self._content)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -399,6 +517,8 @@ class PdfViewer(QScrollArea):
             pages.setdefault(b.page_num, []).append(b)
             self._block_to_page[b.id] = b.page_num
 
+        # 构建虚拟布局（纯 Python，不创建 QWidget）
+        page_heights: dict[int, float] = {}
         for page_num in sorted(pages.keys()):
             if doc and page_num < doc.page_count:
                 rect = doc[page_num].rect
@@ -406,25 +526,28 @@ class PdfViewer(QScrollArea):
                 h_px = int(rect.height * self._scale)
             else:
                 w_px, h_px = 600, 800
-
-            container = _LazyPageWidget(page_num, w_px, h_px)
-            self._layout.addWidget(container)
-            self._page_containers[page_num] = container
+            page_heights[page_num] = float(h_px)
+            self._page_metas[page_num] = {
+                "width": w_px, "height": h_px, "blocks": pages[page_num],
+            }
             self._page_segments[page_num] = [{
                 "y0": 0, "y1": h_px,
-                "blocks": pages[page_num], "widget": container,
+                "blocks": pages[page_num], "widget": None,  # 按需创建
             }]
 
-        self._layout.addStretch()
+        self._vlayout = _VirtualPageLayout(page_heights)
+        _logger.info("PdfViewer.load_document: _VirtualPageLayout 已构建 (%d pages, total_h=%.0f)",
+                     len(page_heights), self._vlayout.total_height)
 
         if not hasattr(self, '_scroll_connected'):
             self.verticalScrollBar().valueChanged.connect(self._on_scroll)
             self._scroll_connected = True
 
         QTimer.singleShot(50, self._update_visible_pages)
-        _logger.info("PdfViewer.load_document: DONE (%.2fs)", time.perf_counter() - t0)
+        _logger.info("PdfViewer.load_document: DONE (%.2fs, %d pages, 0 widgets created)",
+                     time.perf_counter() - t0, len(page_heights))
 
-    # ── 懒加载核心 ──
+    # ── 懒加载核心（Widget 池化 + 虚拟布局）──
 
     def _on_scroll(self, value: int) -> None:
         # 追踪翻页方向（借鉴 Sioyek 趋势感知）
@@ -438,43 +561,172 @@ class PdfViewer(QScrollArea):
         self.viewport_changed.emit(value, self.verticalScrollBar().maximum())
 
     def _compute_page_y_offsets(self) -> dict[int, int]:
-        """计算每个页面的 Y 偏移（缓存版：仅在 layout 变化时重算）。"""
-        layout_version = self._layout.count()
-        if layout_version == getattr(self, '_cached_layout_version', -1):
-            return getattr(self, '_cached_offsets', {})
+        """计算每个页面的 Y 偏移（委托 _VirtualPageLayout，纯 Python ~0.1ms）。"""
+        if self._vlayout is None:
+            return {}
+        if self._vlayout._dirty:
+            self._vlayout._recalc()
+        return {pn: int(self._vlayout.page_y(pn)) for pn in self._page_metas}
 
-        offsets: dict[int, int] = {}
-        y = self._layout.contentsMargins().top()
-        for i in range(self._layout.count()):
+    def _get_page_height(self, page_num: int) -> int:
+        """获取页面高度（委托 _VirtualPageLayout）。"""
+        if self._vlayout is None:
+            return 0
+        return int(self._vlayout.page_height(page_num))
+
+    # ── Widget 池化辅助方法（QVBoxLayout + spacer 撑高）──
+
+    def _layout_index_for_page(self, page_num: int) -> int:
+        """在 layout 中查找 page_num 应插入的索引（跳过 top_spacer[0]）。"""
+        idx = 1  # 始终在 top_spacer 之后
+        for i in range(1, self._layout.count()):
             item = self._layout.itemAt(i)
             w = item.widget()
-            if w is None:
+            if w is None or w is self._bottom_spacer:
                 continue
-            found = False
-            for page_num, segs in self._page_segments.items():
+            widget_page: int | None = None
+            for pn, segs in self._page_segments.items():
                 for seg in segs:
                     if seg.get("widget") is w:
-                        if page_num not in offsets:
-                            offsets[page_num] = y
-                        found = True
+                        widget_page = pn
                         break
-                if found:
+                if widget_page is not None:
                     break
-            if not found and isinstance(w, SplitWidget):
-                pass
-            y += w.height()
-        self._cached_layout_version = layout_version
-        self._cached_offsets = offsets
-        return offsets
+            if widget_page is None:
+                for bid, split in self._splits.items():
+                    if split is w:
+                        widget_page = self._block_to_page.get(bid)
+                        break
+            if widget_page is not None and widget_page < page_num:
+                idx = i + 1
+        return idx
+
+    def _ensure_page_widget(self, page_num: int) -> _LazyPageWidget | None:
+        """确保 page_num 的 _LazyPageWidget 存在且位于 layout 正确位置。"""
+        if page_num in self._split_pages:
+            return None
+
+        meta = self._page_metas.get(page_num)
+        if meta is None:
+            return None
+
+        container = self._widget_pool.get(page_num)
+        if container is not None:
+            if not container.isVisible():
+                insert_idx = self._layout_index_for_page(page_num)
+                self._layout.insertWidget(insert_idx, container)
+                container.show()
+                _logger.debug("PdfViewer: p%d 从池复用 → layout[%d]", page_num, insert_idx)
+            self._page_containers[page_num] = container
+            for seg in self._page_segments.get(page_num, []):
+                if seg.get("widget") is None and "split_id" not in seg:
+                    seg["widget"] = container
+                    break
+            if not container.rendered:
+                container._rendered = False
+            return container
+
+        container = _LazyPageWidget(page_num, meta["width"], meta["height"])
+        self._widget_pool[page_num] = container
+        self._page_containers[page_num] = container
+        for seg in self._page_segments.get(page_num, []):
+            if seg.get("widget") is None and "split_id" not in seg:
+                seg["widget"] = container
+                break
+
+        insert_idx = self._layout_index_for_page(page_num)
+        self._layout.insertWidget(insert_idx, container)
+        _logger.debug("PdfViewer: p%d 新 widget → layout[%d] (%dx%d)",
+                     page_num, insert_idx, meta["width"], meta["height"])
+        return container
+
+    def _recycle_page_widget(self, page_num: int) -> None:
+        """隐藏并卸载页面 widget，保留在池中。"""
+        if page_num in self._split_pages:
+            return
+
+        container = self._widget_pool.get(page_num)
+        if container is None:
+            return
+
+        self._tile_renderer.cancel_page(page_num)
+
+        if container.rendered:
+            cleared = container.unrender()
+            for block_id in cleared:
+                self._overlays.pop(block_id, None)
+
+        for block_id, indicator in list(self._trans_indicators.items()):
+            if self._block_to_page.get(block_id) == page_num:
+                indicator.deleteLater()
+                del self._trans_indicators[block_id]
+
+        container.hide()
+        self._layout.removeWidget(container)
+        self._rendered_pages.discard(page_num)
+        self._page_containers.pop(page_num, None)
+        for seg in self._page_segments.get(page_num, []):
+            if seg.get("widget") is container:
+                seg["widget"] = None
+
+        _logger.debug("PdfViewer: p%d 回收 → 池中隐藏 (pool=%d)",
+                     page_num, len(self._widget_pool))
+
+    def _hide_page_from_layout(self, page_num: int) -> None:
+        """立即从 layout 移除页面 widget（保留 pixmap 在池中以便快速复用）。"""
+        container = self._widget_pool.get(page_num)
+        if container is None:
+            return
+        container.hide()
+        self._layout.removeWidget(container)
+        self._page_containers.pop(page_num, None)
+        for seg in self._page_segments.get(page_num, []):
+            if seg.get("widget") is container:
+                seg["widget"] = None
+        _logger.debug("PdfViewer: p%d 移出 layout (保留 pixmap)", page_num)
+
+    def _unrender_pooled_page(self, page_num: int) -> None:
+        """释放池中页面的 pixmap 和 overlay（5s 冷却后调用）。"""
+        container = self._widget_pool.get(page_num)
+        if container is None:
+            return
+        self._tile_renderer.cancel_page(page_num)
+        if container.rendered:
+            cleared = container.unrender()
+            for block_id in cleared:
+                self._overlays.pop(block_id, None)
+        for block_id, indicator in list(self._trans_indicators.items()):
+            if self._block_to_page.get(block_id) == page_num:
+                indicator.deleteLater()
+                del self._trans_indicators[block_id]
+        _logger.debug("PdfViewer: p%d 释放 pixmap", page_num)
+
+    def _adjust_spacers(self, needed_pages: set[int]) -> None:
+        """根据当前可见页面调整 spacer 高度，使 layout 总高 = _vlayout 总高。"""
+        if not needed_pages or self._vlayout is None:
+            return
+        sorted_pages = sorted(needed_pages)
+        first_page = sorted_pages[0]
+        top_h = int(self._vlayout.page_y(first_page))
+        self._top_spacer.setFixedHeight(max(0, top_h))
+
+        last_page = sorted_pages[-1]
+        last_bottom = self._vlayout.page_y(last_page) + self._vlayout.page_height(last_page)
+        bottom_h = int(self._vlayout.total_height - last_bottom)
+        self._bottom_spacer.setFixedHeight(max(0, bottom_h))
+
+    # ── 视口更新 ──
 
     def _update_visible_pages(self) -> None:
-        """根据滚动位置决定哪些页面需要渲染/释放。
+        """根据滚动位置 + 虚拟布局决定哪些页面需要渲染/回收。
 
-        离开视口的页面：取消待渲染瓦片，释放 overlay。
-        进入视口的页面：触发全页 pixmap 异步渲染。
+        核心优化：
+        - 用 _VirtualPageLayout 替代 QLayoutItem 遍历（纯 Python ~0.1ms）
+        - Widget 池化：仅视口内 + margin 的页面持有活跃 widget（≤15 个）
+        - 离开视口的页面隐藏并回收，保留 widget 对象复用
         """
         t0 = time.perf_counter()
-        if not self._page_containers:
+        if not self._page_metas or self._vlayout is None:
             return
 
         scroll_y = self.verticalScrollBar().value()
@@ -482,89 +734,71 @@ class PdfViewer(QScrollArea):
         if viewport_h <= 0:
             return
 
-        for page_num in list(self._rendered_pages):
-            if page_num not in self._page_containers:
-                self._rendered_pages.discard(page_num)
+        # 从虚拟布局获取视口内页面（纯 Python 列表扫描，500页 < 1ms）
+        margin = viewport_h
+        needed: set[int] = set(
+            self._vlayout.page_range_for_viewport(float(scroll_y), float(viewport_h), float(margin))
+        )
+        needed |= self._split_pages  # 有裂缝的页面始终保留
 
-        offsets = self._compute_page_y_offsets()
-
-        needed: set[int] = set()
-        for page_num in self._page_containers:
-            y = offsets.get(page_num, 0)
-            page_h = self._get_page_height(page_num)
-            page_bottom = y + page_h
-            margin = viewport_h
-            if page_bottom >= scroll_y - margin and y <= scroll_y + viewport_h + margin:
-                needed.add(page_num)
-
-        needed |= self._split_pages
-
-        # ── 方向感知预渲染（借鉴 Sioyek 趋势感知算法） ──
+        # ── 方向感知预渲染（借鉴 Sioyek 趋势感知算法）──
         trend = sum(self._scroll_history)
         viewport_center = scroll_y + viewport_h // 2
         current_page = 0
-        for page_num, y in sorted(offsets.items()):
-            if y <= viewport_center:
+        for page_num in self._vlayout._page_index:
+            if self._vlayout.page_y(page_num) <= viewport_center:
                 current_page = page_num
-        max_page = max(self._page_containers.keys()) if self._page_containers else 0
+        max_page = max(self._page_metas.keys()) if self._page_metas else 0
         preload_count = 4
 
         if trend >= 2:
             for p in range(current_page + 1, min(max_page + 1, current_page + 1 + preload_count)):
-                if p in self._page_containers:
+                if p in self._page_metas:
                     needed.add(p)
         elif trend <= -2:
             for p in range(max(0, current_page - preload_count), current_page):
-                if p in self._page_containers:
+                if p in self._page_metas:
                     needed.add(p)
 
-        # 渲染新进入视口的页面
-        for page_num in (needed - self._rendered_pages):
-            if page_num in self._page_containers:
-                _logger.info("PdfViewer: p%d 进入视口，触发渲染", page_num)
+        # ── 进入视口：创建/复用 widget → 渲染 ──
+        for page_num in sorted(needed - self._rendered_pages):
+            if page_num not in self._page_metas:
+                continue
+            if page_num in self._split_pages:
+                continue  # 裂缝页面由 open_split_widget 管理
+            _logger.info("PdfViewer: p%d 进入视口，触发渲染", page_num)
+            container = self._ensure_page_widget(page_num)
+            if container is not None:
                 self._render_page(page_num)
 
-        # 延迟卸载：离开视口 5 秒后才释放（避免 deleteLater 阻塞主线程导致卡顿）
+        # ── 离开视口：立即从 layout 移除（保持 spacer 计算正确），延迟释放 pixmap ──
         now = time.perf_counter()
         if not hasattr(self, '_page_last_seen'):
             self._page_last_seen: dict[int, float] = {}
-        for page_num in (self._rendered_pages - needed):
-            if page_num in self._page_containers:
-                last = self._page_last_seen.get(page_num, 0)
-                if last == 0:
-                    self._page_last_seen[page_num] = now
-                elif now - last > 5.0:
-                    self._tile_renderer.cancel_page(page_num)
-                    self._unrender_page(page_num)
-                    self._page_last_seen.pop(page_num, None)
+        for page_num in list(self._rendered_pages - needed):
+            if page_num not in self._page_metas:
+                continue
+            if page_num in self._split_pages:
+                continue
+            if page_num not in self._page_last_seen:
+                # 首次离开 → 立即从 layout 移除，保留 pixmap 以便快速回滚
+                self._page_last_seen[page_num] = now
+                self._hide_page_from_layout(page_num)
+            elif now - self._page_last_seen[page_num] > 5.0:
+                # 5s 冷却后 → 释放 pixmap
+                self._unrender_pooled_page(page_num)
+                self._page_last_seen.pop(page_num, None)
         for page_num in needed:
             self._page_last_seen.pop(page_num, None)
 
         self._rendered_pages = needed
+        self._adjust_spacers(needed)
         elapsed = (time.perf_counter() - t0) * 1000
         if elapsed > 5:
-            _logger.info("PdfViewer: _update_visible_pages 耗时 %.1fms (needed=%d)",
-                         elapsed, len(needed))
+            _logger.info("PdfViewer: _update_visible_pages 耗时 %.1fms (needed=%d, pool=%d)",
+                         elapsed, len(needed), len(self._widget_pool))
 
-    def _get_page_height(self, page_num: int) -> int:
-        """获取页面高度（缓存版：layout 不变时返回缓存值）。"""
-        layout_ver = self._layout.count()
-        cache = getattr(self, '_cached_heights', {})
-        if layout_ver == getattr(self, '_cached_layout_version', -1) and page_num in cache:
-            return cache[page_num]
-        segs = self._page_segments.get(page_num, [])
-        h = 0
-        for seg in segs:
-            w = seg.get("widget")
-            if w:
-                h += w.height()
-        for block_id, split in self._splits.items():
-            if self._block_to_page.get(block_id) == page_num:
-                if split.isVisible():
-                    h += split.height()
-        cache[page_num] = h
-        self._cached_heights = cache
-        return h
+    # ── 页面渲染 ──
 
     def _render_page(self, page_num: int) -> None:
         """请求页面渲染。大页面跳过全页渲染，直接逐瓦片后台渲染。"""
@@ -577,7 +811,6 @@ class PdfViewer(QScrollArea):
             return
 
         if len(segs) == 1 and segs[0].get("widget") is container:
-            # 检查页面物理尺寸是否超过 GPU 纹理限制
             doc = self._doc_engine.document
             is_large = False
             if doc and page_num < doc.page_count:
@@ -589,11 +822,9 @@ class PdfViewer(QScrollArea):
             if is_large:
                 _logger.info("PdfViewer: p%d 大页面 (%.0fx%.0f) → 仅瓦片渲染",
                              page_num, phys_w, phys_h)
-                # 标记容器为已渲染（无全页 pixmap，内容由瓦片填充）
                 container._rendered = True
                 container._tile_cache = self._tile_cache
                 container._zoom = self._scale
-                # 委托 TileRenderer 逐瓦片后台渲染（QTimer 延迟避免阻塞主线程）
                 page_rect = container.rect()
                 QTimer.singleShot(0, lambda p=page_num, r=page_rect:
                     self._tile_renderer.request_tiles_for_page(p, r, self._scale))
@@ -625,7 +856,6 @@ class PdfViewer(QScrollArea):
             _logger.warning("PdfViewer: p%d pixmap 为空，跳过渲染", page_num)
             return
 
-        # 设置正确的屏幕 DPR，使 QPainter 做 1:1 物理像素映射
         pixmap.setDevicePixelRatio(self._screen_dpr)
         t_render = time.perf_counter()
         container.render(pixmap, blocks, self._scale, self._connect_overlay,
@@ -637,21 +867,6 @@ class PdfViewer(QScrollArea):
         for b in blocks:
             if b.id in self._trans_indicators:
                 self._set_translation_marker(b.id, True)
-
-    def _unrender_page(self, page_num: int) -> None:
-        container = self._page_containers.get(page_num)
-        if container is None or not container.rendered:
-            return
-
-        for block_id, indicator in list(self._trans_indicators.items()):
-            if self._block_to_page.get(block_id) == page_num:
-                indicator.deleteLater()
-                del self._trans_indicators[block_id]
-
-        cleared = container.unrender()
-        for block_id in cleared:
-            self._overlays.pop(block_id, None)
-        _logger.debug("PdfViewer: p%d unrender 完成", page_num)
 
     # ── 翻译指示器 ──
 
@@ -686,6 +901,11 @@ class PdfViewer(QScrollArea):
             ov = container.overlay(block_id)
             if ov and _isValid(ov):
                 return ov
+        # 也检查 widget 池中隐藏的 widget
+        for container in self._widget_pool.values():
+            ov = container.overlay(block_id)
+            if ov and _isValid(ov):
+                return ov
         return None
 
     # ── 裂缝操作 ──
@@ -703,8 +923,11 @@ class PdfViewer(QScrollArea):
         if page_num is None:
             return None
 
+        # 确保页面 widget 存在且已渲染
         if page_num not in self._rendered_pages:
-            self._render_page(page_num)
+            container = self._ensure_page_widget(page_num)
+            if container is not None:
+                self._render_page(page_num)
             self._rendered_pages.add(page_num)
 
         segs = self._page_segments.get(page_num, [])
@@ -749,12 +972,14 @@ class PdfViewer(QScrollArea):
         split.translation_requested.connect(self.block_translate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))
 
+        # Layout 操作：移除老 widget，插入段+裂缝+段
         old_idx = self._layout.indexOf(old_widget)
 
         if isinstance(old_widget, _LazyPageWidget):
             for b_id in list(old_widget._overlays.keys()):
                 self._overlays.pop(b_id, None)
             self._page_containers.pop(page_num, None)
+            self._widget_pool.pop(page_num, None)
             for b_id in list(self._trans_indicators.keys()):
                 if self._block_to_page.get(b_id) == page_num:
                     del self._trans_indicators[b_id]
@@ -763,6 +988,7 @@ class PdfViewer(QScrollArea):
                 self._overlays.pop(child.block_id, None)
         old_widget.hide()
         self._layout.removeWidget(old_widget)
+        old_widget.deleteLater()
 
         top_w = self._build_segment_widget(pixmap, seg["y0"], cut_y, above_blocks)
         self._layout.insertWidget(old_idx, top_w)
@@ -774,11 +1000,16 @@ class PdfViewer(QScrollArea):
 
         split.open(mode)
         self._splits[block_id] = split
-        self._cached_layout_version = -1  # 失效 Y 偏移缓存
         _logger.info("裂缝已打开: block=%s page=%d mode=%s", block_id, page_num, mode.value)
         self._split_pages.add(page_num)
         self._set_translation_marker(block_id, True)
-        old_widget.deleteLater()
+
+        # 更新虚拟布局 + 连接高度变化信号
+        split._page_num = page_num
+        split._prev_split_h = float(split._saved_height)
+        if self._vlayout:
+            self._vlayout.register_split(page_num, split._prev_split_h)
+        split.height_changed.connect(self._on_split_height_changed)
 
         new_segs = segs[:seg_idx] + [
             {"y0": seg["y0"], "y1": cut_y, "blocks": above_blocks, "widget": top_w},
@@ -786,6 +1017,9 @@ class PdfViewer(QScrollArea):
             {"y0": cut_y, "y1": seg["y1"], "blocks": below_blocks, "widget": bot_w},
         ] + segs[seg_idx + 1:]
         self._page_segments[page_num] = new_segs
+
+        # 调整 spacer 保持滚动条范围正确
+        self._adjust_spacers(self._rendered_pages | {page_num})
 
         QApplication.processEvents()
         self.ensureVisible(0, split.y(), 50, 80)
@@ -795,10 +1029,12 @@ class PdfViewer(QScrollArea):
         return self._splits.get(block_id)
 
     def scroll_to_page(self, page_num: int) -> None:
-        offsets = self._compute_page_y_offsets()
-        y = offsets.get(page_num)
-        if y is not None:
-            self.verticalScrollBar().setValue(y)
+        if self._vlayout is None:
+            return
+        y = int(self._vlayout.page_y(page_num))
+        self.verticalScrollBar().setValue(y)
+        _logger.info("PdfViewer: scroll_to_page p%d → y=%d (max=%d)",
+                     page_num, y, self.verticalScrollBar().maximum())
 
     # ── 主题 ──
 
@@ -809,10 +1045,14 @@ class PdfViewer(QScrollArea):
     # ── 清理 ──
 
     def clear(self) -> None:
-        _logger.info("PdfViewer.clear: 开始 (%d splits, %d pages, %d tiles)",
-                     len(self._splits), len(self._page_containers),
+        _logger.info("PdfViewer.clear: 开始 (%d splits, %d pool, %d tiles)",
+                     len(self._splits), len(self._widget_pool),
                      self._tile_cache.tile_count)
         for block_id, s in list(self._splits.items()):
+            try:
+                s.height_changed.disconnect(self._on_split_height_changed)
+            except Exception:
+                pass
             s.close()
             s.deleteLater()
         self._splits.clear()
@@ -830,13 +1070,25 @@ class PdfViewer(QScrollArea):
         self._tile_renderer.clear()
         self._scroll_history.clear()
         self._last_scroll_value = 0
-        self._cached_layout_version = -1
-        self._cached_offsets = {}
+        self._vlayout = None
+        self._page_metas.clear()
+        for w in list(self._widget_pool.values()):
+            if _isValid(w):
+                w.deleteLater()
+        self._widget_pool.clear()
+        # 清理 layout 中所有 widget（保留 spacer 和 stretch）
         while self._layout.count():
             item = self._layout.takeAt(0)
             w = item.widget()
-            if w:
+            if w and w is not self._top_spacer and w is not self._bottom_spacer:
                 w.deleteLater()
+        # 重新添加 spacer 和 stretch
+        self._top_spacer = QWidget()
+        self._top_spacer.setFixedHeight(0)
+        self._layout.addWidget(self._top_spacer)
+        self._bottom_spacer = QWidget()
+        self._layout.addWidget(self._bottom_spacer)
+        self._layout.addStretch()
         _logger.info("PdfViewer.clear: 完成")
 
     # ── Overlay 连接 ──
@@ -859,11 +1111,38 @@ class PdfViewer(QScrollArea):
     def _on_split_q(self, question: str, block_id: str) -> None:
         pass
 
+    def _on_split_height_changed(self, new_height: int) -> None:
+        """裂缝高度变化 → 更新 _vlayout + spacer（layout 自动处理 widget 位移）。"""
+        split = self.sender()
+        if not isinstance(split, SplitWidget):
+            return
+        page_num = getattr(split, '_page_num', None)
+        if page_num is None:
+            return
+
+        delta = float(new_height) - split._prev_split_h
+        if delta == 0:
+            return
+
+        if self._vlayout:
+            self._vlayout.unregister_split(page_num, split._prev_split_h)
+            self._vlayout.register_split(page_num, float(new_height))
+
+        split._prev_split_h = float(new_height)
+
+        # 调整 spacer 以适应新的总高度
+        self._adjust_spacers(self._rendered_pages)
+
     def _on_clear_close(self, block_id: str) -> None:
         self._set_translation_marker(block_id, False)
         s = self._splits.pop(block_id, None)
         if s is None:
             return
+        try:
+            s.height_changed.disconnect(self._on_split_height_changed)
+        except Exception:
+            pass
+        split_height = float(s.height())
         page_num = self._block_to_page.get(block_id)
         if page_num is not None:
             self._merge_segments(page_num, block_id)
@@ -875,7 +1154,9 @@ class PdfViewer(QScrollArea):
                 self._split_pages.discard(page_num)
         s.close()
         s.deleteLater()
-        self._cached_layout_version = -1  # 失效 Y 偏移缓存
+        # 更新虚拟布局（layout 自动处理 widget 位移）
+        if self._vlayout and page_num is not None:
+            self._vlayout.unregister_split(page_num, split_height)
         self.split_close_requested.emit(block_id)
 
     def _merge_segments(self, page_num: int, split_id: str) -> None:

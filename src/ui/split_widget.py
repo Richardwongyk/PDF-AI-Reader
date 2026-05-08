@@ -176,6 +176,7 @@ class SplitWidget(QFrame):
     question_submitted = Signal(str, str)
     translation_requested = Signal(str)
     close_requested = Signal(str)
+    height_changed = Signal(int)  # 当 setFixedHeight 改变高度时发射
 
     _MAX_HISTORY_ROUNDS: int = 6
     _MIN_HEIGHT: int = 80
@@ -588,9 +589,11 @@ class SplitWidget(QFrame):
         if self._collapsed:
             return
         new_h = max(self._MIN_HEIGHT, self.height() + delta)
-        self._saved_height = new_h
-        self._user_resized = True  # 用户主动拖拽，锁定自动高度
-        self.setFixedHeight(new_h)
+        if new_h != self.height():
+            self._saved_height = new_h
+            self._user_resized = True
+            self.setFixedHeight(new_h)
+            self.height_changed.emit(new_h)
 
     # ── WebView ──
 
@@ -615,6 +618,7 @@ class SplitWidget(QFrame):
                 new_h = min(needed, 600)
                 self._saved_height = new_h
                 self.setFixedHeight(new_h)
+                self.height_changed.emit(new_h)
 
     def _on_page_loaded(self, ok: bool) -> None:
         if ok:
