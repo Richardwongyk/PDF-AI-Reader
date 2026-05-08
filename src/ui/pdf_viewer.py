@@ -143,8 +143,8 @@ class _LazyPageWidget(QWidget):
         painter = QPainter(self)
 
         if self._rendered and self._full_pixmap is not None and not self._full_pixmap.isNull():
-            # 全页 pixmap 直接绘制（画质无损 —— 同旧版 QLabel.setPixmap 效果）
-            painter.drawPixmap(0, 0, self._page_w, self._page_h, self._full_pixmap)
+            # drawPixmap(x, y, pixmap) 不加宽高 → Qt 内部 1:1 像素映射，零插值损失
+            painter.drawPixmap(0, 0, self._full_pixmap)
         else:
             self._draw_placeholder(painter)
 
@@ -177,7 +177,6 @@ class _LazyPageWidget(QWidget):
         if tile_px <= 0:
             return 0
 
-        dpr = pixmap.devicePixelRatio()
         cols = (self._page_w // tile_px) + 1
         rows = (self._page_h // tile_px) + 1
         count = 0
@@ -187,14 +186,13 @@ class _LazyPageWidget(QWidget):
                 key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row,
                               zoom_level=self._zoom)
 
-                # 物理像素坐标（DPR 感知）
-                phys_x = int(col * tile_px * dpr)
-                phys_y = int(row * tile_px * dpr)
-                phys_w = int(min(tile_px, self._page_w - col * tile_px) * dpr)
-                phys_h = int(min(tile_px, self._page_h - row * tile_px) * dpr)
+                # pixmap 无 DPR，坐标直接对应物理像素
+                x = col * tile_px
+                y = row * tile_px
+                w = min(tile_px, self._page_w - x)
+                h = min(tile_px, self._page_h - y)
 
-                tile_pm = pixmap.copy(phys_x, phys_y, phys_w, phys_h)
-                tile_pm.setDevicePixelRatio(dpr)
+                tile_pm = pixmap.copy(x, y, w, h)
                 self._tile_cache.put(key, tile_pm, render_ms=0.0)
                 count += 1
 
@@ -213,7 +211,11 @@ class PdfViewer(QScrollArea):
         super().__init__()
         self._doc_engine = doc_engine
         self._config = config
-        self._dpi, self._scale = 150, 150 / 72.0
+        # 使用屏幕物理分辨率渲染，保证 1:1 像素映射（借鉴 qpageview 的 ratio 机制）
+        screen = QApplication.primaryScreen()
+        self._screen_dpr = screen.devicePixelRatio() if screen else 1.0
+        self._dpi = int(screen.logicalDotsPerInch() * self._screen_dpr) if screen else 96
+        self._scale = self._dpi / 72.0
         self._all_blocks: list[DocumentBlock] = []
         self._page_segments: dict[int, list[dict]] = {}
         self._splits: dict[str, SplitWidget] = {}
@@ -260,21 +262,15 @@ class PdfViewer(QScrollArea):
         """创建裁切图片 + 透明叠加层的段组件（始终渲染）。"""
         h = max(y1 - y0, 1)
 
-        dpr = pixmap.devicePixelRatio()
-        logical_w = int(pixmap.width() / dpr)
-
         if not blocks:
             w = QWidget()
-            w.setFixedSize(logical_w, h)
+            w.setFixedSize(pixmap.width(), h)
             return w
 
-        phys_y0 = int(y0 * dpr)
-        phys_h = int(h * dpr)
-        cropped = pixmap.copy(0, phys_y0, pixmap.width(), phys_h)
-        cropped.setDevicePixelRatio(dpr)
+        cropped = pixmap.copy(0, y0, pixmap.width(), h)
 
         w = QWidget()
-        w.setFixedSize(logical_w, h)
+        w.setFixedSize(pixmap.width(), h)
         label = QLabel(w)
         label.setPixmap(cropped)
         label.move(0, 0)
@@ -466,9 +462,8 @@ class PdfViewer(QScrollArea):
             _logger.warning("PdfViewer: p%d pixmap 为空，跳过渲染", page_num)
             return
 
-        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d, DPR=%.1f) → 切片+绘制",
-                     page_num, pixmap.width(), pixmap.height(),
-                     pixmap.devicePixelRatio())
+        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d) → 切片+绘制",
+                     page_num, pixmap.width(), pixmap.height())
         container.render(pixmap, blocks, self._scale, self._connect_overlay,
                          tile_cache=self._tile_cache)
         for b in blocks:
@@ -576,14 +571,13 @@ class PdfViewer(QScrollArea):
         below_blocks = [b for b in all_blocks if b.bbox[1] * self._scale >= cut_y - 5]
 
         block_px_h = int((block.bbox[3] - block.bbox[1]) * self._scale)
-        dpr = pixmap.devicePixelRatio()
-        logical_w = int(pixmap.width() / dpr)
+        page_w = pixmap.width()
         split = SplitWidget(
             block, mode=mode, position="below",
             block_pixel_height=max(block_px_h, 60),
-            page_width=logical_w,
+            page_width=page_w,
         )
-        split.setFixedWidth(logical_w)
+        split.setFixedWidth(page_w)
         split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
         split.translation_requested.connect(self.block_translate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))

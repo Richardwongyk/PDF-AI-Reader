@@ -674,16 +674,14 @@ class DocumentEngine(BaseService):
 
         qpixmap: QPixmap | None = None
 
-        # 【修复】统一使用 PyMuPDF 2x 超分渲染 + devicePixelRatio
-        # 内部以 2 倍 DPI 渲染物理像素，setDevicePixelRatio 保证逻辑尺寸不变
+        # 渲染到屏幕物理 DPI，不设置 devicePixelRatio —— 保证 1:1 像素映射
         try:
             page = self._doc[page_num]
-            zoom = (dpi * 2) / 72.0
+            zoom = dpi / 72.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             qpixmap = QPixmap()
             qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
-            qpixmap.setDevicePixelRatio(2.0)
         except Exception:
             return None
 
@@ -780,12 +778,11 @@ class _PageRenderTask(QRunnable):
     def run(self) -> None:
         try:
             page = self._doc[self._page_num]
-            zoom = (self._dpi * 2) / 72.0  # 2x 超分
+            zoom = self._dpi / 72.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             qpixmap = QPixmap()
             qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
-            qpixmap.setDevicePixelRatio(2.0)
             self._signals.result.emit(self._page_num, self._dpi, qpixmap)
         except Exception:
             self._signals.result.emit(self._page_num, self._dpi, QPixmap())
