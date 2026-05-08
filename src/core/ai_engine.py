@@ -1049,9 +1049,19 @@ class _TranslationThread(QThread):
     def run(self) -> None:
         try:
             result = self._service.translate_block(self._block, self._domain, stream=True)
+            full_raw_text = ""
+
+            # 1. 流式输出：逐字发送给 UI（屏幕暂显示占位符如 【FORMULA_0】）
             for token in result:  # type: ignore[union-attr]
+                full_raw_text += token
                 self.token_generated.emit(token)
-            self.finished_signal.emit("")
+
+            # 2. 流式输出结束后恢复 LaTeX 公式（【FORMULA_0】→ $$...$$）
+            final_text = self._service._post_process(full_raw_text)
+
+            # 3. 将包含真实 LaTeX 的最终文本发给 UI 渲染
+            self.finished_signal.emit(final_text)
+
         except Exception as e:
             import traceback
             self.error_signal.emit(f"{e}\n{traceback.format_exc()}")

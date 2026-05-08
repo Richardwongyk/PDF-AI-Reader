@@ -40,7 +40,7 @@ from src.core.ai_engine import AIEngine
 from src.core.knowledge_engine import KnowledgeEngine
 from src.core.glossary_manager import GlossaryManager
 from src.core.navigator import Navigator
-from src.core.service_registry import CoreServiceRegistry
+from src.core.service_container import ServiceContainer
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget
 from src.ui.theme import apply_theme
@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
     └─────────────────────────────────────────────┘
     """
 
-    def __init__(self, services: CoreServiceRegistry) -> None:
+    def __init__(self, services: ServiceContainer) -> None:
         """初始化主窗口。
 
         Args:
