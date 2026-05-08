@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 
 from shiboken6 import isValid as _isValid
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -234,6 +235,10 @@ class PdfViewer(QScrollArea):
         _logger.info("PdfViewer: TileRenderer 就绪 (cache=%dMB max)",
                      self._tile_cache._max_size / (1024 * 1024))
 
+        # 方向感知预渲染（借鉴 Sioyek 趋势感知算法）
+        self._scroll_history: deque[int] = deque(maxlen=3)  # 最近 3 次方向 (+1/-1)
+        self._last_scroll_value: int = 0
+
         # 懒加载相关
         self._page_containers: dict[int, _LazyPageWidget] = {}
         self._rendered_pages: set[int] = set()
@@ -351,6 +356,13 @@ class PdfViewer(QScrollArea):
     # ── 懒加载核心 ──
 
     def _on_scroll(self, value: int) -> None:
+        # 追踪翻页方向（借鉴 Sioyek 趋势感知）
+        if value > self._last_scroll_value:
+            self._scroll_history.append(1)   # 向下/向前
+        elif value < self._last_scroll_value:
+            self._scroll_history.append(-1)  # 向上/向后
+        self._last_scroll_value = value
+
         self._viewport_timer.start()
         self.viewport_changed.emit(value, self.verticalScrollBar().maximum())
 
@@ -407,6 +419,35 @@ class PdfViewer(QScrollArea):
                 needed.add(page_num)
 
         needed |= self._split_pages
+
+        # ── 方向感知预渲染（借鉴 Sioyek 趋势感知算法） ──
+        # 计算趋势得分：最近 3 次方向，正向+1 反向-1
+        trend = sum(self._scroll_history)
+        # 找到当前视口中心所在的页面
+        viewport_center = scroll_y + viewport_h // 2
+        current_page = 0
+        for page_num, y in sorted(offsets.items()):
+            if y <= viewport_center:
+                current_page = page_num
+
+        max_page = max(self._page_containers.keys()) if self._page_containers else 0
+        preload_count = 4  # 预加载页数
+
+        if trend >= 2:
+            # 正向翻页趋势 → 预加载后续页
+            for p in range(current_page + 1, min(max_page + 1, current_page + 1 + preload_count)):
+                if p in self._page_containers:
+                    needed.add(p)
+            _logger.debug("PdfViewer: 正向趋势 (score=%d) → 预加载 p%d→p%d",
+                          trend, current_page + 1,
+                          min(max_page, current_page + preload_count))
+        elif trend <= -2:
+            # 反向翻页趋势 → 预加载前序页
+            for p in range(max(0, current_page - preload_count), current_page):
+                if p in self._page_containers:
+                    needed.add(p)
+            _logger.debug("PdfViewer: 反向趋势 (score=%d) → 预加载 p%d→p%d",
+                          trend, max(0, current_page - preload_count), current_page - 1)
 
         # 离开视口 → 取消瓦片 + 释放
         for page_num in (self._rendered_pages - needed):
@@ -672,6 +713,8 @@ class PdfViewer(QScrollArea):
         self._rendered_pages.clear()
         self._split_pages.clear()
         self._tile_renderer.clear()
+        self._scroll_history.clear()
+        self._last_scroll_value = 0
         while self._layout.count():
             item = self._layout.takeAt(0)
             w = item.widget()
