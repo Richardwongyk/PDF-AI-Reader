@@ -607,15 +607,35 @@ class SplitWidget(QFrame):
         else:
             self._pending_js = js_code
 
+    def _compute_chrome_height(self) -> int:
+        """精确计算裂缝中非内容区域的 chrome 高度。
+
+        遍历 body_layout 中除 WebView 外的所有可见子组件，
+        累加其高度 + 布局边距 + 间距，避免估算误差导致文字显示不全。
+        """
+        h = 0
+        lm = self._body_layout.contentsMargins()
+        h += lm.top() + lm.bottom()
+        visible = [w for w in [
+            self._header_label, self._context_label, self._input_widget,
+            self._result_view, self._followup_widget, self._action_widget,
+        ] if w.isVisible()]
+        h += self._body_layout.spacing() * max(0, len(visible) - 1)
+        for w in visible:
+            if w is not self._result_view:
+                h += w.sizeHint().height()
+        h += self._resize_handle.height()
+        return h
+
     def _adjust_height(self, content_height: int) -> None:
         """QWebChannel 推送的内容高度变化回调。"""
         if self._user_resized or self._collapsed:
             return
         if content_height and content_height > 0:
-            chrome_h = self._action_widget.height() + 20
-            needed = content_height + chrome_h
+            chrome = self._compute_chrome_height()
+            needed = content_height + chrome + 4  # 4px 安全缓冲
             if needed > self.height():
-                new_h = min(needed, 600)
+                new_h = min(needed, 800)
                 self._saved_height = new_h
                 self.setFixedHeight(new_h)
                 self.height_changed.emit(new_h)

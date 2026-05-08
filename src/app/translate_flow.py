@@ -72,11 +72,16 @@ class TranslationFlow(QObject):
                 self.translation_ready.emit(cached, block_id)
                 return True
 
-        # 2. 记录待处理请求（用于回调时关联 doc_hash）
+        # 2. 防止重复请求（借鉴 Mad Professor 去重检查）
+        if block_id in self._pending:
+            _logger.info("TranslationFlow: block=%s 已有进行中请求，跳过", block_id)
+            return False
+
+        # 3. 记录待处理请求（用于回调时关联 doc_hash）
         if doc_hash:
             self._pending[block_id] = doc_hash
 
-        # 3. 委托 AIEngine（借鉴 Mad Professor AIResponseThread.start()）
+        # 4. 委托 AIEngine（借鉴 Mad Professor AIResponseThread.start()）
         _logger.info("TranslationFlow: 委托 AIEngine 翻译 %s", block_id)
         self._ai_engine.request_translation(block)
         return False
