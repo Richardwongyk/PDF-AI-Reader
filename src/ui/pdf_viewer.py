@@ -397,6 +397,7 @@ class PdfViewer(QScrollArea):
         离开视口的页面：取消待渲染瓦片，释放 overlay。
         进入视口的页面：触发全页 pixmap 异步渲染。
         """
+        t0 = time.perf_counter()
         if not self._page_containers:
             return
 
@@ -469,6 +470,10 @@ class PdfViewer(QScrollArea):
                           sorted(self._rendered_pages), sorted(needed))
 
         self._rendered_pages = needed
+        elapsed = (time.perf_counter() - t0) * 1000
+        if elapsed > 5:  # 只记录 >5ms 的调用
+            _logger.info("PdfViewer: _update_visible_pages 耗时 %.1fms (needed=%d)",
+                         elapsed, len(needed))
 
     def _get_page_height(self, page_num: int) -> int:
         segs = self._page_segments.get(page_num, [])
@@ -531,11 +536,13 @@ class PdfViewer(QScrollArea):
 
         # 设置正确的屏幕 DPR，使 QPainter 做 1:1 物理像素映射
         pixmap.setDevicePixelRatio(self._screen_dpr)
-        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d, DPR=%.1f) → 切片+绘制",
-                     page_num, pixmap.width(), pixmap.height(),
-                     self._screen_dpr)
+        t_render = time.perf_counter()
         container.render(pixmap, blocks, self._scale, self._connect_overlay,
                          tile_cache=self._tile_cache)
+        render_ms = (time.perf_counter() - t_render) * 1000
+        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d, DPR=%.1f) → 切片+绘制 (%.1fms)",
+                     page_num, pixmap.width(), pixmap.height(),
+                     self._screen_dpr, render_ms)
         for b in blocks:
             if b.id in self._trans_indicators:
                 self._set_translation_marker(b.id, True)
