@@ -217,7 +217,7 @@ class SplitWidget(QFrame):
         self._current_theme = "light"
 
         self.setObjectName("split_container")
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet(SPLIT_WIDGET_STYLE)
         self._init_ui()
@@ -350,7 +350,7 @@ class SplitWidget(QFrame):
         # ── 正文区域 ──
         self._body_widget = QWidget()
         body_layout = QVBoxLayout(self._body_widget)
-        body_layout.setContentsMargins(2, 0, 2, 0)
+        body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
         self._body_layout = body_layout  # 保存引用，供 WebView 动态替换
 

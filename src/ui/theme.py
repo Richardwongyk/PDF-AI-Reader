@@ -25,8 +25,8 @@ QFrame#split_container {
     );
     border-radius: 12px;
     border: 1px solid #c0c0e0;
-    margin: 8px 0px;
-    padding: 12px;
+    margin: 2px 0px;
+    padding: 4px 8px;
     color: #222;
 }
 
@@ -109,8 +109,8 @@ QFrame#split_container {
     );
     border-radius: 12px;
     border: 1px solid #3a3a5a;
-    margin: 8px 0px;
-    padding: 12px;
+    margin: 2px 0px;
+    padding: 4px 8px;
     color: #cdd6f4;
 }
 
