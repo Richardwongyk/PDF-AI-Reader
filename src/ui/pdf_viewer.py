@@ -498,10 +498,11 @@ class PdfViewer(QScrollArea):
         return h
 
     def _render_page(self, page_num: int) -> None:
-        """请求全页异步渲染 + 逐瓦片后台渲染。
+        """请求全页异步渲染。
 
-        全页 pixmap 用于立即显示（回退），瓦片渲染完成后
-        paintEvent 逐步切换到瓦片绘制（借鉴 qpageview 渐进过渡）。
+        瓦片渲染（request_tiles_for_page）暂不在此触发——创建大量
+        QRunnable/QObject 堵塞主线程导致滚动卡顿。瓦片渲染将在后续
+        通过独立的低优先级后台队列接入。
         """
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
@@ -512,12 +513,7 @@ class PdfViewer(QScrollArea):
             return
 
         if len(segs) == 1 and segs[0].get("widget") is container:
-            _logger.info("PdfViewer: _render_page p%d → 全页 + 瓦片渲染", page_num)
-            # 全页 pixmap（立即显示）
             self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
-            # 逐瓦片后台渲染（渐进过渡）
-            page_rect = container.rect()
-            self._tile_renderer.request_tiles_for_page(page_num, page_rect, self._scale)
 
     def _on_tile_ready(self, key: TileKey, pixmap: QPixmap) -> None:
         """瓦片渲染完成 → 触发对应页面重绘（借鉴 qpageview callback 模式）。"""
