@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_action)
         file_menu.addSeparator()
         close_action = QAction("关闭文档(&C)", self)
-        close_action.triggered.connect(self._on_close_document)
+        close_action.triggered.connect(lambda: self._document_flow.close_document())
         file_menu.addAction(close_action)
         file_menu.addSeparator()
         exit_action = QAction("退出(&X)", self)
