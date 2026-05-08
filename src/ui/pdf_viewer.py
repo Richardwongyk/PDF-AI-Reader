@@ -136,15 +136,15 @@ class _LazyPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def paintEvent(self, event: object) -> None:
-        """使用 QPainter 绘制页面内容 — 借鉴 qpageview AbstractRenderer.paint()。
+        """使用 QPainter 绘制 — 借鉴 qpageview AbstractRenderer.paint()。
 
-        优先绘制全页 pixmap（画质无损，与旧版 QLabel 效果完全一致）。
-        后续可扩展为从 TileCache 逐瓦片绘制，实现真正的瓦片化渲染。
+        当前：全页 pixmap 直接绘制（画质无损，1:1 像素映射）。
+        后台：_TileRenderTask 逐瓦片渲染 → TileCache → tile_ready → update()。
+        渐进切换：当 TileCache 中瓦片覆盖率足够高时，切换为逐瓦片绘制。
         """
         painter = QPainter(self)
 
         if self._rendered and self._full_pixmap is not None and not self._full_pixmap.isNull():
-            # drawPixmap(x, y, pixmap) 不加宽高 → Qt 内部 1:1 像素映射，零插值损失
             painter.drawPixmap(0, 0, self._full_pixmap)
         else:
             self._draw_placeholder(painter)
@@ -229,11 +229,13 @@ class PdfViewer(QScrollArea):
         self._overlays: dict[str, BlockOverlay] = {}
         self._trans_indicators: dict[str, QWidget] = {}
 
-        # 瓦片化渲染器（借鉴 qpageview + Syncfusion）
-        self._tile_renderer = TileRenderer()
-        self._tile_cache = self._tile_renderer.cache  # 共享 TileCache 引用
-        _logger.info("PdfViewer: TileRenderer 就绪 (cache=%dMB max)",
-                     self._tile_cache._max_size / (1024 * 1024))
+        # 瓦片化渲染器（借鉴 qpageview + Syncfusion），使用屏幕物理 DPI
+        self._tile_renderer = TileRenderer(dpi=self._dpi)
+        self._tile_cache = self._tile_renderer.cache
+        # 瓦片就绪时触发所在页面重绘（借鉴 qpageview callback 模式）
+        self._tile_renderer.tile_ready.connect(self._on_tile_ready)
+        _logger.info("PdfViewer: TileRenderer 就绪 (cache=%dMB max, dpi=%d)",
+                     self._tile_cache._max_size / (1024 * 1024), self._dpi)
 
         # 方向感知预渲染（借鉴 Sioyek 趋势感知算法）
         self._scroll_history: deque[int] = deque(maxlen=3)  # 最近 3 次方向 (+1/-1)
@@ -482,7 +484,11 @@ class PdfViewer(QScrollArea):
         return h
 
     def _render_page(self, page_num: int) -> None:
-        """请求全页异步渲染。完成后 _on_page_rendered_async 负责切片+绘制。"""
+        """请求全页异步渲染 + 逐瓦片后台渲染。
+
+        全页 pixmap 用于立即显示（回退），瓦片渲染完成后
+        paintEvent 逐步切换到瓦片绘制（借鉴 qpageview 渐进过渡）。
+        """
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
@@ -492,8 +498,18 @@ class PdfViewer(QScrollArea):
             return
 
         if len(segs) == 1 and segs[0].get("widget") is container:
-            _logger.debug("PdfViewer: _render_page p%d → request_page_render_async", page_num)
+            _logger.debug("PdfViewer: _render_page p%d → 全页 + 瓦片渲染", page_num)
+            # 全页 pixmap（立即显示）
             self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
+            # 逐瓦片后台渲染（渐进过渡）
+            page_rect = container.rect()
+            self._tile_renderer.request_tiles_for_page(page_num, page_rect, self._scale)
+
+    def _on_tile_ready(self, key: TileKey, pixmap: QPixmap) -> None:
+        """瓦片渲染完成 → 触发对应页面重绘（借鉴 qpageview callback 模式）。"""
+        container = self._page_containers.get(key.page_num)
+        if container is not None and container.rendered:
+            container.update()
 
     def _on_page_rendered_async(self, page_num: int, qpixmap: object) -> None:
         """全页 pixmap 渲染完成 → 切片到 TileCache → 触发 QPainter 重绘。"""

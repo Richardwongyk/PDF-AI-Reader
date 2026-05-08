@@ -61,18 +61,23 @@ class _TileRenderTask(QRunnable):
         _log = logging.getLogger("TileRenderer.task")
         try:
             page = self._doc[self._key.page_num]
-            zoom = (self._dpi * self._key.zoom_level) / 72.0
+            # zoom = 物理渲染精度 (physical_dpi / 72)
+            zoom = self._dpi / 72.0
+            # scale = 逻辑缩放因子 (logical_dpi / 72), 从 TileKey.zoom_level 传入
+            scale = self._key.zoom_level
             mat = fitz.Matrix(zoom, zoom)
 
-            # Calculate tile rectangle in page coordinates (points)
-            tile_pt_x = self._key.tile_x * TILE_SIZE / zoom
-            tile_pt_y = self._key.tile_y * TILE_SIZE / zoom
-            tile_pt_w = TILE_SIZE / zoom
-            tile_pt_h = TILE_SIZE / zoom
+            # 瓦片在页面坐标中的区域（points = 1/72 inch）
+            # 逻辑瓦片 = TILE_SIZE × TILE_SIZE 逻辑像素 → 点单位 = TILE_SIZE / scale
+            tile_pt_w = TILE_SIZE / scale
+            tile_pt_h = TILE_SIZE / scale
+            tile_pt_x = self._key.tile_x * tile_pt_w
+            tile_pt_y = self._key.tile_y * tile_pt_h
 
             clip = fitz.Rect(tile_pt_x, tile_pt_y,
                              tile_pt_x + tile_pt_w, tile_pt_y + tile_pt_h)
             pix = page.get_pixmap(matrix=mat, clip=clip, colorspace=fitz.csRGB)
+            # 渲染结果物理像素 = tile_pt_w * zoom = TILE_SIZE * DPR ✓
 
             qpixmap = QPixmap()
             qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
@@ -102,9 +107,10 @@ class TileRenderer(QObject):
 
     tile_ready = Signal(TileKey, QPixmap)  # emitted when a tile finishes rendering
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: QObject | None = None, dpi: int = DEFAULT_DPI) -> None:
         super().__init__(parent)
         self._doc: fitz.Document | None = None
+        self._dpi: int = dpi
         self._cache = TileCache(max_size_bytes=MAX_MEMORY_MB * 1024 * 1024)
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(RENDER_THREADS)
@@ -116,8 +122,8 @@ class TileRenderer(QObject):
         # Stats
         self._rendered_count: int = 0
         self._cancelled_count: int = 0
-        _logger.info("TileRenderer: 初始化 (threads=%d, tile_size=%dpx, max_mem=%dMB)",
-                     RENDER_THREADS, TILE_SIZE, MAX_MEMORY_MB)
+        _logger.info("TileRenderer: 初始化 (threads=%d, tile_size=%dpx, max_mem=%dMB, dpi=%d)",
+                     RENDER_THREADS, TILE_SIZE, MAX_MEMORY_MB, dpi)
 
     # ------------------------------------------------------------------
     # Public API
@@ -134,6 +140,11 @@ class TileRenderer(QObject):
             self._rendered_count = 0
             self._cancelled_count = 0
         self._doc = doc
+
+    def set_dpi(self, dpi: int) -> None:
+        """Update rendering DPI (called when screen DPI is detected)."""
+        self._dpi = dpi
+        _logger.debug("TileRenderer: set_dpi(%d)", dpi)
 
     @property
     def cache(self) -> TileCache:
@@ -261,7 +272,7 @@ class TileRenderer(QObject):
         request_id = self._request_counter
         self._pending[key] = request_id
 
-        task = _TileRenderTask(self._doc, key, DEFAULT_DPI, request_id)
+        task = _TileRenderTask(self._doc, key, self._dpi, request_id)
         task.done_signal.connect(self._on_tile_done)
         self._pool.start(task)
         _logger.debug("TileRenderer: SCHEDULE %s (req#%d, pending=%d)",
