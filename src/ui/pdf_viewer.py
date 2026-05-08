@@ -136,19 +136,42 @@ class _LazyPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def paintEvent(self, event: object) -> None:
-        """QPainter 绘制全页 pixmap（1 次调用，画质无损）。
+        """混合绘制策略 —— 借鉴 qpageview AbstractRenderer.paint()。
 
-        TileCache 由 _slice_pixmap_to_tiles() 在 render() 中后台填充，
-        为后续多缩放级别缓存、大页局部刷新等优化做准备。
-        _paint_tiles() 保留作为未来瓦片切换的入口。
+        - 全页 pixmap < 4096 物理像素 → 直接绘制（快速，画质无损）
+        - 全页 pixmap ≥ 4096 物理像素 → 瓦片网格绘制（避免 GPU 纹理溢出）
+        - 全页 pixmap 未就绪 → 尝试瓦片缓存 → 灰色占位
         """
         painter = QPainter(self)
 
-        if self._rendered and self._full_pixmap is not None and not self._full_pixmap.isNull():
-            painter.drawPixmap(0, 0, self._full_pixmap)
+        if not self._rendered:
+            self._draw_placeholder(painter)
+            painter.end()
+            return
+
+        pix = self._full_pixmap
+        if pix is not None and not pix.isNull():
+            phys_w = pix.width() * pix.devicePixelRatio()
+            phys_h = pix.height() * pix.devicePixelRatio()
+            if max(phys_w, phys_h) < 4096:
+                # 小页面 → 全页绘制（快速路径）
+                painter.drawPixmap(0, 0, pix)
+                painter.end()
+                return
+
+        # 大页面或无全页 pixmap → 瓦片路径
+        if self._tile_cache is not None and self._zoom > 0:
+            tile_px = int(TILE_SIZE * self._zoom)
+            if tile_px > 0 and self._page_w > tile_px:
+                self._paint_tiles(painter, tile_px)
+                painter.end()
+                return
+
+        # 最终回退
+        if pix is not None and not pix.isNull():
+            painter.drawPixmap(0, 0, pix)
         else:
             self._draw_placeholder(painter)
-
         painter.end()
 
     def _paint_tiles(self, painter: QPainter, tile_px: int) -> None:
@@ -544,12 +567,7 @@ class PdfViewer(QScrollArea):
         return h
 
     def _render_page(self, page_num: int) -> None:
-        """请求全页异步渲染。
-
-        瓦片渲染（request_tiles_for_page）暂不在此触发——创建大量
-        QRunnable/QObject 堵塞主线程导致滚动卡顿。瓦片渲染将在后续
-        通过独立的低优先级后台队列接入。
-        """
+        """请求页面渲染。大页面跳过全页渲染，直接逐瓦片后台渲染。"""
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
@@ -559,7 +577,29 @@ class PdfViewer(QScrollArea):
             return
 
         if len(segs) == 1 and segs[0].get("widget") is container:
-            self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
+            # 检查页面物理尺寸是否超过 GPU 纹理限制
+            doc = self._doc_engine.document
+            is_large = False
+            if doc and page_num < doc.page_count:
+                rect = doc[page_num].rect
+                phys_w = rect.width * self._dpi / 72.0
+                phys_h = rect.height * self._dpi / 72.0
+                is_large = max(phys_w, phys_h) > 4096
+
+            if is_large:
+                _logger.info("PdfViewer: p%d 大页面 (%.0fx%.0f) → 仅瓦片渲染",
+                             page_num, phys_w, phys_h)
+                # 标记容器为已渲染（无全页 pixmap，内容由瓦片填充）
+                container._rendered = True
+                container._tile_cache = self._tile_cache
+                container._zoom = self._scale
+                # 委托 TileRenderer 逐瓦片后台渲染（QTimer 延迟避免阻塞主线程）
+                page_rect = container.rect()
+                QTimer.singleShot(0, lambda p=page_num, r=page_rect:
+                    self._tile_renderer.request_tiles_for_page(p, r, self._scale))
+                self._rendered_pages.add(page_num)
+            else:
+                self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
 
     def _on_tile_ready(self, key: TileKey, pixmap: QPixmap) -> None:
         """瓦片渲染完成 → 触发对应页面重绘（借鉴 qpageview callback 模式）。"""
