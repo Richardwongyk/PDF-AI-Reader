@@ -22,6 +22,7 @@ import platform
 if platform.system() == "Windows":
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu-sandbox"
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
@@ -200,6 +201,11 @@ def main() -> int:
         window.show()
         total = __import__('time').perf_counter() - t_start
         logging.info("主窗口已显示。总启动时间: %.2fs", total)
+
+        # 后台预热云端 LLM 连接（首次调用 ~47s，预热后降至 ~2s）
+        ai_engine = services.get("ai_engine")
+        QTimer.singleShot(1000, ai_engine.warmup_cloud)
+
         return app.exec()
 
     except Exception as e:

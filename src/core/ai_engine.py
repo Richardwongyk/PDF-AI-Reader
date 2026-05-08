@@ -892,6 +892,34 @@ class AIEngine(BaseService):
         self._active_threads.append(thread)
         thread.start()
 
+    def warmup_cloud(self) -> None:
+        """后台预热云端连接（LiteLLM 首次调用需 ~47s 建连+SSL+模型预热）。
+
+        发送一个极小的翻译请求到云端，在后台线程中静默执行。
+        错误被忽略——预热失败不影响正常使用。
+        """
+        try:
+            client = self._router.route(TaskType.TRANSLATION)
+        except RuntimeError:
+            return  # 没有可用云端客户端
+
+        class _WarmupThread(QThread):
+            def run(self_):
+                try:
+                    client.generate([
+                        {"role": "user", "content": "hi"}
+                    ], temperature=0.0, max_tokens=1)
+                except Exception:
+                    pass  # 预热失败不影响正常使用
+
+        self.logger.info("开始后台预热云端连接...")
+        thread = _WarmupThread()
+        thread.finished.connect(
+            lambda: self.logger.info("云端连接预热完成")
+        )
+        self._active_threads.append(thread)
+        thread.start()
+
     def check_local_model_status(self) -> dict[str, bool]:
         """检查本地模型状态。
 
