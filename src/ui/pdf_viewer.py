@@ -1110,9 +1110,11 @@ class PdfViewer(QScrollArea):
                     break
 
         # 更新缩放因子
+        old_zoom = self._zoom_multiplier
         self._zoom_multiplier = new_zoom
         self._scale = self._base_scale * new_zoom
         self._dpi = int(self._base_dpi * new_zoom)
+        zoom_ratio = new_zoom / old_zoom if old_zoom > 0 else 1.0
 
         # 重建页面元数据尺寸 + 虚拟布局
         doc = self._doc_engine.document
@@ -1126,9 +1128,11 @@ class PdfViewer(QScrollArea):
             meta["width"] = w
             meta["height"] = h
             page_heights[pn] = float(h)
+            # 缩放段坐标（裂缝页面的 y0/y1 需随缩放比例调整）
             for seg in self._page_segments.get(pn, []):
-                if "split_id" not in seg and seg.get("y0") == 0:
-                    seg["y1"] = h
+                if "split_id" not in seg:
+                    seg["y0"] = int(seg["y0"] * zoom_ratio)
+                    seg["y1"] = int(seg["y1"] * zoom_ratio)
         self._vlayout.rebuild(page_heights)
 
         # 处理已渲染的页面：缩放 pixmap 即时显示 + 清除旧 overlay + 请求精确渲染
