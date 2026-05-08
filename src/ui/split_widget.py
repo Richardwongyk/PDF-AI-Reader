@@ -632,8 +632,12 @@ class SplitWidget(QFrame):
         if self._user_resized or self._collapsed:
             return
         if content_height and content_height > 0:
+            # 停止展开动画并解除其 maximumHeight 约束，否则 setFixedHeight 被覆盖
+            if hasattr(self, '_expand_anim') and self._expand_anim:
+                self._expand_anim.stop()
+            self.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
             chrome = self._compute_chrome_height()
-            needed = content_height + chrome + 4  # 4px 安全缓冲
+            needed = content_height + chrome + 4
             if needed > self.height():
                 new_h = min(needed, 800)
                 self._saved_height = new_h
