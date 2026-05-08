@@ -80,6 +80,10 @@ class MainWindow(QMainWindow):
         self._navigator: Navigator = services.get("navigator")
         self._ai_cache = services.get("ai_cache")  # SQLite AI 结果缓存
 
+        # 翻译流程协调器（借鉴 Mad Professor AIManager 模式）
+        from src.app.translate_flow import TranslationFlow
+        self._translate_flow = TranslationFlow(self._ai_engine, self._ai_cache)
+
         # 当前文档状态
         self._current_doc_hash: str = ""
         self._current_blocks: list[DocumentBlock] = []
@@ -254,8 +258,9 @@ class MainWindow(QMainWindow):
 
         # AIEngine 流式信号（由 PdfViewer 内部的 SplitWidget 消费）
         self._ai_engine.translation_token.connect(self._on_translation_token)
-        self._ai_engine.translation_finished.connect(self._on_translation_finished)
-        self._ai_engine.translation_error.connect(self._on_translation_error)
+        # 翻译流程（经过 TranslationFlow 协调器：AICache → AIEngine → 缓存）
+        self._translate_flow.translation_ready.connect(self._on_translation_ready)
+        self._translate_flow.translation_error.connect(self._on_translation_error)
         self._ai_engine.answer_token.connect(self._on_answer_token)
         self._ai_engine.answer_finished.connect(self._on_answer_finished)
         self._ai_engine.answer_error.connect(self._on_answer_error)
@@ -466,7 +471,7 @@ class MainWindow(QMainWindow):
             self._on_block_translate(block_id)
 
     def _on_block_translate(self, block_id: str) -> None:
-        """右键 → 翻译段落（带 AICache 缓存检查）。"""
+        """右键 → 翻译段落（委托 TranslationFlow 协调器）。"""
         self.logger.info("翻译请求: %s", block_id)
         block = self._find_block(block_id)
         split = self._pdf_viewer.open_split_widget(block_id, SplitMode.TRANSLATION)
@@ -479,17 +484,10 @@ class MainWindow(QMainWindow):
         if split._current_answer:
             return
 
-        # 检查 AICache：命中则直接显示，跳过 LLM 调用
-        if self._current_doc_hash:
-            cached = self._ai_cache.get(block_id, self._current_doc_hash, "translation")
-            if cached:
-                self.logger.info("AICache HIT: %s → 直接显示缓存译文 (%d chars)",
-                                 block_id, len(cached))
-                split.display_full_answer(cached)
-                return
-
-        split.set_busy(True)
-        self._ai_engine.request_translation(block)
+        # 委托 TranslationFlow（内部处理 AICache 检查 + AIEngine 调用）
+        hit = self._translate_flow.request_translation(block, self._current_doc_hash)
+        if not hit:
+            split.set_busy(True)
 
     def _on_block_question(self, block_id: str) -> None:
         """右键 → 提问。"""
@@ -581,21 +579,16 @@ class MainWindow(QMainWindow):
         else:
             self.logger.debug("翻译token SplitWidget已关闭: %s", block_id)
 
-    def _on_translation_finished(self, full_text: str, block_id: str) -> None:
-        """翻译完成——渲染 Markdown/LaTeX 并存入 AICache。"""
+    def _on_translation_ready(self, full_text: str, block_id: str) -> None:
+        """翻译就绪（来自 TranslationFlow，缓存或 AI）——渲染 Markdown/LaTeX。"""
         split = self._pdf_viewer.find_split_widget(block_id)
         if split:
             text = full_text if full_text else split._current_answer
             has_dollar = '$$' in text or '$' in text
             has_formula = '【FORMULA' in text
-            self.logger.info("翻译完成 block=%s len=%d has$$=%s hasF=%s preview=%s",
+            self.logger.info("翻译就绪 block=%s len=%d has$$=%s hasF=%s preview=%s",
                              block_id, len(text), has_dollar, has_formula, text[:120])
             split.display_full_answer(full_text)
-
-            # 存入 AICache（下次点击同一段落直接命中，跳过 LLM）
-            if self._current_doc_hash and full_text:
-                self._ai_cache.put(block_id, self._current_doc_hash,
-                                   "translation", full_text, model="cloud")
 
     def _on_answer_finished(self, full_answer: str, split_id: str) -> None:
         """问答完成——渲染 Markdown/LaTeX。"""
