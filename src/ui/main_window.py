@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self._knowledge_engine: KnowledgeEngine = services.get("knowledge_engine")
         self._glossary_manager: GlossaryManager = services.get("glossary_manager")
         self._navigator: Navigator = services.get("navigator")
+        self._ai_cache = services.get("ai_cache")  # SQLite AI 结果缓存
 
         # 当前文档状态
         self._current_doc_hash: str = ""
@@ -465,7 +466,7 @@ class MainWindow(QMainWindow):
             self._on_block_translate(block_id)
 
     def _on_block_translate(self, block_id: str) -> None:
-        """右键 → 翻译段落。"""
+        """右键 → 翻译段落（带 AICache 缓存检查）。"""
         self.logger.info("翻译请求: %s", block_id)
         block = self._find_block(block_id)
         split = self._pdf_viewer.open_split_widget(block_id, SplitMode.TRANSLATION)
@@ -477,6 +478,15 @@ class MainWindow(QMainWindow):
             return
         if split._current_answer:
             return
+
+        # 检查 AICache：命中则直接显示，跳过 LLM 调用
+        if self._current_doc_hash:
+            cached = self._ai_cache.get(block_id, self._current_doc_hash, "translation")
+            if cached:
+                self.logger.info("AICache HIT: %s → 直接显示缓存译文 (%d chars)",
+                                 block_id, len(cached))
+                split.display_full_answer(cached)
+                return
 
         split.set_busy(True)
         self._ai_engine.request_translation(block)
@@ -572,7 +582,7 @@ class MainWindow(QMainWindow):
             self.logger.debug("翻译token SplitWidget已关闭: %s", block_id)
 
     def _on_translation_finished(self, full_text: str, block_id: str) -> None:
-        """翻译完成——渲染 Markdown/LaTeX。"""
+        """翻译完成——渲染 Markdown/LaTeX 并存入 AICache。"""
         split = self._pdf_viewer.find_split_widget(block_id)
         if split:
             text = full_text if full_text else split._current_answer
@@ -581,6 +591,11 @@ class MainWindow(QMainWindow):
             self.logger.info("翻译完成 block=%s len=%d has$$=%s hasF=%s preview=%s",
                              block_id, len(text), has_dollar, has_formula, text[:120])
             split.display_full_answer(full_text)
+
+            # 存入 AICache（下次点击同一段落直接命中，跳过 LLM）
+            if self._current_doc_hash and full_text:
+                self._ai_cache.put(block_id, self._current_doc_hash,
+                                   "translation", full_text, model="cloud")
 
     def _on_answer_finished(self, full_answer: str, split_id: str) -> None:
         """问答完成——渲染 Markdown/LaTeX。"""
