@@ -498,7 +498,7 @@ class PdfViewer(QScrollArea):
             return
 
         if len(segs) == 1 and segs[0].get("widget") is container:
-            _logger.debug("PdfViewer: _render_page p%d → 全页 + 瓦片渲染", page_num)
+            _logger.info("PdfViewer: _render_page p%d → 全页 + 瓦片渲染", page_num)
             # 全页 pixmap（立即显示）
             self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
             # 逐瓦片后台渲染（渐进过渡）

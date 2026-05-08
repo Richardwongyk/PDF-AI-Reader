@@ -192,8 +192,8 @@ class TileRenderer(QObject):
             scheduled += 1
 
         if scheduled > 0:
-            _logger.debug("TileRenderer: 预渲染 p%d → %d 个新瓦片 (共 %d 个)",
-                          page_num, scheduled, len(tiles))
+            _logger.info("TileRenderer: 预渲染 p%d → %d 个新瓦片 (共 %d 个)",
+                         page_num, scheduled, len(tiles))
 
     def get_tile(self, key: TileKey) -> QPixmap | None:
         """Synchronously get a cached tile.  Returns None if not cached."""
@@ -275,30 +275,30 @@ class TileRenderer(QObject):
         task = _TileRenderTask(self._doc, key, self._dpi, request_id)
         task.done_signal.connect(self._on_tile_done)
         self._pool.start(task)
-        _logger.debug("TileRenderer: SCHEDULE %s (req#%d, pending=%d)",
-                      key, request_id, len(self._pending))
+        _logger.info("TileRenderer: SCHEDULE %s (req#%d, pending=%d)",
+                     key, request_id, len(self._pending))
 
     def _on_tile_done(self, key: TileKey, request_id: int, qpixmap: object, elapsed: float) -> None:
         """Callback from background thread — check token, cache, emit."""
         current_id = self._pending.get(key)
         if current_id != request_id:
             # Request cancellation check (Syncfusion-style)
-            _logger.debug("TileRenderer: DISCARD %s (req#%d ≠ current#%s)",
-                          key, request_id, current_id)
+            _logger.info("TileRenderer: DISCARD %s (req#%d ≠ current#%s)",
+                         key, request_id, current_id)
             return
 
         del self._pending[key]
 
         pixmap = qpixmap if isinstance(qpixmap, QPixmap) else None
         if pixmap is None or pixmap.isNull():
-            _logger.debug("TileRenderer: FAILED %s (req#%d)", key, request_id)
+            _logger.warning("TileRenderer: FAILED %s (req#%d)", key, request_id)
             return
 
         self._rendered_count += 1
         self._cache.put(key, pixmap, render_ms=elapsed * 1000)
         self.tile_ready.emit(key, pixmap)
-        _logger.debug("TileRenderer: DONE %s (%.0fms, cache=%d tiles/%.1fMB)",
-                      key, elapsed * 1000, self._cache.tile_count, self._cache.size_mb)
+        _logger.info("TileRenderer: DONE %s (%.0fms, cache=%d tiles/%.1fMB)",
+                     key, elapsed * 1000, self._cache.tile_count, self._cache.size_mb)
 
     # ------------------------------------------------------------------
     # Priority helper
