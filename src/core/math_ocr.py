@@ -134,13 +134,11 @@ class MathOCR:
             self._num_threads, self._BATCH_SIZE,
         )
         from pix2text import Pix2Text
-        # 【修复】显式禁用 analyzer/layout/mfd/text，仅保留 formula
+        # 仅启用公式识别，跳过表格 OCR 模型
+        # enable_table=False 避免加载 TableOCR（~2s），layout 仍加载但轻量（~0.5s）
         self._p2t = Pix2Text(
-            analyzer_config={'enable': False},
-            layout_config={'enable': False},
-            mfd_config={'enable': False},
-            text_config={'enable': False},
-            formula_config={'enable': True},
+            enable_formula=True,
+            enable_table=False,
             device="cpu",
         )
         _logger.info("Pix2Text MFR 模型就绪")
