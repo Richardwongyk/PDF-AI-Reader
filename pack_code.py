@@ -32,7 +32,7 @@ def should_include(filepath: Path, root: Path, output_name: str) -> bool:
         return False
 
     # 排除敏感/不必要文件
-    if filepath.name in {"config.yaml", "极简设计报告.md"}:
+    if filepath.name in {"config.yaml", "极简设计报告.md", "pdf_viewer_old.py"}:
         return False
 
     # 获取相对于根目录的路径
@@ -42,6 +42,10 @@ def should_include(filepath: Path, root: Path, output_name: str) -> bool:
         return False
 
     parts = rel.parts
+
+    # 排除开源借鉴目录（第三方仓库克隆，体积大且非本项目代码）
+    if "开源借鉴" in parts:
+        return False
 
     # 排除特定目录
     exclude_dirs = {
