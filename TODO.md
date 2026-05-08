@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 78 次提交 + 11 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (P0 大PDF性能 — 虚拟布局 + Widget池化 + DisplayList)
+> 基于 git 日志 79 次提交 + 11 个新增文件 + 5 个开源项目深度调研
+> 最后更新：2026-05-08 (P0 交付 — 虚拟布局 + Widget池化 + DisplayList + 滚动条/书签正确)
 
 ---
 
@@ -102,6 +102,12 @@
 | `2768a2a` | 瓦片渲染器：修正坐标映射 + 接入 paintEvent 信号链路 |
 | `2a065fa` | 瓦片渲染日志升级到 INFO |
 | `90fb36f` | 修复 TileRenderer 访问已关闭文档崩溃 |
+
+**P0 大PDF性能 (1 commit, 2026-05-08)**：
+
+| Commit | 说明 |
+|--------|------|
+| `e6f7ba3` | **P0 #19: 虚拟布局 + Widget池化 + DisplayList**。_VirtualPageLayout 纯 Python 布局替代 QLayoutItem 遍历；load_document 零 Widget 预创建（404页=0 widgets）；QVBoxLayout+spacer 撑出总高度使滚动条正确；DisplayList 重放加速异步渲染；SplitWidget.height_changed 信号。 |
 
 **滚动性能优化 (4 commits)**：
 
@@ -219,7 +225,7 @@ UI 用 _current_answer            │
 | TileCache + TileRenderer | 瓦片基础设施 (借鉴 qpageview) |
 | DPR 清晰度 | 屏幕物理 DPI + 1:1 像素映射 |
 | 方向感知预渲染 | Sioyek 趋势感知算法 |
-| 滚动性能 | _update_visible_pages: 1763ms → 15-32ms |
+| 滚动性能 | _update_visible_pages: 1763ms → 7-33ms |
 | AICache 翻译集成 | 翻译请求 → 查缓存 → 命中直接显示 |
 | 公式恢复修复 | `_post_process` 调用修复 |
 | 智能路由回退 | 翻译路径恢复直接翻译 |
@@ -233,15 +239,25 @@ UI 用 _current_answer            │
 | 统一哈希 | file_hash.py → ChromaRepo + AICache |
 | EmbeddingService 单例 | 容器化依赖注入 |
 | QSS 清理 | 删除无效 QTextBrowser#result_area 规则 |
+| **P0: _VirtualPageLayout** | 纯 Python 布局替代 QLayoutItem 遍历 (借鉴 SumatraPDF) |
+| **P0: Widget 池化** | `load_document` 零预创建 Widget（404页 = 0 widgets） |
+| **P0: QVBoxLayout + spacer** | top/bottom spacer 撑出全文档总高，滚动条/书签正确 |
+| **P0: DisplayList 异步渲染** | `_PageRenderTask` 改用 DL 重放，与 PageCache 一致 |
+| **P0: SplitWidget 高度信号** | `height_changed` 信号 → layout 自动管理位移 |
 
 ### 待完成
 
 | # | 问题 | 优先级 |
 |---|------|--------|
-| 1 | **MFR 全家桶加载** — 首次 Pix2Text 加载 ~3s | 低 (已修复 API，加载时间不可免) |
+| 1 | **MFR 全家桶加载** — 首次 Pix2Text 加载 ~3s | 低 |
 | 2 | **AskQuestionFlow** — 知识库检索逻辑迁移出 MainWindow | 低 |
 | 3 | **pytest 测试框架** — tests/ 目录 | 低 |
 | 4 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
+| 5 | **P1: 缩放功能** — zoom_multiplier + 信号连接 | 次优先 |
+| 6 | **P1: 翻译框宽度对齐** — 动态宽度 + 缩放同步 | 次优先 |
+| 7 | **P2: 翻译框高度+CSS** — chrome 精确计算 + HTML margin | 低 |
+| 8 | **P2: 段落宽度对齐** — BBox → 显示宽度 + 水平偏移 | 低 |
+| 9 | **P2: 重复翻译防护** — `_pending` 去重检查 | 低 |
 
 ---
 
@@ -258,7 +274,7 @@ UI 用 _current_answer            │
 | V7 | build_services 计时 | < 1s | ✅ **0.33s** |
 | V8 | 2K/4K 高分屏渲染 | overlay 定位准确 | 未测 |
 | V9 | 主窗口可见计时 | < 12s | ✅ **~10s** |
-| V10 | 滚动 _update_visible_pages | < 50ms | ✅ **15-32ms** |
+| V10 | 滚动 _update_visible_pages | < 50ms | ✅ **7-33ms** |
 | V11 | 翻译缓存命中 | AICache HIT 直接显示 | ✅ |
 | V12 | 第二个 PDF 打开 | 无崩溃 | ✅ |
 
@@ -324,12 +340,14 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 |------|--------|--------|
 | `build_services()` | ~13s (eager) | **0.33s** (懒加载) |
 | 主窗口可见 | ~13s | ~10s (QWebEngine ~5s 不受控) |
-| PDF 打开 (15页) | 0.1s | 0.08s |
-| `_update_visible_pages` | ~80ms (估计) | **15-32ms** |
+| PDF 打开 (15页) | 0.1s (15 widgets) | **0.06s** (0 widgets) |
+| PDF 打开 (404页) | ~2s (404 widgets, O(n²)) | **0.07s** (0 widgets) |
+| `_update_visible_pages` | ~80ms (估计) | **7-33ms** |
 | 翻译响应 (首次) | ~3s (LLM) | ~3s (LLM) |
 | 翻译响应 (缓存) | ~3s | **~5ms** (AICache HIT) |
 | 方向预渲染命中率 | ~60% (估计) | ~85% (趋势感知) |
 | 渲染 DPI | 硬编码 150 | **屏幕物理 DPI** (1:1 映射) |
+| 活跃 Widget 数 | N (全部页) | **≤ 15** (池化) |
 
 ---
 
@@ -375,16 +393,21 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 
 ## 十一、总结
 
-**已交付 (27 commits，11 个新文件)**：
+**已交付 (28 commits，11 个新文件)**：
 - DI 容器 + 懒加载 (`build_services`: 0.33s，11 个注册服务)
 - 四级错误处理 + 全局异常钩子
 - 四层缓存: PageCache / AICache / TileCache / TileRenderer
 - 屏幕物理 DPI 渲染 (1:1 像素映射) + 混合瓦片绘制 (大页面 GPU 纹理保护)
 - 方向感知预渲染 (Sioyek 趋势算法)
 - 翻译缓存 (AICache → SQLite) + LiteLLM 后台预热
-- 滚动性能: _update_visible_pages 1763ms → 15-32ms
+- 滚动性能: _update_visible_pages 1763ms → 7-33ms
 - 应用层协调器: TranslationFlow / DocumentFlow / ExplainFlow
 - 统一哈希工具 (file_hash.py) + EmbeddingService 单例化
+- **P0: _VirtualPageLayout** — 纯 Python 页面位置计算，消除 QLayoutItem C++ 遍历
+- **P0: Widget 池化** — load_document 零预创建 (404页=0 widgets, 活跃≤15)
+- **P0: QVBoxLayout + spacer** — 滚动条范围 = 全部文档总高，书签跳转正确
+- **P0: DisplayList 异步渲染** — _PageRenderTask 与 PageCache 统一使用 DL 重放
+- **P0: SplitWidget.height_changed** — layout 自动管理裂缝高度变化
 - 全部模块详细日志
 
 **新增文件 (11 个)**：
