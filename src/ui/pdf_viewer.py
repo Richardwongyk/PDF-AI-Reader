@@ -843,6 +843,17 @@ class PdfViewer(QScrollArea):
 
     def _on_page_rendered_async(self, page_num: int, qpixmap: object) -> None:
         """全页 pixmap 渲染完成 → 切片到 TileCache → 触发 QPainter 重绘。"""
+        pixmap = qpixmap if isinstance(qpixmap, QPixmap) else None
+        if pixmap is None or pixmap.isNull():
+            return
+
+        # 裂缝页面缩放异步渲染 → 重建段 widget
+        pending_splits = getattr(self, '_pending_split_rerenders', set())
+        if page_num in pending_splits:
+            self._rebuild_split_segments(page_num, pixmap)
+            self._pending_split_rerenders.discard(page_num)
+            return
+
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
@@ -854,11 +865,6 @@ class PdfViewer(QScrollArea):
             return
 
         blocks = segs[0]["blocks"]
-        pixmap = qpixmap if isinstance(qpixmap, QPixmap) else None
-        if pixmap is None or pixmap.isNull():
-            _logger.warning("PdfViewer: p%d pixmap 为空，跳过渲染", page_num)
-            return
-
         pixmap.setDevicePixelRatio(self._screen_dpr)
         t_render = time.perf_counter()
         container.render(pixmap, blocks, self._scale, self._connect_overlay,
@@ -870,6 +876,25 @@ class PdfViewer(QScrollArea):
         for b in blocks:
             if b.id in self._trans_indicators:
                 self._set_translation_marker(b.id, True)
+
+    def _rebuild_split_segments(self, page_num: int, pixmap: QPixmap) -> None:
+        """缩放后异步重建裂缝页面的段 widget。"""
+        segs = self._page_segments.get(page_num, [])
+        pixmap.setDevicePixelRatio(self._screen_dpr)
+        for i, seg in enumerate(segs):
+            if "split_id" in seg:
+                continue
+            old_w = seg.get("widget")
+            if old_w is None:
+                continue
+            idx = self._layout.indexOf(old_w)
+            old_w.hide(); self._layout.removeWidget(old_w); old_w.deleteLater()
+            new_w = self._build_segment_widget(
+                pixmap, seg["y0"], seg["y1"], seg["blocks"])
+            self._layout.insertWidget(idx, new_w)
+            seg["widget"] = new_w
+        _logger.info("PdfViewer: p%d 裂缝段异步重建完成 (%dx%d)",
+                     page_num, pixmap.width(), pixmap.height())
 
     # ── 翻译指示器 ──
 
@@ -965,12 +990,13 @@ class PdfViewer(QScrollArea):
         below_blocks = [b for b in all_blocks if b.bbox[1] * self._scale >= cut_y - 5]
 
         block_px_h = int((block.bbox[3] - block.bbox[1]) * self._scale)
+        page_display_w = self._page_metas[page_num]["width"] if page_num in self._page_metas else pixmap.width()
         split = SplitWidget(
             block, mode=mode, position="below",
             block_pixel_height=max(block_px_h, 60),
-            page_width=pixmap.width(),
+            page_width=page_display_w,
         )
-        split.setFixedWidth(pixmap.width())
+        split.setFixedWidth(page_display_w)
         split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
         split.translation_requested.connect(self.block_translate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))
@@ -1120,20 +1146,19 @@ class PdfViewer(QScrollArea):
                 container._full_pixmap = scaled
                 container.update()
 
-            # 标记需要重新渲染，请求精确 DPI 渲染
+            # 标记需要重新渲染，延迟请求精确 DPI 渲染（避免同步 container.render 阻塞主线程）
             container._rendered = False
-            self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
             rerender_count += 1
 
-        # 处理裂缝页面：重建段 widget（旧尺寸/裁剪已失效）
+        # 延迟请求精确渲染：避免 _set_zoom 同步等待 container.render()
+        # PageCache 命中时 render() 的 _slice_pixmap_to_tiles 对大 pixmap 很重
+        QTimer.singleShot(10, lambda: self._request_precise_renders())
+
+        # 处理裂缝页面：缩放段内 QLabel 即时显示 + 异步渲染完成后重建
         for pn in list(self._split_pages):
             segs = self._page_segments.get(pn, [])
-            pixmap = self._doc_engine.get_page_pixmap(pn, dpi=self._dpi)
-            if pixmap is None:
-                continue
             for i, seg in enumerate(segs):
                 if "split_id" in seg:
-                    # 更新裂缝宽度
                     split = self._splits.get(seg["split_id"])
                     if split:
                         split.setFixedWidth(self._page_metas[pn]["width"])
@@ -1141,17 +1166,28 @@ class PdfViewer(QScrollArea):
                 old_w = seg.get("widget")
                 if old_w is None:
                     continue
-                # 清除旧 overlay
+                # 缩放段内 QLabel pixmap 即时显示（借鉴 Sioyek）
+                for label in old_w.findChildren(QLabel):
+                    if label.pixmap() and not label.pixmap().isNull():
+                        old_pm = label.pixmap()
+                        new_w_px = self._page_metas[pn]["width"]
+                        seg_h = seg["y1"] - seg["y0"]
+                        scaled = old_pm.scaled(new_w_px, seg_h,
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+                        scaled.setDevicePixelRatio(self._screen_dpr)
+                        label.setPixmap(scaled)
+                        label.resize(new_w_px, seg_h)
+                old_w.setFixedSize(self._page_metas[pn]["width"], seg["y1"] - seg["y0"])
+                # 清除旧 overlay（位置已失效）
                 for child in old_w.findChildren(BlockOverlay):
                     self._overlays.pop(child.block_id, None)
-                # 重建段 widget（新 DPI）
-                idx = self._layout.indexOf(old_w)
-                old_w.hide(); self._layout.removeWidget(old_w); old_w.deleteLater()
-                new_w = self._build_segment_widget(
-                    pixmap, seg["y0"], seg["y1"], seg["blocks"])
-                self._layout.insertWidget(idx, new_w)
-                seg["widget"] = new_w
-                _logger.debug("PdfViewer: 缩放重建段 p%d [%d:%d]", pn, seg["y0"], seg["y1"])
+                    child.deleteLater()
+            # 异步渲染 → 完成后在 _on_page_rendered_async 中重建段
+            if not hasattr(self, '_pending_split_rerenders'):
+                self._pending_split_rerenders: set[int] = set()
+            self._pending_split_rerenders.add(pn)
+            self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
 
         # 处理池中隐藏的 widget（仅调整尺寸，不渲染）
         for pn, container in self._widget_pool.items():
@@ -1160,9 +1196,6 @@ class PdfViewer(QScrollArea):
             meta = self._page_metas.get(pn)
             if meta:
                 container.setFixedSize(meta["width"], meta["height"])
-            bp = self._block_to_page.get(split.block_id)
-            if bp is not None:
-                split.setFixedWidth(self._page_metas[bp]["width"])
 
         # 调整 spacer 高度
         self._adjust_spacers(self._rendered_pages)
@@ -1174,6 +1207,15 @@ class PdfViewer(QScrollArea):
         elapsed = (time.perf_counter() - t0) * 1000
         _logger.info("PdfViewer: 缩放完成 (%.1fms, 即时显示 %d 页, 后台渲染 %d 页)",
                      elapsed, rerender_count, rerender_count)
+
+    def _request_precise_renders(self) -> None:
+        """为缩放后标记的页面请求精确 DPI 渲染（延迟执行，不阻塞主线程）。"""
+        for pn in list(self._rendered_pages):
+            container = self._widget_pool.get(pn)
+            if container is None or pn in self._split_pages:
+                continue
+            if not container.rendered:
+                self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
 
     # ── 主题 ──
 

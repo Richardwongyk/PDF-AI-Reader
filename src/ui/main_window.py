@@ -141,13 +141,22 @@ class MainWindow(QMainWindow):
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
         zoom_in_action = QAction("放大(&I)", self)
-        zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        zoom_in_action.setShortcuts([
+            QKeySequence.StandardKey.ZoomIn,
+            QKeySequence("Ctrl+="),
+            QKeySequence("Ctrl++"),
+        ])
         zoom_in_action.triggered.connect(lambda: self._pdf_viewer.zoom_in())
         view_menu.addAction(zoom_in_action)
+        self.addAction(zoom_in_action)  # 注册到主窗口使快捷键全局生效
         zoom_out_action = QAction("缩小(&O)", self)
-        zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        zoom_out_action.setShortcuts([
+            QKeySequence.StandardKey.ZoomOut,
+            QKeySequence("Ctrl+-"),
+        ])
         zoom_out_action.triggered.connect(lambda: self._pdf_viewer.zoom_out())
         view_menu.addAction(zoom_out_action)
+        self.addAction(zoom_out_action)  # 注册到主窗口使快捷键全局生效
 
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
