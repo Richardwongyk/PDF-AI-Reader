@@ -20,7 +20,7 @@ from shiboken6 import isValid as _isValid
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QLabel, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from src.core.models import DocumentBlock, ParseResult, SplitMode, UIConfig
@@ -990,13 +990,28 @@ class PdfViewer(QScrollArea):
         below_blocks = [b for b in all_blocks if b.bbox[1] * self._scale >= cut_y - 5]
 
         block_px_h = int((block.bbox[3] - block.bbox[1]) * self._scale)
+        # 段落显示宽度 = BBox 宽度 × 缩放（而非整页宽），左右与紫色框对齐
+        block_display_w = int((block.bbox[2] - block.bbox[0]) * self._scale)
+        block_display_x = int(block.bbox[0] * self._scale)
         page_display_w = self._page_metas[page_num]["width"] if page_num in self._page_metas else pixmap.width()
+        # 最小宽度保证可读性
+        split_w = max(block_display_w, 300)
         split = SplitWidget(
             block, mode=mode, position="below",
             block_pixel_height=max(block_px_h, 60),
-            page_width=page_display_w,
+            page_width=split_w,
         )
-        split.setFixedWidth(page_display_w)
+        split.setFixedWidth(split_w)
+
+        # 水平偏移包装：使裂缝与段落 BBox 左右对齐
+        split_wrapper = QWidget()
+        split_wrapper.setObjectName("split_wrapper")
+        wrap_layout = QHBoxLayout(split_wrapper)
+        wrap_layout.setContentsMargins(block_display_x, 0,
+                                       max(0, page_display_w - block_display_x - split_w), 0)
+        wrap_layout.setSpacing(0)
+        split.setParent(split_wrapper)
+        wrap_layout.addWidget(split)
         split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
         split.translation_requested.connect(self.block_translate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))
@@ -1022,7 +1037,7 @@ class PdfViewer(QScrollArea):
         top_w = self._build_segment_widget(pixmap, seg["y0"], cut_y, above_blocks)
         self._layout.insertWidget(old_idx, top_w)
 
-        self._layout.insertWidget(old_idx + 1, split)
+        self._layout.insertWidget(old_idx + 1, split_wrapper)
 
         bot_w = self._build_segment_widget(pixmap, cut_y, seg["y1"], below_blocks)
         self._layout.insertWidget(old_idx + 2, bot_w)
@@ -1051,7 +1066,7 @@ class PdfViewer(QScrollArea):
         self._adjust_spacers(self._rendered_pages | {page_num})
 
         QApplication.processEvents()
-        self.ensureVisible(0, split.y(), 50, 80)
+        self.ensureVisible(0, split_wrapper.y(), 50, 80)
         return split
 
     def find_split_widget(self, block_id: str) -> SplitWidget | None:
@@ -1375,7 +1390,12 @@ class PdfViewer(QScrollArea):
                         for child in pw.findChildren(BlockOverlay) + nw.findChildren(BlockOverlay):
                             self._overlays.pop(child.block_id, None)
                         idx_p = self._layout.indexOf(pw)
+                        # 同时移除 split_wrapper（位于 pw 和 nw 之间）
+                        sw_item = self._layout.itemAt(idx_p + 1)
+                        sw = sw_item.widget() if sw_item else None
                         pw.hide(); self._layout.removeWidget(pw); pw.deleteLater()
+                        if sw and sw.objectName() == "split_wrapper":
+                            sw.hide(); self._layout.removeWidget(sw); sw.deleteLater()
                         nw.hide(); self._layout.removeWidget(nw); nw.deleteLater()
                         self._layout.insertWidget(idx_p, merged_w)
                         new_segs = segs[:i - 1] + [{
