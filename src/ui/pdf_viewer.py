@@ -136,34 +136,19 @@ class _LazyPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def paintEvent(self, event: object) -> None:
-        """瓦片化绘制 — 借鉴 qpageview AbstractRenderer.paint()。
+        """QPainter 绘制全页 pixmap（1 次调用，画质无损）。
 
-        info()  → 计算瓦片网格 + 查 TileCache
-        paint() → 缓存命中直接画瓦片，缺失从全页 pixmap 裁剪回退（closest 等价）
-        schedule() → 全页 pixmap 切片存入 TileCache（瞬时操作，为后续刷新预热）
+        TileCache 由 _slice_pixmap_to_tiles() 在 render() 中后台填充，
+        为后续多缩放级别缓存、大页局部刷新等优化做准备。
+        _paint_tiles() 保留作为未来瓦片切换的入口。
         """
         painter = QPainter(self)
 
-        if not self._rendered:
-            self._draw_placeholder(painter)
-            painter.end()
-            return
-
-        # 尝试瓦片路径
-        if self._tile_cache is not None and self._zoom > 0:
-            tile_px = int(TILE_SIZE * self._zoom)
-            if tile_px > 0 and self._page_w > tile_px:
-                self._paint_tiles(painter, tile_px)
-                painter.end()
-                return
-            _logger.info("_LazyPageWidget.paintEvent: p%d 回退全页 (tile_px=%d, page_w=%d)",
-                         self.page_num, tile_px, self._page_w)
-
-        # 回退：全页 pixmap 直接绘制
-        if self._full_pixmap is not None and not self._full_pixmap.isNull():
+        if self._rendered and self._full_pixmap is not None and not self._full_pixmap.isNull():
             painter.drawPixmap(0, 0, self._full_pixmap)
         else:
             self._draw_placeholder(painter)
+
         painter.end()
 
     def _paint_tiles(self, painter: QPainter, tile_px: int) -> None:
