@@ -1054,20 +1054,18 @@ class PdfViewer(QScrollArea):
         self._set_zoom(self._zoom_multiplier / self.ZOOM_STEP)
 
     def _set_zoom(self, new_zoom: float) -> None:
-        """设置缩放倍数，重建布局并重渲染。
+        """设置缩放倍数 — 借鉴 Sioyek try_closest_rendered_page 即时反馈策略。
 
-        缩放流程：
-        1. 保存滚动位置比例
-        2. 更新 _scale / _dpi
-        3. 重建 _page_metas 尺寸 + _VirtualPageLayout
-        4. 清空 Widget 池（旧尺寸失效）
-        5. 更新裂缝宽度
-        6. 触发重渲染 + 恢复滚动位置
+        不销毁 widget，而是：
+        1. 缩放现有 pixmap 立即显示（≈0.5ms，略微模糊）
+        2. 后台异步渲染精确缩放（≈100ms）
+        3. 渲染完成后自动替换为清晰 pixmap
         """
         new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, new_zoom))
         if abs(new_zoom - self._zoom_multiplier) < 0.001:
             return
 
+        t0 = time.perf_counter()
         _logger.info("PdfViewer: 缩放 %.2f → %.2f", self._zoom_multiplier, new_zoom)
 
         # 保存滚动位置比例
@@ -1079,7 +1077,7 @@ class PdfViewer(QScrollArea):
         self._scale = self._base_scale * new_zoom
         self._dpi = int(self._base_dpi * new_zoom)
 
-        # 重建页面元数据尺寸
+        # 重建页面元数据尺寸 + 虚拟布局
         doc = self._doc_engine.document
         page_heights: dict[int, float] = {}
         for pn, meta in self._page_metas.items():
@@ -1091,38 +1089,66 @@ class PdfViewer(QScrollArea):
             meta["width"] = w
             meta["height"] = h
             page_heights[pn] = float(h)
-            # 同步更新 _page_segments 中的 y1（页面总高度）
             for seg in self._page_segments.get(pn, []):
                 if "split_id" not in seg and seg.get("y0") == 0:
                     seg["y1"] = h
-
-        # 重建虚拟布局
         self._vlayout.rebuild(page_heights)
 
-        # 清空 Widget 池（旧尺寸失效，全部重建）
-        for w in list(self._widget_pool.values()):
-            if w.isVisible():
-                w.hide()
-                self._layout.removeWidget(w)
-            w.deleteLater()
-        self._widget_pool.clear()
-        self._page_containers.clear()
-        self._rendered_pages.clear()
-        self._page_last_seen.clear() if hasattr(self, '_page_last_seen') else None
+        # 处理已渲染的页面：缩放 pixmap 即时显示 + 清除旧 overlay + 请求精确渲染
+        rerender_count = 0
+        for pn in list(self._rendered_pages):
+            container = self._widget_pool.get(pn)
+            if container is None or pn in self._split_pages:
+                continue
+            meta = self._page_metas[pn]
+            container.setFixedSize(meta["width"], meta["height"])
 
-        # 更新已有裂缝宽度
+            # 清除旧 overlay（位置已失效）
+            for block_id in list(container._overlays.keys()):
+                ov = container._overlays.pop(block_id)
+                self._overlays.pop(block_id, None)
+                ov.deleteLater()
+
+            # 缩放现有 pixmap 即时显示（借鉴 Sioyek try_closest_rendered_page）
+            if container._full_pixmap and not container._full_pixmap.isNull():
+                scaled = container._full_pixmap.scaled(
+                    meta["width"], meta["height"],
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                scaled.setDevicePixelRatio(self._screen_dpr)
+                container._full_pixmap = scaled
+                container.update()
+
+            # 标记需要重新渲染，请求精确 DPI 渲染
+            container._rendered = False
+            self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
+            rerender_count += 1
+
+        # 处理池中隐藏的 widget（仅调整尺寸，不渲染）
+        for pn, container in self._widget_pool.items():
+            if pn in self._rendered_pages:
+                continue
+            meta = self._page_metas.get(pn)
+            if meta:
+                container.setFixedSize(meta["width"], meta["height"])
+
+        # 更新裂缝宽度
         for split in self._splits.values():
             bp = self._block_to_page.get(split.block_id)
             if bp is not None:
                 split.setFixedWidth(self._page_metas[bp]["width"])
 
-        # 调整 spacer 并触发重渲染
-        self._adjust_spacers(set())
-        self._update_visible_pages()
+        # 调整 spacer 高度
+        self._adjust_spacers(self._rendered_pages)
 
-        # 恢复滚动位置（延迟等 layout 更新完成）
-        QTimer.singleShot(100, lambda: sb.setValue(
+        # 恢复滚动位置
+        QTimer.singleShot(50, lambda: sb.setValue(
             int(ratio * max(sb.maximum(), 1))))
+
+        elapsed = (time.perf_counter() - t0) * 1000
+        _logger.info("PdfViewer: 缩放完成 (%.1fms, 即时显示 %d 页, 后台渲染 %d 页)",
+                     elapsed, rerender_count, rerender_count)
 
     # ── 主题 ──
 
