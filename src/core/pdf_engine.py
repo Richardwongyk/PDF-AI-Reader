@@ -534,7 +534,8 @@ class DocumentEngine(BaseService):
     formula_blocks_updated = Signal(list)  # list[dict] — MFD 精扫修正的块
     page_rendered = Signal(int, object)  # (page_num, QPixmap) — 异步渲染完成
 
-    def __init__(self, config: AppConfig, parent: QObject | None = None) -> None:
+    def __init__(self, config: AppConfig, parent: QObject | None = None,
+                 page_cache: object | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self._doc: fitz.Document | None = None
@@ -545,8 +546,9 @@ class DocumentEngine(BaseService):
         self._render_pool.setMaxThreadCount(2)
         self._pending_renders: set[int] = set()
         self._thread: QThread | None = None
-        # 渲染缓存: {page_num: {dpi: QPixmap}}
-        self._pixmap_cache: dict[int, dict[int, QPixmap]] = {}
+        # 使用 PageCache 替代内嵌字典（借鉴 PDFCrop，线程安全 + LRU + 高分辨率回退）
+        self._page_cache = page_cache
+        self._filepath: str = ""  # PageCache 缓存键需要文件路径
 
     @property
     def is_open(self) -> bool:
@@ -584,6 +586,9 @@ class DocumentEngine(BaseService):
         Args:
             filepath: PDF 文件的绝对路径。
         """
+        self._filepath = filepath
+        if self._page_cache:
+            self._page_cache.clear_document(filepath)
         self.logger.info("打开文档: %s", filepath)
 
         # 清理上一个线程（协作式取消，不调用 terminate）
@@ -624,7 +629,8 @@ class DocumentEngine(BaseService):
             self.logger.warning("PyMuPDF 重新打开文档失败: %s", e)
             self._doc = None
 
-        self._pixmap_cache.clear()
+        if self._page_cache:
+            self._page_cache.clear_document(result.filepath)
         self.parse_finished.emit(result)
 
     def close_document(self) -> None:
@@ -658,23 +664,28 @@ class DocumentEngine(BaseService):
         self._render_pool.waitForDone(2000)
 
         # 4. 清空缓存
-        self._pixmap_cache.clear()
+        if self._page_cache:
+            self._page_cache.clear_document(self._filepath)
         self.logger.info("close_document: END")
 
     def get_page_pixmap(
         self, page_num: int, dpi: int = 150
     ) -> QPixmap | None:
-        """获取指定页面的渲染图像（主线程安全）。"""
+        """获取指定页面的渲染图像（主线程安全，PageCache 缓存）。"""
         if not self._doc or page_num < 0 or page_num >= self._doc.page_count:
             return None
 
-        # 检查缓存
-        if page_num in self._pixmap_cache and dpi in self._pixmap_cache[page_num]:
-            return self._pixmap_cache[page_num][dpi]
+        scale = dpi / 72.0
 
-        qpixmap: QPixmap | None = None
+        # PageCache 查询 + 渲染（借鉴 PDFCrop）
+        if self._page_cache and self._filepath:
+            cached = self._page_cache.get(self._filepath, page_num, scale)
+            if cached is not None:
+                return cached
+            page = self._doc[page_num]
+            return self._page_cache.put(self._filepath, page_num, page, scale)
 
-        # 渲染到 dpi 物理精度；DPR 由 PdfViewer 在接收端设置
+        # 回退（无 PageCache 时直接渲染）
         try:
             page = self._doc[page_num]
             zoom = dpi / 72.0
@@ -682,20 +693,9 @@ class DocumentEngine(BaseService):
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             qpixmap = QPixmap()
             qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
+            return qpixmap
         except Exception:
             return None
-
-        # 存入缓存
-        if page_num not in self._pixmap_cache:
-            self._pixmap_cache[page_num] = {}
-        self._pixmap_cache[page_num][dpi] = qpixmap
-
-        # LRU 清理：超过 20 个页面缓存时删除最旧的
-        if len(self._pixmap_cache) > 20:
-            oldest = min(self._pixmap_cache.keys())
-            del self._pixmap_cache[oldest]
-
-        return qpixmap
 
     def preload_pages(self, page_nums: list[int], dpi: int = 150) -> None:
         """预加载指定页面到渲染缓存（异步，不阻塞主线程）。
@@ -718,9 +718,12 @@ class DocumentEngine(BaseService):
             dpi: 渲染分辨率。
         """
         # 已在缓存 → 立即通知
-        if page_num in self._pixmap_cache and dpi in self._pixmap_cache[page_num]:
-            self.page_rendered.emit(page_num, self._pixmap_cache[page_num][dpi])
-            return
+        scale = dpi / 72.0
+        if self._page_cache and self._filepath:
+            cached = self._page_cache.get(self._filepath, page_num, scale)
+            if cached is not None:
+                self.page_rendered.emit(page_num, cached)
+                return
         # 正在渲染 → 跳过
         if page_num in self._pending_renders:
             return
@@ -738,15 +741,10 @@ class DocumentEngine(BaseService):
         self._pending_renders.discard(page_num)
         if qpixmap.isNull():
             return
-        # 存入缓存
-        if page_num not in self._pixmap_cache:
-            self._pixmap_cache[page_num] = {}
-        self._pixmap_cache[page_num][dpi] = qpixmap
-        # LRU 清理
-        if len(self._pixmap_cache) > 20:
-            oldest = min(self._pixmap_cache.keys())
-            del self._pixmap_cache[oldest]
-        # 通知 UI
+        # 存入 PageCache
+        scale = dpi / 72.0
+        if self._page_cache and self._filepath:
+            self._page_cache.put_pixmap(self._filepath, page_num, scale, qpixmap)
         self.page_rendered.emit(page_num, qpixmap)
 
 

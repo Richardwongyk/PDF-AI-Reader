@@ -156,7 +156,8 @@ def build_services() -> ServiceContainer:
 
     def _build_document_engine():
         from src.core.pdf_engine import DocumentEngine
-        return DocumentEngine(config)
+        page_cache = container.get("page_cache")
+        return DocumentEngine(config, page_cache=page_cache)
 
     container.register_factory("document_engine", _build_document_engine)
 

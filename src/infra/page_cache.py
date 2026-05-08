@@ -110,6 +110,21 @@ class PageCache:
                       key, render_ms, estimated_mb, evicted, self.current_size_mb, len(self.cache))
         return pixmap
 
+    def put_pixmap(self, doc_path: str, page_num: int, scale_factor: float, pixmap: QPixmap) -> None:
+        """直接存入已渲染的 QPixmap（用于异步渲染回调路径）。"""
+        key = self.get_cache_key(doc_path, page_num, scale_factor)
+        estimated_mb = (pixmap.width() * pixmap.height() * 4) / (1024 * 1024)
+        with self._lock:
+            evicted = 0
+            while self.current_size_mb + estimated_mb > self.max_size_mb and self.cache:
+                self._evict_oldest()
+                evicted += 1
+            self._insert(key, pixmap)
+            self.current_size_mb += estimated_mb
+            self.last_accessed[key] = time.time()
+        if evicted:
+            _logger.debug("PageCache: put_pixmap %s evicted=%d", key, evicted)
+
     def clear_document(self, doc_path: str) -> None:
         """Remove all cached pages for a specific document."""
         prefix = f"{doc_path}_"

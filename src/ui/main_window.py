@@ -91,6 +91,10 @@ class MainWindow(QMainWindow):
             self._ai_engine, self._glossary_manager,
         )
 
+        # 概念解释流程协调器（借鉴 Mad Professor AIManager 模式）
+        from src.app.explain_flow import ExplainFlow
+        self._explain_flow = ExplainFlow(self._ai_engine, self._doc_engine, self._ai_cache)
+
         # 当前文档状态
         self._current_doc_hash: str = ""
         self._current_blocks: list[DocumentBlock] = []
@@ -271,6 +275,11 @@ class MainWindow(QMainWindow):
         # 翻译流程（经过 TranslationFlow 协调器：AICache → AIEngine → 缓存）
         self._translate_flow.translation_ready.connect(self._on_translation_ready)
         self._translate_flow.translation_error.connect(self._on_translation_error)
+
+        # 解释流程（经过 ExplainFlow 协调器：OCR → 问题构建）
+        self._explain_flow.question_ready.connect(
+            lambda q, bid: self._on_split_ask(q, bid)
+        )
         self._ai_engine.answer_token.connect(self._on_answer_token)
         self._ai_engine.answer_finished.connect(self._on_answer_finished)
         self._ai_engine.answer_error.connect(self._on_answer_error)
@@ -476,46 +485,13 @@ class MainWindow(QMainWindow):
             )
 
     def _on_block_explain(self, block_id: str) -> None:
-        """右键 → 解释概念。"""
+        """右键 → 解释概念（委托 ExplainFlow 协调器）。"""
         block = self._find_block(block_id)
         split = self._pdf_viewer.open_split_widget(block_id, SplitMode.EXPLANATION)
-
         if not split or not block:
             return
-
         split.set_busy(True)
-
-        # 按需插队识别：公式未识别 → VIP 线程单独识别，识别完自动解释
-        if block.block_type == BlockType.FORMULA and not block.metadata.get("mfr_recognized"):
-            split.display_answer_stream("⏳ 正在启动视觉 AI 提取高精度公式，请稍候 1~2 秒...\n\n")
-
-            thread = _OnDemandOcrThread(self._doc_engine.document.name, block)
-            thread.finished_signal.connect(
-                lambda latex, err: self._on_demand_ocr_finished(latex, err, block, split, TaskType.QA)
-            )
-            thread.finished.connect(lambda t=thread: self._ai_engine._active_threads.remove(t) if t in self._ai_engine._active_threads else None)
-            self._ai_engine._active_threads.append(thread)
-            thread.start()
-            return
-
-        question = f"请解释这个概念的含义：{block.content[:100]}"
-        self._on_split_ask(question, block_id)
-
-    def _on_demand_ocr_finished(self, latex: str, err: str, block: DocumentBlock, split: SplitWidget, task_type: TaskType) -> None:
-        """VIP 专属线程识别完成后的回调，无缝衔接大模型任务。"""
-        if latex:
-            block.content = f"$$\n{latex}\n$$"
-            block.metadata["latex"] = latex
-            block.metadata["mfr_recognized"] = True
-
-            split.clear()
-            if task_type == TaskType.TRANSLATION:
-                self._ai_engine.request_translation(block)
-            else:
-                question = f"请详细解释这个公式的物理/数学含义，并说明各个符号代表什么：\n$$\n{latex}\n$$"
-                self._on_split_ask(question, block.id)
-        else:
-            split.show_error(f"公式提取失败: {err}")
+        self._explain_flow.request_explanation(block, split)
 
     def _on_split_ask(self, question: str, block_id: str) -> None:
         """裂缝中提交问题 → 调用 AI 问答。"""
@@ -813,44 +789,3 @@ class _PyMuPDF4LLMThread(QThread):
             pass
 
 
-class _OnDemandOcrThread(QThread):
-    """按需插队 OCR 线程：专门为用户当前点击的公式提供 VIP 极速识别。"""
-    finished_signal = Signal(str, str)  # (latex_result, error_message)
-
-    def __init__(self, filepath: str, block: DocumentBlock):
-        super().__init__()
-        self.filepath = filepath
-        self.block = block
-
-    def run(self) -> None:
-        try:
-            import fitz
-            from src.core.math_ocr import MathOCR
-            ocr = MathOCR()  # 单例模式，瞬间返回
-            ocr._ensure_model()
-
-            doc = fitz.open(self.filepath)
-            page = doc[self.block.page_num]
-
-            # 1. 获取原始边界框
-            rect = fitz.Rect(*self.block.bbox)
-
-            # 2. 【核心修复：防截断 Padding】向外扩展 8 个像素
-            rect.x0 = max(0, rect.x0 - 8)
-            rect.y0 = max(0, rect.y0 - 8)
-            rect.x1 = min(page.rect.width, rect.x1 + 8)
-            rect.y1 = min(page.rect.height, rect.y1 + 8)
-
-            # 3. 【核心修复：动态缩放】
-            zoom_w = 768.0 / max(rect.width, 1)
-            zoom_h = 96.0 / max(rect.height, 1)
-            zoom = max(1.5, min(4.0, min(zoom_w, zoom_h)))
-
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=rect)
-            img_bytes = pix.tobytes("png")
-            doc.close()
-
-            latex = ocr.recognize(img_bytes)
-            self.finished_signal.emit(latex, "")
-        except Exception as e:
-            self.finished_signal.emit("", str(e))
