@@ -60,7 +60,7 @@ class _TileRenderTask(QRunnable):
         t0 = time.perf_counter()
         _log = logging.getLogger("TileRenderer.task")
         try:
-            page = self._doc[self._key.page_num]
+            page = self._doc[self._key.page_num]  # may raise if doc closed
             # zoom = 物理渲染精度 (physical_dpi / 72)
             zoom = self._dpi / 72.0
             # scale = 逻辑缩放因子 (logical_dpi / 72), 从 TileKey.zoom_level 传入
@@ -132,7 +132,11 @@ class TileRenderer(QObject):
     def set_document(self, doc: fitz.Document | None) -> None:
         """Switch to a new document.  Clears the tile cache."""
         if self._doc is not doc:
-            old_pages = self._doc.page_count if self._doc else 0
+            old_pages = 0
+            try:
+                old_pages = self._doc.page_count if self._doc else 0
+            except (ValueError, AttributeError):
+                pass  # old document already closed
             new_pages = doc.page_count if doc else 0
             _logger.info("TileRenderer: set_document (pages: %d → %d)", old_pages, new_pages)
             self._cache.clear()
