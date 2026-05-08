@@ -1094,9 +1094,20 @@ class PdfViewer(QScrollArea):
         t0 = time.perf_counter()
         _logger.info("PdfViewer: 缩放 %.2f → %.2f", self._zoom_multiplier, new_zoom)
 
-        # 保存滚动位置比例
+        # 保存视口中心的内容位置（借鉴 SumatraPDF fixPt）
         sb = self.verticalScrollBar()
-        ratio = sb.value() / max(sb.maximum(), 1)
+        viewport_h = self.viewport().height()
+        center_y = sb.value() + viewport_h // 2
+        center_page: int | None = None
+        center_offset: float = 0.0
+        if self._vlayout:
+            for pn in sorted(self._page_metas.keys()):
+                py = self._vlayout.page_y(pn)
+                ph = self._vlayout.page_height(pn)
+                if py <= center_y < py + ph:
+                    center_page = pn
+                    center_offset = center_y - py
+                    break
 
         # 更新缩放因子
         self._zoom_multiplier = new_zoom
@@ -1200,9 +1211,11 @@ class PdfViewer(QScrollArea):
         # 调整 spacer 高度
         self._adjust_spacers(self._rendered_pages)
 
-        # 恢复滚动位置
-        QTimer.singleShot(50, lambda: sb.setValue(
-            int(ratio * max(sb.maximum(), 1))))
+        # 恢复视口位置：保持缩放前视口中心的内容在同一位置（借鉴 SumatraPDF fixPt）
+        if center_page is not None:
+            new_center_y = int(self._vlayout.page_y(center_page) + center_offset)
+            QTimer.singleShot(50, lambda cy=new_center_y: sb.setValue(
+                max(0, cy - viewport_h // 2)))
 
         elapsed = (time.perf_counter() - t0) * 1000
         _logger.info("PdfViewer: 缩放完成 (%.1fms, 即时显示 %d 页, 后台渲染 %d 页)",

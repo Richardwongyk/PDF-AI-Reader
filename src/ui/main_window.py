@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -141,22 +141,14 @@ class MainWindow(QMainWindow):
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
         zoom_in_action = QAction("放大(&I)", self)
-        zoom_in_action.setShortcuts([
-            QKeySequence.StandardKey.ZoomIn,
-            QKeySequence("Ctrl+="),
-            QKeySequence("Ctrl++"),
-        ])
         zoom_in_action.triggered.connect(lambda: self._pdf_viewer.zoom_in())
         view_menu.addAction(zoom_in_action)
-        self.addAction(zoom_in_action)  # 注册到主窗口使快捷键全局生效
         zoom_out_action = QAction("缩小(&O)", self)
-        zoom_out_action.setShortcuts([
-            QKeySequence.StandardKey.ZoomOut,
-            QKeySequence("Ctrl+-"),
-        ])
         zoom_out_action.triggered.connect(lambda: self._pdf_viewer.zoom_out())
         view_menu.addAction(zoom_out_action)
-        self.addAction(zoom_out_action)  # 注册到主窗口使快捷键全局生效
+        # QShortcut 直接注册到窗口，绕过菜单系统的快捷键限制
+        QShortcut(QKeySequence("Ctrl+="), self, lambda: self._pdf_viewer.zoom_in())
+        QShortcut(QKeySequence("Ctrl+-"), self, lambda: self._pdf_viewer.zoom_out())
 
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
