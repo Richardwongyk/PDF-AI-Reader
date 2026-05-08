@@ -389,10 +389,13 @@ class PdfViewer(QScrollArea):
         screen = QApplication.primaryScreen()
         self._screen_dpr = screen.devicePixelRatio() if screen else 1.0
         self._logical_dpi = screen.logicalDotsPerInch() if screen else 96
-        # 物理 DPI — 用于 PyMuPDF 渲染（像素 = widget逻辑 × DPR = backing store 物理像素）
-        self._dpi = int(self._logical_dpi * self._screen_dpr)
-        # 逻辑 DPI — 用于 widget / overlay 尺寸（与 pixmap 设置 DPR 后的逻辑尺寸匹配）
-        self._scale = self._logical_dpi / 72.0
+        # 基础值（常量，不变）
+        self._base_scale = self._logical_dpi / 72.0
+        self._base_dpi = int(self._logical_dpi * self._screen_dpr)
+        # 缩放倍数
+        self._zoom_multiplier: float = 1.0
+        self._scale = self._base_scale * self._zoom_multiplier
+        self._dpi = int(self._base_dpi * self._zoom_multiplier)
         self._all_blocks: list[DocumentBlock] = []
         self._page_segments: dict[int, list[dict]] = {}
         self._splits: dict[str, SplitWidget] = {}
@@ -1035,6 +1038,91 @@ class PdfViewer(QScrollArea):
         self.verticalScrollBar().setValue(y)
         _logger.info("PdfViewer: scroll_to_page p%d → y=%d (max=%d)",
                      page_num, y, self.verticalScrollBar().maximum())
+
+    # ── 缩放 ──
+
+    MIN_ZOOM: float = 0.3
+    MAX_ZOOM: float = 5.0
+    ZOOM_STEP: float = 1.2
+
+    def zoom_in(self) -> None:
+        """放大一级。"""
+        self._set_zoom(self._zoom_multiplier * self.ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        """缩小一级。"""
+        self._set_zoom(self._zoom_multiplier / self.ZOOM_STEP)
+
+    def _set_zoom(self, new_zoom: float) -> None:
+        """设置缩放倍数，重建布局并重渲染。
+
+        缩放流程：
+        1. 保存滚动位置比例
+        2. 更新 _scale / _dpi
+        3. 重建 _page_metas 尺寸 + _VirtualPageLayout
+        4. 清空 Widget 池（旧尺寸失效）
+        5. 更新裂缝宽度
+        6. 触发重渲染 + 恢复滚动位置
+        """
+        new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, new_zoom))
+        if abs(new_zoom - self._zoom_multiplier) < 0.001:
+            return
+
+        _logger.info("PdfViewer: 缩放 %.2f → %.2f", self._zoom_multiplier, new_zoom)
+
+        # 保存滚动位置比例
+        sb = self.verticalScrollBar()
+        ratio = sb.value() / max(sb.maximum(), 1)
+
+        # 更新缩放因子
+        self._zoom_multiplier = new_zoom
+        self._scale = self._base_scale * new_zoom
+        self._dpi = int(self._base_dpi * new_zoom)
+
+        # 重建页面元数据尺寸
+        doc = self._doc_engine.document
+        page_heights: dict[int, float] = {}
+        for pn, meta in self._page_metas.items():
+            if doc and pn < doc.page_count:
+                w = int(doc[pn].rect.width * self._scale)
+                h = int(doc[pn].rect.height * self._scale)
+            else:
+                w, h = 600, 800
+            meta["width"] = w
+            meta["height"] = h
+            page_heights[pn] = float(h)
+            # 同步更新 _page_segments 中的 y1（页面总高度）
+            for seg in self._page_segments.get(pn, []):
+                if "split_id" not in seg and seg.get("y0") == 0:
+                    seg["y1"] = h
+
+        # 重建虚拟布局
+        self._vlayout.rebuild(page_heights)
+
+        # 清空 Widget 池（旧尺寸失效，全部重建）
+        for w in list(self._widget_pool.values()):
+            if w.isVisible():
+                w.hide()
+                self._layout.removeWidget(w)
+            w.deleteLater()
+        self._widget_pool.clear()
+        self._page_containers.clear()
+        self._rendered_pages.clear()
+        self._page_last_seen.clear() if hasattr(self, '_page_last_seen') else None
+
+        # 更新已有裂缝宽度
+        for split in self._splits.values():
+            bp = self._block_to_page.get(split.block_id)
+            if bp is not None:
+                split.setFixedWidth(self._page_metas[bp]["width"])
+
+        # 调整 spacer 并触发重渲染
+        self._adjust_spacers(set())
+        self._update_visible_pages()
+
+        # 恢复滚动位置（延迟等 layout 更新完成）
+        QTimer.singleShot(100, lambda: sb.setValue(
+            int(ratio * max(sb.maximum(), 1))))
 
     # ── 主题 ──
 

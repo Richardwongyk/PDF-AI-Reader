@@ -142,9 +142,11 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("视图(&V)")
         zoom_in_action = QAction("放大(&I)", self)
         zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        zoom_in_action.triggered.connect(lambda: self._pdf_viewer.zoom_in())
         view_menu.addAction(zoom_in_action)
         zoom_out_action = QAction("缩小(&O)", self)
         zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        zoom_out_action.triggered.connect(lambda: self._pdf_viewer.zoom_out())
         view_menu.addAction(zoom_out_action)
 
         # 工具菜单
