@@ -84,6 +84,13 @@ class MainWindow(QMainWindow):
         from src.app.translate_flow import TranslationFlow
         self._translate_flow = TranslationFlow(self._ai_engine, self._ai_cache)
 
+        # 文档生命周期协调器（借鉴 Mad Professor DataManager 模式）
+        from src.app.document_flow import DocumentFlow
+        self._document_flow = DocumentFlow(
+            self._doc_engine, self._knowledge_engine,
+            self._ai_engine, self._glossary_manager,
+        )
+
         # 当前文档状态
         self._current_doc_hash: str = ""
         self._current_blocks: list[DocumentBlock] = []
@@ -238,10 +245,13 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         """连接 UI 信号到 Core 层服务和内部处理。"""
-        # DocumentEngine 信号
-        self._doc_engine.parse_finished.connect(self._on_document_loaded)
-        self._doc_engine.parse_progress.connect(self._on_parse_progress)
-        self._doc_engine.parse_error.connect(self._on_parse_error)
+        # DocumentFlow 协调器（借鉴 Mad Professor DataManager 模式）
+        self._document_flow.document_opened.connect(self._on_document_opened)
+        self._document_flow.document_closed.connect(self._on_document_closed)
+        self._document_flow.parse_progress.connect(self._on_parse_progress)
+        self._document_flow.parse_error.connect(self._on_parse_error)
+
+        # DocumentEngine 信号（DocumentFlow 未覆盖的）
         self._doc_engine.formula_blocks_updated.connect(self._on_formula_blocks_updated)
 
         # KnowledgeEngine 信号
@@ -296,56 +306,34 @@ class MainWindow(QMainWindow):
             self._open_pdf_file(filepath)
 
     def _open_pdf_file(self, filepath: str) -> None:
-        """执行打开 PDF 文件的完整流程。"""
-        self.logger.info("_open_pdf_file: START file=%s current_doc_hash=%s",
-                         filepath, self._current_doc_hash)
-        if self._current_doc_hash:
-            self.logger.info("_open_pdf_file: 关闭旧文档...")
-            self._on_close_document()
-            self.logger.info("_open_pdf_file: processEvents...")
-            QApplication.processEvents()
-            self.logger.info("_open_pdf_file: processEvents 完成")
+        """打开 PDF 文件（委托 DocumentFlow 协调器）。"""
+        self.logger.info("_open_pdf_file: %s", filepath)
         self._status_page_label.setText("正在解析 PDF...")
         self._status_progress.setVisible(True)
-        self.logger.info("_open_pdf_file: 调用 open_document...")
-        self._doc_engine.open_document(filepath)
-        self.logger.info("_open_pdf_file: END")
+        self._document_flow.open_document(filepath)
 
-    def _on_close_document(self) -> None:
-        """关闭当前文档。"""
-        self.logger.info("_on_close_document: START")
-        # 停止所有正在运行的 AI 线程，防止 token 信号刷屏
-        for t in list(self._ai_engine._active_threads):
-            if t.isRunning():
-                t.requestInterruption()
-                t.quit()
-                t.wait(1000)
-        self._ai_engine._active_threads.clear()
-        self.logger.info("_on_close_document: close_document...")
-        self._doc_engine.close_document()
-        self.logger.info("_on_close_document: pdf_viewer.clear...")
+    def _on_document_closed(self) -> None:
+        """DocumentFlow 通知文档已关闭 → 清理 UI。"""
         self._pdf_viewer.clear()
-        self.logger.info("_on_close_document: clear done, reset state...")
         self._current_doc_hash = ""
         self._current_blocks.clear()
         self._status_page_label.setText("就绪")
         self.setWindowTitle("PDF AI Reader")
-        self.logger.info("_on_close_document: END")
 
     # =========================================================================
     # DocumentEngine 回调
     # =========================================================================
 
-    def _on_document_loaded(self, result) -> None:
-        """文档解析完成。"""
+    def _on_document_opened(self, result) -> None:
+        """DocumentFlow 通知文档解析完成 → 加载 UI。"""
         import time
         start = time.time()
-        self.logger.info("_on_document_loaded: START %s (%d pages, %d blocks)",
+        self.logger.info("_on_document_opened: %s (%d pages, %d blocks)",
                          result.filepath, result.page_count, len(result.blocks))
 
         self._current_blocks = result.blocks
+        self._current_doc_hash = self._document_flow.current_hash
         self._status_progress.setVisible(False)
-        self.logger.info("_on_document_loaded: load_document...")
         self._status_page_label.setText(
             f"{result.title or Path(result.filepath).name} — {result.page_count} 页"
         )
@@ -356,33 +344,23 @@ class MainWindow(QMainWindow):
         self._pdf_viewer.load_document(result)
         QApplication.processEvents()
 
-        # 加载目录（无原生大纲时从标题块推断）
+        # 加载目录
         if result.toc:
             self._navigator.load_toc(result.toc)
         else:
             self._navigator.generate_toc_from_blocks(result.blocks)
 
-        # 计算文档哈希并检查/构建知识库
-        from src.data.chroma_repo import ChromaRepo
-        self._current_doc_hash = ChromaRepo.compute_doc_hash(result.filepath)
-
-        # 状态栏：知识库 + 渲染引擎
-        render_engine = "QtPdf" if self._doc_engine.using_qtpdf else "PyMuPDF"
+        # 状态栏
+        render_engine = "PyMuPDF"
         if self._knowledge_engine.check_exists(self._current_doc_hash):
             self._status_model_label.setText(f"📚 知识库就绪 | 🖥️ {render_engine}")
         else:
             self._status_model_label.setText(f"🔨 构建中... | 🖥️ {render_engine}")
-            self._knowledge_engine.build_knowledge_base(result.blocks, self._current_doc_hash)
-
-        # 更新术语表（用于翻译）
-        self._ai_engine.translation_service.update_glossary(
-            self._glossary_manager.get_entries(["math", "cs_ml", "physics"])
-        )
 
         elapsed = time.time() - start
         self.logger.info("文档加载完成，耗时 %.2fs", elapsed)
 
-        # PyMuPDF4LLM 异步增强（不阻塞解析线程）
+        # PyMuPDF4LLM 异步增强
         QTimer.singleShot(2000, lambda: self._run_pymupdf4llm_enhance(result))
 
     def _on_parse_progress(self, current: int, total: int) -> None:
