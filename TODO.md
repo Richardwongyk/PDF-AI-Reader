@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 79 次提交 + 11 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (P0 交付 — 虚拟布局 + Widget池化 + DisplayList + 滚动条/书签正确)
+> 基于 git 日志 80 次提交 + 11 个新增文件 + 5 个开源项目深度调研
+> 最后更新：2026-05-08 (P1 缩放功能交付 — zoom_in/zoom_out + _set_zoom)
 
 ---
 
@@ -108,6 +108,7 @@
 | Commit | 说明 |
 |--------|------|
 | `e6f7ba3` | **P0 #19: 虚拟布局 + Widget池化 + DisplayList**。_VirtualPageLayout 纯 Python 布局替代 QLayoutItem 遍历；load_document 零 Widget 预创建（404页=0 widgets）；QVBoxLayout+spacer 撑出总高度使滚动条正确；DisplayList 重放加速异步渲染；SplitWidget.height_changed 信号。 |
+| `e0bc4fa` | **P1 #20: 缩放功能**。_base_scale/_base_dpi + _zoom_multiplier；zoom_in/zoom_out → _set_zoom 重建布局+池+裂缝宽度；MainWindow 连接菜单快捷键。 |
 
 **滚动性能优化 (4 commits)**：
 
@@ -244,6 +245,7 @@ UI 用 _current_answer            │
 | **P0: QVBoxLayout + spacer** | top/bottom spacer 撑出全文档总高，滚动条/书签正确 |
 | **P0: DisplayList 异步渲染** | `_PageRenderTask` 改用 DL 重放，与 PageCache 一致 |
 | **P0: SplitWidget 高度信号** | `height_changed` 信号 → layout 自动管理位移 |
+| **P1: 缩放功能** | `_base_scale/_base_dpi + _zoom_multiplier`；`_set_zoom` 重建一切 |
 
 ### 待完成
 
@@ -253,11 +255,10 @@ UI 用 _current_answer            │
 | 2 | **AskQuestionFlow** — 知识库检索逻辑迁移出 MainWindow | 低 |
 | 3 | **pytest 测试框架** — tests/ 目录 | 低 |
 | 4 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
-| 5 | **P1: 缩放功能** — zoom_multiplier + 信号连接 | 次优先 |
-| 6 | **P1: 翻译框宽度对齐** — 动态宽度 + 缩放同步 | 次优先 |
-| 7 | **P2: 翻译框高度+CSS** — chrome 精确计算 + HTML margin | 低 |
-| 8 | **P2: 段落宽度对齐** — BBox → 显示宽度 + 水平偏移 | 低 |
-| 9 | **P2: 重复翻译防护** — `_pending` 去重检查 | 低 |
+| 5 | **P1: 翻译框宽度对齐** — 动态宽度 + 缩放同步 | 次优先 |
+| 6 | **P2: 翻译框高度+CSS** — chrome 精确计算 + HTML margin | 低 |
+| 7 | **P2: 段落宽度对齐** — BBox → 显示宽度 + 水平偏移 | 低 |
+| 8 | **P2: 重复翻译防护** — `_pending` 去重检查 | 低 |
 
 ---
 
@@ -393,7 +394,7 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 
 ## 十一、总结
 
-**已交付 (28 commits，11 个新文件)**：
+**已交付 (29 commits，11 个新文件)**：
 - DI 容器 + 懒加载 (`build_services`: 0.33s，11 个注册服务)
 - 四级错误处理 + 全局异常钩子
 - 四层缓存: PageCache / AICache / TileCache / TileRenderer
