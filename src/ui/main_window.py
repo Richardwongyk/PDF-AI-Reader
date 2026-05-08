@@ -604,7 +604,7 @@ class MainWindow(QMainWindow):
 
         provider_box = QComboBox()
         providers = ["deepseek/deepseek-chat", "openai/gpt-4o", "qwen/qwen-plus",
-                      "glm-4", "moonshot-v1-8k", "claude-sonnet-4-20250514"]
+                      "glm-4", "moonshot-v1-8k"]
         provider_box.addItems(providers)
         # 选中当前配置
         current_cloud = self._config.model.cloud

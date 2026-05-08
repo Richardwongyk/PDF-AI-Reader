@@ -195,7 +195,7 @@ class OllamaClient(BaseLLMClient):
 class LiteLLMClient(BaseLLMClient):
     """云端模型统一客户端。
 
-    通过 LiteLLM 库调用 OpenAI、DeepSeek、Qwen、GLM、Kimi、Claude 等。
+    通过 LiteLLM 库调用 OpenAI、DeepSeek、Qwen、GLM、Kimi 等云端大模型。
     使用同一套 OpenAI-compatible 消息格式。
     """
 
