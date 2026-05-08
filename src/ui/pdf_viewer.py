@@ -369,6 +369,11 @@ class PdfViewer(QScrollArea):
         self.viewport_changed.emit(value, self.verticalScrollBar().maximum())
 
     def _compute_page_y_offsets(self) -> dict[int, int]:
+        """计算每个页面的 Y 偏移（缓存版：仅在 layout 变化时重算）。"""
+        layout_version = self._layout.count()
+        if layout_version == getattr(self, '_cached_layout_version', -1):
+            return getattr(self, '_cached_offsets', {})
+
         offsets: dict[int, int] = {}
         y = self._layout.contentsMargins().top()
         for i in range(self._layout.count()):
@@ -389,6 +394,8 @@ class PdfViewer(QScrollArea):
             if not found and isinstance(w, SplitWidget):
                 pass
             y += w.height()
+        self._cached_layout_version = layout_version
+        self._cached_offsets = offsets
         return offsets
 
     def _update_visible_pages(self) -> None:
@@ -683,6 +690,7 @@ class PdfViewer(QScrollArea):
 
         split.open(mode)
         self._splits[block_id] = split
+        self._cached_layout_version = -1  # 失效 Y 偏移缓存
         _logger.info("裂缝已打开: block=%s page=%d mode=%s", block_id, page_num, mode.value)
         self._split_pages.add(page_num)
         self._set_translation_marker(block_id, True)
@@ -738,6 +746,8 @@ class PdfViewer(QScrollArea):
         self._tile_renderer.clear()
         self._scroll_history.clear()
         self._last_scroll_value = 0
+        self._cached_layout_version = -1
+        self._cached_offsets = {}
         while self._layout.count():
             item = self._layout.takeAt(0)
             w = item.widget()
@@ -781,6 +791,7 @@ class PdfViewer(QScrollArea):
                 self._split_pages.discard(page_num)
         s.close()
         s.deleteLater()
+        self._cached_layout_version = -1  # 失效 Y 偏移缓存
         self.split_close_requested.emit(block_id)
 
     def _merge_segments(self, page_num: int, split_id: str) -> None:
