@@ -156,6 +156,8 @@ class _LazyPageWidget(QWidget):
                 self._paint_tiles(painter, tile_px)
                 painter.end()
                 return
+            _logger.info("_LazyPageWidget.paintEvent: p%d 回退全页 (tile_px=%d, page_w=%d)",
+                         self.page_num, tile_px, self._page_w)
 
         # 回退：全页 pixmap 直接绘制
         if self._full_pixmap is not None and not self._full_pixmap.isNull():
@@ -207,8 +209,8 @@ class _LazyPageWidget(QWidget):
                 drawn += 1
 
         if drawn > 0:
-            _logger.debug("_LazyPageWidget._paint_tiles: p%d 绘制 %d 瓦片 (缓存:%d 裁剪:%d)",
-                          self.page_num, drawn, cached, fallback)
+            _logger.info("_LazyPageWidget._paint_tiles: p%d 绘制 %d 瓦片 %dx%d (缓存:%d 裁剪:%d)",
+                         self.page_num, drawn, cols, rows, cached, fallback)
 
     def _draw_placeholder(self, painter: QPainter) -> None:
         """绘制未渲染状态的占位符。"""
