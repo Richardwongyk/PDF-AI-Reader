@@ -44,13 +44,13 @@ class _LazyPageWidget(QWidget):
         self._page_w = width_px
         self._page_h = height_px
         self.setFixedSize(width_px, height_px)
-        # 告知 Qt 我们会在 paintEvent 中完全覆盖绘制区域，无需擦除背景
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         self._rendered = False
         self._overlays: dict[str, BlockOverlay] = {}
-        self._tile_cache = None       # TileCache 引用，由 PdfViewer 传入
-        self._zoom: float = 1.0       # 当前缩放级别
+        self._full_pixmap: QPixmap | None = None  # 全页 pixmap（借鉴 qpageview 单 tile 模式）
+        self._tile_cache: object | None = None     # TileCache 引用，render() 时切片存入
+        self._zoom: float = 1.0
         _logger.debug("_LazyPageWidget.__init__: p%d (%dx%d)", page_num, width_px, height_px)
 
     # ------------------------------------------------------------------
@@ -76,16 +76,17 @@ class _LazyPageWidget(QWidget):
         """
         t0 = time.perf_counter()
         self._rendered = True
+        self._full_pixmap = pixmap
         self._tile_cache = tile_cache
         self._zoom = scale
 
-        # 将全页 pixmap 切片存入 TileCache（瞬时操作，无 I/O）
-        if tile_cache is not None:
+        # 全页 pixmap 切片存入 TileCache（后台缓存预热，不参与显示）
+        if tile_cache is not None and not pixmap.isNull():
             sliced = self._slice_pixmap_to_tiles(pixmap)
-            _logger.debug("_LazyPageWidget.render: p%d 切片 %d 个瓦片 → TileCache (%.1fms)",
+            _logger.debug("_LazyPageWidget.render: p%d 切片 %d 瓦片 → TileCache (%.1fms)",
                           self.page_num, sliced, (time.perf_counter() - t0) * 1000)
 
-        # 触发 paintEvent → QPainter 从 TileCache 取出瓦片绘制
+        # 触发 paintEvent → QPainter 直接绘制全页 pixmap（画质无损）
         self.update()
 
         # 创建 BlockOverlay（与旧版完全一致）
@@ -110,8 +111,9 @@ class _LazyPageWidget(QWidget):
                       self.page_num, len(self._overlays), (time.perf_counter() - t0) * 1000)
 
     def unrender(self) -> list[str]:
-        """释放瓦片引用 + overlay，返回被清除的 block_id 列表。"""
+        """释放全页 pixmap + overlay，返回被清除的 block_id 列表。"""
         self._rendered = False
+        self._full_pixmap = None
         self._tile_cache = None
         self.update()  # 触发 paintEvent → 绘制占位符
         cleared = list(self._overlays.keys())
@@ -133,53 +135,20 @@ class _LazyPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def paintEvent(self, event: object) -> None:
-        """使用 QPainter 绘制页面内容。
+        """使用 QPainter 绘制页面内容 — 借鉴 qpageview AbstractRenderer.paint()。
 
-        借鉴 qpageview 的 AbstractRenderer.paint():
-        - 已缓存瓦片 → painter.drawPixmap() 直接绘制
-        - 未缓存瓦片 → painter.fillRect() 灰色占位
-        - 无子 QLabel 小部件，BlockOverlay 自动浮于 QPainter 绘制之上
+        优先绘制全页 pixmap（画质无损，与旧版 QLabel 效果完全一致）。
+        后续可扩展为从 TileCache 逐瓦片绘制，实现真正的瓦片化渲染。
         """
         painter = QPainter(self)
 
-        if not self._rendered or self._tile_cache is None:
+        if self._rendered and self._full_pixmap is not None and not self._full_pixmap.isNull():
+            # 全页 pixmap 直接绘制（画质无损 —— 同旧版 QLabel.setPixmap 效果）
+            painter.drawPixmap(0, 0, self._page_w, self._page_h, self._full_pixmap)
+        else:
             self._draw_placeholder(painter)
-            painter.end()
-            return
-
-        tile_px = int(TILE_SIZE * self._zoom)
-        if tile_px <= 0:
-            self._draw_placeholder(painter)
-            painter.end()
-            return
-
-        cols = (self._page_w // tile_px) + 1
-        rows = (self._page_h // tile_px) + 1
-        drawn = 0
-        missing = 0
-
-        for row in range(rows):
-            for col in range(cols):
-                key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row,
-                              zoom_level=self._zoom)
-                pix = self._tile_cache.get(key)
-                x = col * tile_px
-                y = row * tile_px
-                w = min(tile_px, self._page_w - x)
-                h = min(tile_px, self._page_h - y)
-
-                if pix is not None:
-                    painter.drawPixmap(x, y, w, h, pix)
-                    drawn += 1
-                else:
-                    painter.fillRect(x, y, w, h, QColor("#e8e8e8"))
-                    missing += 1
 
         painter.end()
-
-        if missing > 0:
-            _logger.debug("_LazyPageWidget.paintEvent: p%d 绘制 %d 瓦片, %d 缺失",
-                          self.page_num, drawn, missing)
 
     def _draw_placeholder(self, painter: QPainter) -> None:
         """绘制未渲染状态的占位符。"""
