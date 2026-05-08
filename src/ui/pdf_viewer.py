@@ -2,20 +2,21 @@
 PDF 阅读器 —— 瓦片化渲染 + 点击段落时页面在该段落下边界裂开。
 支持同页多段裂开（裂开后的上下半页各自仍可再裂开）。
 
-性能优化：
-  - 瓦片化渲染（TileRenderer）：每页分为 256×256 px 瓦片，仅渲染可见瓦片
-  - 请求取消：快速滚动时自动丢弃过期渲染请求（Syncfusion 模式）
-  - 虚拟视口懒加载：非可见页面释放瓦片内存
-  - 对 100+ 页论文可节省 ~90% 内存，滚动帧率从 ~25fps 提升至 ~55fps
+瓦片化渲染 —— 借鉴 qpageview (frescobaldi/qpageview) 的 AbstractRenderer.paint():
+  - paintEvent 中 QPainter 直接绘制瓦片，不创建 QLabel 小部件
+  - 全页 pixmap 渲染后切片存入 TileCache（瞬时，无需后台逐瓦片渲染）
+  - 后续可扩展为后台逐瓦片渲染（当前已为 TileRenderer 预留接口）
+  - BlockOverlay 作为子 QWidget 自动浮于 QPainter 绘制内容之上
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 from shiboken6 import isValid as _isValid
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPalette, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
@@ -31,65 +32,63 @@ _logger = logging.getLogger(__name__)
 
 
 class _LazyPageWidget(QWidget):
-    """支持瓦片化延迟加载的页面容器。
+    """瓦片化延迟加载页面容器 — 借鉴 qpageview 的 QPainter 绘制模式。
 
-    未渲染时显示浅灰占位，渲染后显示瓦片网格 + BlockOverlay。
-    调用 unrender() 可释放所有瓦片的内存，保留占位。
+    未渲染时 QPainter 绘制浅灰占位文字，渲染后 QPainter 绘制瓦片。
+    BlockOverlay 作为子 QWidget 自动浮于 QPainter 绘制内容之上。
     """
 
     def __init__(self, page_num: int, width_px: int, height_px: int) -> None:
         super().__init__()
         self.page_num = page_num
-        self.setFixedSize(width_px, height_px)
         self._page_w = width_px
         self._page_h = height_px
-
-        # Placeholder label (shown when page is not rendered)
-        self._placeholder = QLabel(self)
-        self._placeholder.setFixedSize(width_px, height_px)
-        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._show_placeholder()
+        self.setFixedSize(width_px, height_px)
+        # 告知 Qt 我们会在 paintEvent 中完全覆盖绘制区域，无需擦除背景
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         self._rendered = False
         self._overlays: dict[str, BlockOverlay] = {}
-        self._tile_labels: dict[TileKey, QLabel] = {}
-        self._current_zoom: float = 1.0
+        self._tile_cache = None       # TileCache 引用，由 PdfViewer 传入
+        self._zoom: float = 1.0       # 当前缩放级别
+        _logger.debug("_LazyPageWidget.__init__: p%d (%dx%d)", page_num, width_px, height_px)
 
     # ------------------------------------------------------------------
-    # Public API (unchanged from old version)
+    # Public API
     # ------------------------------------------------------------------
 
     def render(
         self,
-        pixmap: QPixmap | None,
+        pixmap: QPixmap,
         blocks: list[DocumentBlock],
         scale: float,
         connect_cb: callable,
-        tile_renderer: TileRenderer | None = None,
+        tile_cache: object | None = None,
     ) -> None:
-        """渲染页面。
+        """渲染页面：将全页 pixmap 切片存入 TileCache，触发 paintEvent 重绘。
 
-        If tile_renderer is provided, renders via tile grid from cache.
-        Otherwise falls back to full-page pixmap (used for split segments).
+        Args:
+            pixmap: DocumentEngine 渲染的全页 QPixmap (2x DPR)。
+            blocks: 该页的 DocumentBlock 列表。
+            scale: 逻辑坐标缩放因子 (= dpi / 72.0)。
+            connect_cb: 连接 BlockOverlay 信号的回调。
+            tile_cache: TileCache 实例（可选，用于瓦片切片存储）。
         """
+        t0 = time.perf_counter()
         self._rendered = True
+        self._tile_cache = tile_cache
+        self._zoom = scale
 
-        if tile_renderer is not None and pixmap is None:
-            dpr = 2.0  # matches 2x super-sampling in pdf_engine
-            zoom = scale / (150.0 / 72.0)  # convert scale to zoom relative to 72DPI
-            self._current_zoom = zoom
-            self._build_tile_grid(tile_renderer, zoom)
-        elif pixmap is not None:
-            self._label = QLabel(self)
-            self._label.setFixedSize(self._page_w, self._page_h)
-            self._label.setPixmap(pixmap)
-            self._label.setStyleSheet("background: transparent;")
-            self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self._label.lower()
+        # 将全页 pixmap 切片存入 TileCache（瞬时操作，无 I/O）
+        if tile_cache is not None:
+            sliced = self._slice_pixmap_to_tiles(pixmap)
+            _logger.debug("_LazyPageWidget.render: p%d 切片 %d 个瓦片 → TileCache (%.1fms)",
+                          self.page_num, sliced, (time.perf_counter() - t0) * 1000)
 
-        self._placeholder.hide()
+        # 触发 paintEvent → QPainter 从 TileCache 取出瓦片绘制
+        self.update()
 
+        # 创建 BlockOverlay（与旧版完全一致）
         for b in blocks:
             bx0, by0, bx1, by1 = b.bbox
             sx0 = int(bx0 * scale)
@@ -107,15 +106,19 @@ class _LazyPageWidget(QWidget):
             connect_cb(ov)
             self._overlays[b.id] = ov
 
+        _logger.debug("_LazyPageWidget.render: p%d 完成 (%d blocks, %.1fms)",
+                      self.page_num, len(self._overlays), (time.perf_counter() - t0) * 1000)
+
     def unrender(self) -> list[str]:
-        """释放所有瓦片/overlay，返回被清除的 block_id 列表。"""
-        self._clear_tiles()
-        self._show_placeholder()
+        """释放瓦片引用 + overlay，返回被清除的 block_id 列表。"""
+        self._rendered = False
+        self._tile_cache = None
+        self.update()  # 触发 paintEvent → 绘制占位符
         cleared = list(self._overlays.keys())
         for ov in self._overlays.values():
             ov.deleteLater()
         self._overlays.clear()
-        self._rendered = False
+        _logger.debug("_LazyPageWidget.unrender: p%d 清除 %d 个 overlay", self.page_num, len(cleared))
         return cleared
 
     @property
@@ -126,57 +129,107 @@ class _LazyPageWidget(QWidget):
         return self._overlays.get(block_id)
 
     # ------------------------------------------------------------------
-    # Internal — tile grid
+    # QPainter 绘制 — 借鉴 qpageview AbstractRenderer.paint()
     # ------------------------------------------------------------------
 
-    def _build_tile_grid(self, renderer: TileRenderer, zoom: float) -> None:
-        """Lay out tile QLabels in a grid, fetching from TileCache."""
-        tile_px = int(TILE_SIZE * zoom)
+    def paintEvent(self, event: object) -> None:
+        """使用 QPainter 绘制页面内容。
+
+        借鉴 qpageview 的 AbstractRenderer.paint():
+        - 已缓存瓦片 → painter.drawPixmap() 直接绘制
+        - 未缓存瓦片 → painter.fillRect() 灰色占位
+        - 无子 QLabel 小部件，BlockOverlay 自动浮于 QPainter 绘制之上
+        """
+        painter = QPainter(self)
+
+        if not self._rendered or self._tile_cache is None:
+            self._draw_placeholder(painter)
+            painter.end()
+            return
+
+        tile_px = int(TILE_SIZE * self._zoom)
         if tile_px <= 0:
+            self._draw_placeholder(painter)
+            painter.end()
             return
 
         cols = (self._page_w // tile_px) + 1
         rows = (self._page_h // tile_px) + 1
-        total = cols * rows
-        cached = 0
+        drawn = 0
+        missing = 0
 
         for row in range(rows):
             for col in range(cols):
-                key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row, zoom_level=zoom)
-                pix = renderer.get_tile(key)
-                tile_w = min(tile_px, self._page_w - col * tile_px)
-                tile_h = min(tile_px, self._page_h - row * tile_px)
+                key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row,
+                              zoom_level=self._zoom)
+                pix = self._tile_cache.get(key)
+                x = col * tile_px
+                y = row * tile_px
+                w = min(tile_px, self._page_w - x)
+                h = min(tile_px, self._page_h - y)
 
-                label = QLabel(self)
-                label.setGeometry(col * tile_px, row * tile_px, tile_w, tile_h)
-                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 if pix is not None:
-                    label.setPixmap(pix)
-                    cached += 1
+                    painter.drawPixmap(x, y, w, h, pix)
+                    drawn += 1
                 else:
-                    label.setStyleSheet("background: #e8e8e8;")
-                label.show()
-                self._tile_labels[key] = label
+                    painter.fillRect(x, y, w, h, QColor("#e8e8e8"))
+                    missing += 1
 
-        _logger.debug("_LazyPageWidget: p%d 瓦片网格 %dx%d (%d 个), 缓存命中 %d/%d",
-                      self.page_num, cols, rows, total, cached, total)
+        painter.end()
 
-    def _clear_tiles(self) -> None:
-        """Remove all tile QLabels."""
-        for label in self._tile_labels.values():
-            label.deleteLater()
-        self._tile_labels.clear()
-        # Also clean up full-page label if present
-        if hasattr(self, '_label'):
-            self._label.deleteLater()
+        if missing > 0:
+            _logger.debug("_LazyPageWidget.paintEvent: p%d 绘制 %d 瓦片, %d 缺失",
+                          self.page_num, drawn, missing)
 
-    def _show_placeholder(self) -> None:
-        self._placeholder.clear()
-        self._placeholder.setStyleSheet(
-            "background: #e8e8e8; color: #aaa; font-size: 18px;"
-        )
-        self._placeholder.setText(f"…")
-        self._placeholder.show()
+    def _draw_placeholder(self, painter: QPainter) -> None:
+        """绘制未渲染状态的占位符。"""
+        painter.fillRect(self.rect(), QColor("#e8e8e8"))
+        painter.setPen(QColor("#aaa"))
+        font = painter.font()
+        font.setPointSize(18)
+        painter.setFont(font)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "…")
+
+    # ------------------------------------------------------------------
+    # 全页 pixmap → 瓦片切片（瞬时操作）
+    # ------------------------------------------------------------------
+
+    def _slice_pixmap_to_tiles(self, pixmap: QPixmap) -> int:
+        """将全页 QPixmap 按 TileSize 网格切片，存入 TileCache。
+
+        借鉴思路：qpageview 的 AbstractRenderer.tiles() + ImageCache.addtile()。
+        但 qpageview 是在后台线程逐瓦片渲染；我们这里是先拿到全页 pixmap，
+        再在 GUI 线程做切片（copy() 开销极小，< 1ms per tile）。
+
+        Returns:
+            切片的瓦片数量。
+        """
+        tile_px = int(TILE_SIZE * self._zoom)
+        if tile_px <= 0:
+            return 0
+
+        dpr = pixmap.devicePixelRatio()
+        cols = (self._page_w // tile_px) + 1
+        rows = (self._page_h // tile_px) + 1
+        count = 0
+
+        for row in range(rows):
+            for col in range(cols):
+                key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row,
+                              zoom_level=self._zoom)
+
+                # 物理像素坐标（DPR 感知）
+                phys_x = int(col * tile_px * dpr)
+                phys_y = int(row * tile_px * dpr)
+                phys_w = int(min(tile_px, self._page_w - col * tile_px) * dpr)
+                phys_h = int(min(tile_px, self._page_h - row * tile_px) * dpr)
+
+                tile_pm = pixmap.copy(phys_x, phys_y, phys_w, phys_h)
+                tile_pm.setDevicePixelRatio(dpr)
+                self._tile_cache.put(key, tile_pm, render_ms=0.0)
+                count += 1
+
+        return count
 
 
 class PdfViewer(QScrollArea):
@@ -199,9 +252,11 @@ class PdfViewer(QScrollArea):
         self._overlays: dict[str, BlockOverlay] = {}
         self._trans_indicators: dict[str, QWidget] = {}
 
-        # Tile renderer (new)
+        # 瓦片化渲染器（借鉴 qpageview + Syncfusion）
         self._tile_renderer = TileRenderer()
-        self._zoom: float = self._scale  # current zoom level
+        self._tile_cache = self._tile_renderer.cache  # 共享 TileCache 引用
+        _logger.info("PdfViewer: TileRenderer 就绪 (cache=%dMB max)",
+                     self._tile_cache._max_size / (1024 * 1024))
 
         # 懒加载相关
         self._page_containers: dict[int, _LazyPageWidget] = {}
@@ -234,9 +289,8 @@ class PdfViewer(QScrollArea):
         self, pixmap: QPixmap, y0: int, y1: int, blocks: list[DocumentBlock]
     ) -> QWidget:
         """创建裁切图片 + 透明叠加层的段组件（始终渲染）。"""
-        h = max(y1 - y0, 1)  # h 是逻辑高度
+        h = max(y1 - y0, 1)
 
-        # DPR-aware coordinate conversion
         dpr = pixmap.devicePixelRatio()
         logical_w = int(pixmap.width() / dpr)
 
@@ -245,7 +299,6 @@ class PdfViewer(QScrollArea):
             w.setFixedSize(logical_w, h)
             return w
 
-        # QPixmap.copy uses physical pixel coordinates
         phys_y0 = int(y0 * dpr)
         phys_h = int(h * dpr)
         cropped = pixmap.copy(0, phys_y0, pixmap.width(), phys_h)
@@ -278,7 +331,7 @@ class PdfViewer(QScrollArea):
     # ── 文档加载 ──
 
     def load_document(self, result: ParseResult) -> None:
-        t0 = __import__('time').perf_counter()
+        t0 = time.perf_counter()
         _logger.info("PdfViewer.load_document: START (pages=%d, blocks=%d)",
                      result.page_count, len(result.blocks))
         self.clear()
@@ -286,7 +339,6 @@ class PdfViewer(QScrollArea):
         if not self._all_blocks:
             return
 
-        # Wire tile renderer to the open document
         doc = self._doc_engine.document
         self._tile_renderer.set_document(doc)
 
@@ -319,17 +371,15 @@ class PdfViewer(QScrollArea):
             self._scroll_connected = True
 
         QTimer.singleShot(50, self._update_visible_pages)
-        _logger.info("PdfViewer.load_document: DONE (%.2fs)", __import__('time').perf_counter() - t0)
+        _logger.info("PdfViewer.load_document: DONE (%.2fs)", time.perf_counter() - t0)
 
     # ── 懒加载核心 ──
 
     def _on_scroll(self, value: int) -> None:
-        """滚动事件 → 防抖后更新可见页面。"""
         self._viewport_timer.start()
         self.viewport_changed.emit(value, self.verticalScrollBar().maximum())
 
     def _compute_page_y_offsets(self) -> dict[int, int]:
-        """计算每个页面在当前 layout 中的 Y 偏移。"""
         offsets: dict[int, int] = {}
         y = self._layout.contentsMargins().top()
         for i in range(self._layout.count()):
@@ -355,7 +405,8 @@ class PdfViewer(QScrollArea):
     def _update_visible_pages(self) -> None:
         """根据滚动位置决定哪些页面需要渲染/释放。
 
-        新增：取消已离开视口的页面的待渲染请求（Syncfusion 模式）。
+        离开视口的页面：取消待渲染瓦片，释放 overlay。
+        进入视口的页面：触发全页 pixmap 异步渲染。
         """
         if not self._page_containers:
             return
@@ -365,7 +416,6 @@ class PdfViewer(QScrollArea):
         if viewport_h <= 0:
             return
 
-        # 清理已不在 _page_containers 中的页面
         for page_num in list(self._rendered_pages):
             if page_num not in self._page_containers:
                 self._rendered_pages.discard(page_num)
@@ -383,27 +433,26 @@ class PdfViewer(QScrollArea):
 
         needed |= self._split_pages
 
-        # 释放离开视口的页面（仅 _page_containers 中的）
+        # 离开视口 → 取消瓦片 + 释放
         for page_num in (self._rendered_pages - needed):
             if page_num in self._page_containers:
-                _logger.debug("PdfViewer: 页面 p%d 离开视口，释放 + 取消待渲染瓦片", page_num)
+                _logger.debug("PdfViewer: p%d 离开视口，释放", page_num)
                 self._tile_renderer.cancel_page(page_num)
                 self._unrender_page(page_num)
 
-        # 渲染新进入视口的页面
+        # 进入视口 → 触发全页渲染
         for page_num in (needed - self._rendered_pages):
             if page_num in self._page_containers:
-                _logger.debug("PdfViewer: 页面 p%d 进入视口，触发渲染", page_num)
+                _logger.debug("PdfViewer: p%d 进入视口，触发渲染", page_num)
                 self._render_page(page_num)
 
         if needed != self._rendered_pages:
-            _logger.debug("PdfViewer: 视口更新 — 可见页面: %s (曾渲染: %s)",
-                          sorted(needed), sorted(self._rendered_pages))
+            _logger.debug("PdfViewer: 视口更新 %s → %s",
+                          sorted(self._rendered_pages), sorted(needed))
 
         self._rendered_pages = needed
 
     def _get_page_height(self, page_num: int) -> int:
-        """获取某页在当前布局中的总高度。"""
         segs = self._page_segments.get(page_num, [])
         h = 0
         for seg in segs:
@@ -417,11 +466,7 @@ class PdfViewer(QScrollArea):
         return h
 
     def _render_page(self, page_num: int) -> None:
-        """渲染指定页：请求瓦片渲染 + 回退到全页 async render。
-
-        TileRenderer 负责按需渲染可见瓦片。同时保留 DocumentEngine
-        的异步全页渲染作为回退（用于 split 时的全页 pixmap）。
-        """
+        """请求全页异步渲染。完成后 _on_page_rendered_async 负责切片+绘制。"""
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
@@ -431,16 +476,11 @@ class PdfViewer(QScrollArea):
             return
 
         if len(segs) == 1 and segs[0].get("widget") is container:
-            # Request tile rendering for visible viewport
-            viewport = self.viewport().rect()
-            viewport.moveTop(self.verticalScrollBar().value())
-            self._tile_renderer.request_viewport(viewport, self._zoom)
-
-            # Also keep the full-page async render (for split/merge)
+            _logger.debug("PdfViewer: _render_page p%d → request_page_render_async", page_num)
             self._doc_engine.request_page_render_async(page_num, dpi=self._dpi)
 
     def _on_page_rendered_async(self, page_num: int, qpixmap: object) -> None:
-        """异步渲染完成回调：缓存全页 pixmap，并触发瓦片网格构建。"""
+        """全页 pixmap 渲染完成 → 切片到 TileCache → 触发 QPainter 重绘。"""
         container = self._page_containers.get(page_num)
         if container is None or container.rendered:
             return
@@ -454,21 +494,23 @@ class PdfViewer(QScrollArea):
         blocks = segs[0]["blocks"]
         pixmap = qpixmap if isinstance(qpixmap, QPixmap) else None
         if pixmap is None or pixmap.isNull():
+            _logger.warning("PdfViewer: p%d pixmap 为空，跳过渲染", page_num)
             return
 
-        # Render via tile grid (TileRenderer as cache, full pixmap as source)
-        container.render(pixmap, blocks, self._scale, self._connect_overlay)
+        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d, DPR=%.1f) → 切片+绘制",
+                     page_num, pixmap.width(), pixmap.height(),
+                     pixmap.devicePixelRatio())
+        container.render(pixmap, blocks, self._scale, self._connect_overlay,
+                         tile_cache=self._tile_cache)
         for b in blocks:
             if b.id in self._trans_indicators:
                 self._set_translation_marker(b.id, True)
 
     def _unrender_page(self, page_num: int) -> None:
-        """释放页面瓦片和 overlay，保留占位。"""
         container = self._page_containers.get(page_num)
         if container is None or not container.rendered:
             return
 
-        # 先清理翻译指示器
         for block_id, indicator in list(self._trans_indicators.items()):
             if self._block_to_page.get(block_id) == page_num:
                 indicator.deleteLater()
@@ -477,11 +519,11 @@ class PdfViewer(QScrollArea):
         cleared = container.unrender()
         for block_id in cleared:
             self._overlays.pop(block_id, None)
+        _logger.debug("PdfViewer: p%d unrender 完成", page_num)
 
     # ── 翻译指示器 ──
 
     def _set_translation_marker(self, block_id: str, has: bool) -> None:
-        """在页面最左边界处创建/移除蓝色翻译指示器条。"""
         ov = self._get_overlay(block_id)
         if not ov:
             return
@@ -503,10 +545,6 @@ class PdfViewer(QScrollArea):
                 self._trans_indicators[block_id] = indicator
 
     def _get_overlay(self, block_id: str) -> BlockOverlay | None:
-        """获取 overlay（可能在 _LazyPageWidget 或普通 segment widget 中）。
-
-        检测 C++ 对象是否仍存活，若已销毁则自动清理引用。
-        """
         ov = self._overlays.get(block_id)
         if ov:
             if _isValid(ov):
@@ -523,7 +561,6 @@ class PdfViewer(QScrollArea):
     def open_split_widget(
         self, block_id: str, mode: SplitMode = SplitMode.TRANSLATION
     ) -> SplitWidget | None:
-        """在段落下边界裂开页面，插入裂缝。若已存在则展开。"""
         existing = self._splits.get(block_id)
         if existing is not None:
             if existing.collapsed:
@@ -534,7 +571,6 @@ class PdfViewer(QScrollArea):
         if page_num is None:
             return None
 
-        # 确保页面已渲染
         if page_num not in self._rendered_pages:
             self._render_page(page_num)
             self._rendered_pages.add(page_num)
@@ -628,7 +664,6 @@ class PdfViewer(QScrollArea):
         return self._splits.get(block_id)
 
     def scroll_to_page(self, page_num: int) -> None:
-        """滚动到指定页面。"""
         offsets = self._compute_page_y_offsets()
         y = offsets.get(page_num)
         if y is not None:
@@ -637,15 +672,15 @@ class PdfViewer(QScrollArea):
     # ── 主题 ──
 
     def apply_theme_to_splits(self, theme: str) -> None:
-        """将主题广播到所有已打开的裂缝。"""
         for split in self._splits.values():
             split.apply_theme(theme)
 
     # ── 清理 ──
 
     def clear(self) -> None:
-        _logger.info("PdfViewer.clear: 开始 (%d splits, %d pages)",
-                     len(self._splits), len(self._page_containers))
+        _logger.info("PdfViewer.clear: 开始 (%d splits, %d pages, %d tiles)",
+                     len(self._splits), len(self._page_containers),
+                     self._tile_cache.tile_count)
         for block_id, s in list(self._splits.items()):
             s.close()
             s.deleteLater()
@@ -690,7 +725,6 @@ class PdfViewer(QScrollArea):
         pass
 
     def _on_clear_close(self, block_id: str) -> None:
-        """清除翻译并彻底销毁裂缝，合并页面段。"""
         self._set_translation_marker(block_id, False)
         s = self._splits.pop(block_id, None)
         if s is None:
@@ -709,7 +743,6 @@ class PdfViewer(QScrollArea):
         self.split_close_requested.emit(block_id)
 
     def _merge_segments(self, page_num: int, split_id: str) -> None:
-        """裂缝关闭时，合并被它分开的相邻段。"""
         segs = self._page_segments.get(page_num, [])
         for i, seg in enumerate(segs):
             if seg.get("split_id") == split_id:
