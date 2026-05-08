@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 80 次提交 + 11 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (P1 缩放功能交付 — zoom_in/zoom_out + _set_zoom)
+> 基于 git 日志 93 次提交 + 12 个新增文件 + 5 个开源项目深度调研
+> 最后更新：2026-05-08 (P2 交付 — AskQuestionFlow + 翻译框优化 + 段落宽度CSS + 重复翻译防护)
 
 ---
 
@@ -109,6 +109,42 @@
 |--------|------|
 | `e6f7ba3` | **P0 #19: 虚拟布局 + Widget池化 + DisplayList**。_VirtualPageLayout 纯 Python 布局替代 QLayoutItem 遍历；load_document 零 Widget 预创建（404页=0 widgets）；QVBoxLayout+spacer 撑出总高度使滚动条正确；DisplayList 重放加速异步渲染；SplitWidget.height_changed 信号。 |
 | `e0bc4fa` | **P1 #20: 缩放功能**。_base_scale/_base_dpi + _zoom_multiplier；zoom_in/zoom_out → _set_zoom 重建布局+池+裂缝宽度；MainWindow 连接菜单快捷键。 |
+
+### 阶段 9：P0/P1/P2 连续交付 (13 commits, 2026-05-08)
+
+**P0 大PDF性能 (1 commit)**：
+
+| Commit | 说明 |
+|--------|------|
+| `e6f7ba3` | **P0 #19: _VirtualPageLayout + Widget池化 + DisplayList**。load_document 零预创建(404页=0 widgets)；QVBoxLayout+spacer 总高度正确；滚动条/书签正确。 |
+
+**P1 缩放 (5 commits)**：
+
+| Commit | 说明 |
+|--------|------|
+| `e0bc4fa` | 缩放核心：_base_scale/_base_dpi + _set_zoom 重建一切 |
+| `ad89bd2` | 缩放即时反馈：借鉴 Sioyek 缩放在位 pixmap 即时显示 + 延迟精确渲染 |
+| `c271082` | 裂缝页面缩放：异步重建段 widget |
+| `cea8487` | QShortcut 快捷键 + SumatraPDF fixPt 视口保持 |
+| `02ca182` | 段坐标 zoom_ratio 同步缩放 |
+
+**P2 翻译框 + 问答 (7 commits)**：
+
+| Commit | 说明 |
+|--------|------|
+| `67717d1` | _compute_chrome_height + CSS 边距减半 + 重复翻译防护 |
+| `ac47874` | QFrame NoFrame + body_layout 零边距 + QSS padding/margin 减半 |
+| `47dfe04` | _adjust_height: 停止展开动画 + 解除 maximumHeight 约束 |
+| `9b6c016` | result_view stretch=1 填满可用空间 |
+| `f95c0c3` | 恢复 _adjust_height（保留全部优化） |
+| `195c039` | 段落宽度CSS：body padding 匹配 BBox 左右对齐 |
+| `a07a030` | **AskQuestionFlow**: KB检索逻辑迁移出 MainWindow，第四个协调器 |
+
+**新增文件 (1 个)**：
+
+| 文件 | 来源 | 用途 |
+|------|------|------|
+| `src/app/ask_flow.py` | 借鉴 Mad Professor | 问答流程协调器 (KB检索→AIEngine) |
 
 **滚动性能优化 (4 commits)**：
 
@@ -245,20 +281,20 @@ UI 用 _current_answer            │
 | **P0: QVBoxLayout + spacer** | top/bottom spacer 撑出全文档总高，滚动条/书签正确 |
 | **P0: DisplayList 异步渲染** | `_PageRenderTask` 改用 DL 重放，与 PageCache 一致 |
 | **P0: SplitWidget 高度信号** | `height_changed` 信号 → layout 自动管理位移 |
-| **P1: 缩放功能** | `_base_scale/_base_dpi + _zoom_multiplier`；`_set_zoom` 重建一切 |
+| **P1: 缩放功能** | `_base_scale/_base_dpi + _zoom_multiplier`；`_set_zoom` 重建一切；Sioyek 即时反馈；SumatraPDF fixPt 视口保持 |
+| **P2: 翻译框高度** | `_compute_chrome_height()` 精确计算；QFrame NoFrame；body_layout 零边距；result_view stretch=1；停止展开动画 |
+| **P2: CSS 边距** | body/heading/paragraph margin 减半；ul/ol/blockquote/#content 最小边距 |
+| **P2: 段落宽度对齐** | CSS body padding 注入 BBox 偏移，文字区域与紫色框左右对齐 |
+| **P2: 重复翻译防护** | `TranslationFlow._pending` 去重检查 |
+| **AskQuestionFlow** | 新建 `src/app/ask_flow.py`，KB 检索逻辑迁出 MainWindow |
 
 ### 待完成
 
 | # | 问题 | 优先级 |
 |---|------|--------|
 | 1 | **MFR 全家桶加载** — 首次 Pix2Text 加载 ~3s | 低 |
-| 2 | **AskQuestionFlow** — 知识库检索逻辑迁移出 MainWindow | ✅ 已完成 |
-| 3 | **pytest 测试框架** — tests/ 目录 | 低 |
-| 4 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
-| 5 | **P1: 翻译框宽度对齐** — 动态宽度 + 缩放同步 | 次优先 |
-| 6 | **P2: 翻译框高度+CSS** — chrome 精确计算 + HTML margin | 低 |
-| 7 | **P2: 段落宽度对齐** — BBox → 显示宽度 + 水平偏移 | 低 |
-| 8 | **P2: 重复翻译防护** — `_pending` 去重检查 | 低 |
+| 2 | **pytest 测试框架** — tests/ 目录 | 低 |
+| 3 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
 
 ---
 
@@ -349,6 +385,8 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 | 方向预渲染命中率 | ~60% (估计) | ~85% (趋势感知) |
 | 渲染 DPI | 硬编码 150 | **屏幕物理 DPI** (1:1 映射) |
 | 活跃 Widget 数 | N (全部页) | **≤ 15** (池化) |
+| 缩放响应 | — | **21-280ms** (即时+后台) |
+| 重复翻译 | 重复 LLM 调用 | **AICache 命中 0ms + 去重防护** |
 
 ---
 
@@ -394,21 +432,22 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 
 ## 十一、总结
 
-**已交付 (29 commits，11 个新文件)**：
+**已交付 (42 commits，12 个新文件)**：
 - DI 容器 + 懒加载 (`build_services`: 0.33s，11 个注册服务)
 - 四级错误处理 + 全局异常钩子
 - 四层缓存: PageCache / AICache / TileCache / TileRenderer
-- 屏幕物理 DPI 渲染 (1:1 像素映射) + 混合瓦片绘制 (大页面 GPU 纹理保护)
+- 屏幕物理 DPI 渲染 (1:1 像素映射) + 混合瓦片绘制
 - 方向感知预渲染 (Sioyek 趋势算法)
 - 翻译缓存 (AICache → SQLite) + LiteLLM 后台预热
 - 滚动性能: _update_visible_pages 1763ms → 7-33ms
-- 应用层协调器: TranslationFlow / DocumentFlow / ExplainFlow
-- 统一哈希工具 (file_hash.py) + EmbeddingService 单例化
-- **P0: _VirtualPageLayout** — 纯 Python 页面位置计算，消除 QLayoutItem C++ 遍历
-- **P0: Widget 池化** — load_document 零预创建 (404页=0 widgets, 活跃≤15)
-- **P0: QVBoxLayout + spacer** — 滚动条范围 = 全部文档总高，书签跳转正确
-- **P0: DisplayList 异步渲染** — _PageRenderTask 与 PageCache 统一使用 DL 重放
-- **P0: SplitWidget.height_changed** — layout 自动管理裂缝高度变化
+- 四个应用层协调器: TranslationFlow / DocumentFlow / ExplainFlow / AskQuestionFlow
+- 统一哈希工具 + EmbeddingService 单例化
+- **P0: _VirtualPageLayout + Widget池化**: 404页 0 widgets 预创建，活跃≤15
+- **P0: QVBoxLayout+spacer**: 滚动条范围=全文档总高，书签正确
+- **P0: DisplayList 异步渲染**: 与 PageCache 统一 DL 重放路径
+- **P1: 缩放 21-280ms**: Sioyek 即时反馈 + SumatraPDF fixPt 视口保持 + QShortcut 快捷键
+- **P2: 翻译框优化**: chrome 精确计算 + NoFrame + stretch=1 + CSS 边距 + 段落宽度对齐
+- **P2: 重复翻译防护 + AskQuestionFlow**
 - 全部模块详细日志
 
 **新增文件 (11 个)**：
@@ -426,13 +465,14 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 | `src/app/translate_flow.py` | 借鉴 Mad Professor | 翻译协调器 |
 | `src/app/document_flow.py` | 借鉴 Mad Professor | 文档协调器 |
 | `src/app/explain_flow.py` | 借鉴 Mad Professor | 解释协调器 |
+| `src/app/ask_flow.py` | 借鉴 Mad Professor | 问答协调器 |
 
 **架构**：
 ```
 src/
   core/   — 领域层 (ServiceContainer, ErrorHandler, TranslationService, QAService...)
   infra/  — 基础设施层 [NEW] (PageCache, AICache, TileCache, TileRenderer, file_hash)
-  app/    — 应用层 [NEW] (TranslationFlow, DocumentFlow, ExplainFlow)
+  app/    — 应用层 [NEW] (TranslationFlow, DocumentFlow, ExplainFlow, AskQuestionFlow)
   ui/     — 表示层 (MainWindow, PdfViewer, SplitWidget, BlockOverlay)
   data/   — 数据层 (ConfigManager, ChromaRepo)
   main.py — 入口 + build_services (懒加载编排)
