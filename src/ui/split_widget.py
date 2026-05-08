@@ -414,7 +414,7 @@ class SplitWidget(QFrame):
         self._result_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        body_layout.addWidget(self._result_view)
+        body_layout.addWidget(self._result_view, 1)  # stretch=1 填满可用空间
 
         # 冻结截图标签（折叠时替换 WebView 以预览内容）
         self._frozen_label = QLabel()
