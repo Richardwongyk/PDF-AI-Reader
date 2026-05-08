@@ -478,6 +478,11 @@ class PdfViewer(QScrollArea):
                          elapsed, len(needed))
 
     def _get_page_height(self, page_num: int) -> int:
+        """获取页面高度（缓存版：layout 不变时返回缓存值）。"""
+        layout_ver = self._layout.count()
+        cache = getattr(self, '_cached_heights', {})
+        if layout_ver == getattr(self, '_cached_layout_version', -1) and page_num in cache:
+            return cache[page_num]
         segs = self._page_segments.get(page_num, [])
         h = 0
         for seg in segs:
@@ -488,6 +493,8 @@ class PdfViewer(QScrollArea):
             if self._block_to_page.get(block_id) == page_num:
                 if split.isVisible():
                     h += split.height()
+        cache[page_num] = h
+        self._cached_heights = cache
         return h
 
     def _render_page(self, page_num: int) -> None:
