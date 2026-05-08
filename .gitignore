@@ -14,8 +14,9 @@ env/
 .vscode/
 .idea/
 
-# 编辑器/工具本地配置
+# 编辑器/工具本地配置目录
 .claude/
+.tools/
 
 # 应用数据
 data/knowledge_bases/
