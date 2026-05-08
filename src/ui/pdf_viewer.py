@@ -431,54 +431,49 @@ class PdfViewer(QScrollArea):
         needed |= self._split_pages
 
         # ── 方向感知预渲染（借鉴 Sioyek 趋势感知算法） ──
-        # 计算趋势得分：最近 3 次方向，正向+1 反向-1
         trend = sum(self._scroll_history)
-        # 找到当前视口中心所在的页面
         viewport_center = scroll_y + viewport_h // 2
         current_page = 0
         for page_num, y in sorted(offsets.items()):
             if y <= viewport_center:
                 current_page = page_num
-
         max_page = max(self._page_containers.keys()) if self._page_containers else 0
-        preload_count = 4  # 预加载页数
+        preload_count = 4
 
         if trend >= 2:
-            # 正向翻页趋势 → 预加载后续页
             for p in range(current_page + 1, min(max_page + 1, current_page + 1 + preload_count)):
                 if p in self._page_containers:
                     needed.add(p)
-            _logger.debug("PdfViewer: 正向趋势 (score=%d) → 预加载 p%d→p%d",
-                          trend, current_page + 1,
-                          min(max_page, current_page + preload_count))
         elif trend <= -2:
-            # 反向翻页趋势 → 预加载前序页
             for p in range(max(0, current_page - preload_count), current_page):
                 if p in self._page_containers:
                     needed.add(p)
-            _logger.debug("PdfViewer: 反向趋势 (score=%d) → 预加载 p%d→p%d",
-                          trend, max(0, current_page - preload_count), current_page - 1)
 
-        # 离开视口 → 取消瓦片 + 释放
-        for page_num in (self._rendered_pages - needed):
-            if page_num in self._page_containers:
-                _logger.debug("PdfViewer: p%d 离开视口，释放", page_num)
-                self._tile_renderer.cancel_page(page_num)
-                self._unrender_page(page_num)
-
-        # 进入视口 → 触发全页渲染
+        # 渲染新进入视口的页面
         for page_num in (needed - self._rendered_pages):
             if page_num in self._page_containers:
-                _logger.debug("PdfViewer: p%d 进入视口，触发渲染", page_num)
+                _logger.info("PdfViewer: p%d 进入视口，触发渲染", page_num)
                 self._render_page(page_num)
 
-        if needed != self._rendered_pages:
-            _logger.debug("PdfViewer: 视口更新 %s → %s",
-                          sorted(self._rendered_pages), sorted(needed))
+        # 延迟卸载：离开视口 5 秒后才释放（避免 deleteLater 阻塞主线程导致卡顿）
+        now = time.perf_counter()
+        if not hasattr(self, '_page_last_seen'):
+            self._page_last_seen: dict[int, float] = {}
+        for page_num in (self._rendered_pages - needed):
+            if page_num in self._page_containers:
+                last = self._page_last_seen.get(page_num, 0)
+                if last == 0:
+                    self._page_last_seen[page_num] = now
+                elif now - last > 5.0:
+                    self._tile_renderer.cancel_page(page_num)
+                    self._unrender_page(page_num)
+                    self._page_last_seen.pop(page_num, None)
+        for page_num in needed:
+            self._page_last_seen.pop(page_num, None)
 
         self._rendered_pages = needed
         elapsed = (time.perf_counter() - t0) * 1000
-        if elapsed > 5:  # 只记录 >5ms 的调用
+        if elapsed > 5:
             _logger.info("PdfViewer: _update_visible_pages 耗时 %.1fms (needed=%d)",
                          elapsed, len(needed))
 
