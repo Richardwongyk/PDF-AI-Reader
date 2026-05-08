@@ -40,6 +40,15 @@ config.yaml
 *.bmp
 *.svg
 
+# ========== AI 缓存数据库 ==========
+data/ai_cache.db
+data/ai_cache.db-shm
+data/ai_cache.db-wal
+
+# ========== 打包工具 / 开源借鉴 ==========
+pack_code.py
+开源借鉴/
+
 # ========== 其他 ==========
 PDF_AI_Reader/
 *.bak
