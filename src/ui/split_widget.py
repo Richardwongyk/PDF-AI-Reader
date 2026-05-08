@@ -635,12 +635,13 @@ class SplitWidget(QFrame):
             if hasattr(self, '_expand_anim') and self._expand_anim:
                 self._expand_anim.stop()
             self.setMaximumHeight(16777215)
-            # 暴力测试：忽略所有计算，强制设高度看翻译框能否变大
-            new_h = 500
-            self._saved_height = new_h
-            self.setFixedHeight(new_h)
-            self.height_changed.emit(new_h)
-            _logger.info("SplitWidget._adjust_height: FORCE 500 (content=%d)", content_height)
+            chrome = self._compute_chrome_height()
+            needed = content_height + chrome + 4
+            if needed > self.height():
+                new_h = min(needed, 800)
+                self._saved_height = new_h
+                self.setFixedHeight(new_h)
+                self.height_changed.emit(new_h)
 
     def _on_page_loaded(self, ok: bool) -> None:
         if ok:
