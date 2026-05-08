@@ -252,7 +252,7 @@ UI 用 _current_answer            │
 | # | 问题 | 优先级 |
 |---|------|--------|
 | 1 | **MFR 全家桶加载** — 首次 Pix2Text 加载 ~3s | 低 |
-| 2 | **AskQuestionFlow** — 知识库检索逻辑迁移出 MainWindow | 低 |
+| 2 | **AskQuestionFlow** — 知识库检索逻辑迁移出 MainWindow | ✅ 已完成 |
 | 3 | **pytest 测试框架** — tests/ 目录 | 低 |
 | 4 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
 | 5 | **P1: 翻译框宽度对齐** — 动态宽度 + 缩放同步 | 次优先 |
