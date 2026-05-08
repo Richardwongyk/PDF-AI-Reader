@@ -9,9 +9,10 @@ Cache key: (block_id, doc_hash, result_type)
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import sqlite3
+
+from src.infra.file_hash import compute_sha256
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,17 +52,10 @@ class AICache:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def hash_file(filepath: str, chunk_size: int = 65536) -> str:
-        """Compute a fast SHA-256 hash of a file for cache invalidation."""
+    def hash_file(filepath: str) -> str:
+        """Compute SHA-256 hash of a file for cache invalidation."""
         t0 = time.perf_counter()
-        sha = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                sha.update(chunk)
-        result = sha.hexdigest()
+        result = compute_sha256(filepath)
         _logger.debug("AICache: hash_file(%s) = %s (%.2fs)", Path(filepath).name, result[:16], time.perf_counter() - t0)
         return result
 

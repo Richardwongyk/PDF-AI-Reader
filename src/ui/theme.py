@@ -72,16 +72,6 @@ QPushButton#send_button:pressed {
     background: #4a3db0;
 }
 
-QTextBrowser#result_area {
-    border: 1px solid #d0d0e8;
-    border-radius: 6px;
-    padding: 8px;
-    background: rgba(255, 255, 255, 0.85);
-    color: #222;
-    font-size: 13px;
-    min-height: 60px;
-}
-
 QPushButton#close_button {
     background: transparent;
     border: none;
@@ -164,16 +154,6 @@ QPushButton#send_button:hover {
 
 QPushButton#send_button:pressed {
     background: #4a3db0;
-}
-
-QTextBrowser#result_area {
-    border: 1px solid #45475a;
-    border-radius: 6px;
-    padding: 8px;
-    background: rgba(30, 30, 46, 0.85);
-    color: #cdd6f4;
-    font-size: 13px;
-    min-height: 60px;
 }
 
 QPushButton#close_button {

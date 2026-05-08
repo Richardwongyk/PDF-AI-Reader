@@ -113,13 +113,18 @@ def build_services() -> ServiceContainer:
 
     container.register_singleton("embed_client", _build_embed_client)
 
+    def _build_embedding_service():
+        from src.core.knowledge_engine import EmbeddingService
+        return EmbeddingService(container.get("embed_client"))
+
+    container.register_singleton("embedding_service", _build_embedding_service)
+
     def _build_knowledge_engine():
-        """延迟创建知识库引擎（依赖 chroma_repo + embed_client）。"""
-        from src.core.knowledge_engine import EmbeddingService, KnowledgeEngine
-        embed_client = container.get("embed_client")
-        chroma_repo = container.get("chroma_repo")
-        embed_service = EmbeddingService(embed_client)
-        return KnowledgeEngine(embed_service, chroma_repo)
+        from src.core.knowledge_engine import KnowledgeEngine
+        return KnowledgeEngine(
+            container.get("embedding_service"),
+            container.get("chroma_repo"),
+        )
 
     container.register_singleton("knowledge_engine", _build_knowledge_engine)
 

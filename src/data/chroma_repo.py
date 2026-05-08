@@ -7,7 +7,7 @@ ChromaDB 向量存储仓库。
 
 from __future__ import annotations
 
-import hashlib
+from src.infra.file_hash import compute_sha256
 import os
 from typing import Any
 
@@ -228,11 +228,7 @@ class ChromaRepo:
         Returns:
             16 位十六进制字符串。
         """
-        sha = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha.update(chunk)
-        return sha.hexdigest()[:16]
+        return compute_sha256(filepath)[:16]
 
     def close(self) -> None:
         """关闭 ChromaDB 客户端连接，确保 WAL 文件正确刷入磁盘。"""
