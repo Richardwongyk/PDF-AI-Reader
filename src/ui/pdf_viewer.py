@@ -213,11 +213,14 @@ class PdfViewer(QScrollArea):
         super().__init__()
         self._doc_engine = doc_engine
         self._config = config
-        # 使用屏幕物理分辨率渲染，保证 1:1 像素映射（借鉴 qpageview 的 ratio 机制）
+        # 借鉴 qpageview：widget 尺寸用逻辑 DPI，pixmap 渲染用物理 DPI
         screen = QApplication.primaryScreen()
         self._screen_dpr = screen.devicePixelRatio() if screen else 1.0
-        self._dpi = int(screen.logicalDotsPerInch() * self._screen_dpr) if screen else 96
-        self._scale = self._dpi / 72.0
+        self._logical_dpi = screen.logicalDotsPerInch() if screen else 96
+        # 物理 DPI — 用于 PyMuPDF 渲染（像素 = widget逻辑 × DPR = backing store 物理像素）
+        self._dpi = int(self._logical_dpi * self._screen_dpr)
+        # 逻辑 DPI — 用于 widget / overlay 尺寸（与 pixmap 设置 DPR 后的逻辑尺寸匹配）
+        self._scale = self._logical_dpi / 72.0
         self._all_blocks: list[DocumentBlock] = []
         self._page_segments: dict[int, list[dict]] = {}
         self._splits: dict[str, SplitWidget] = {}
