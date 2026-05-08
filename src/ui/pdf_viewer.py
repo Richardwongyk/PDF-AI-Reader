@@ -1125,6 +1125,34 @@ class PdfViewer(QScrollArea):
             self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
             rerender_count += 1
 
+        # 处理裂缝页面：重建段 widget（旧尺寸/裁剪已失效）
+        for pn in list(self._split_pages):
+            segs = self._page_segments.get(pn, [])
+            pixmap = self._doc_engine.get_page_pixmap(pn, dpi=self._dpi)
+            if pixmap is None:
+                continue
+            for i, seg in enumerate(segs):
+                if "split_id" in seg:
+                    # 更新裂缝宽度
+                    split = self._splits.get(seg["split_id"])
+                    if split:
+                        split.setFixedWidth(self._page_metas[pn]["width"])
+                    continue
+                old_w = seg.get("widget")
+                if old_w is None:
+                    continue
+                # 清除旧 overlay
+                for child in old_w.findChildren(BlockOverlay):
+                    self._overlays.pop(child.block_id, None)
+                # 重建段 widget（新 DPI）
+                idx = self._layout.indexOf(old_w)
+                old_w.hide(); self._layout.removeWidget(old_w); old_w.deleteLater()
+                new_w = self._build_segment_widget(
+                    pixmap, seg["y0"], seg["y1"], seg["blocks"])
+                self._layout.insertWidget(idx, new_w)
+                seg["widget"] = new_w
+                _logger.debug("PdfViewer: 缩放重建段 p%d [%d:%d]", pn, seg["y0"], seg["y1"])
+
         # 处理池中隐藏的 widget（仅调整尺寸，不渲染）
         for pn, container in self._widget_pool.items():
             if pn in self._rendered_pages:
@@ -1132,9 +1160,6 @@ class PdfViewer(QScrollArea):
             meta = self._page_metas.get(pn)
             if meta:
                 container.setFixedSize(meta["width"], meta["height"])
-
-        # 更新裂缝宽度
-        for split in self._splits.values():
             bp = self._block_to_page.get(split.block_id)
             if bp is not None:
                 split.setFixedWidth(self._page_metas[bp]["width"])
