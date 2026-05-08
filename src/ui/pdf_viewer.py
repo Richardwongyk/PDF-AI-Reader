@@ -180,19 +180,21 @@ class _LazyPageWidget(QWidget):
         cols = (self._page_w // tile_px) + 1
         rows = (self._page_h // tile_px) + 1
         count = 0
+        dpr = pixmap.devicePixelRatio()
 
         for row in range(rows):
             for col in range(cols):
                 key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row,
                               zoom_level=self._zoom)
 
-                # pixmap 无 DPR，坐标直接对应物理像素
-                x = col * tile_px
-                y = row * tile_px
-                w = min(tile_px, self._page_w - x)
-                h = min(tile_px, self._page_h - y)
+                # QPixmap.copy() 使用物理像素坐标
+                phys_x = int(col * tile_px * dpr)
+                phys_y = int(row * tile_px * dpr)
+                phys_w = int(min(tile_px, self._page_w - col * tile_px) * dpr)
+                phys_h = int(min(tile_px, self._page_h - row * tile_px) * dpr)
 
-                tile_pm = pixmap.copy(x, y, w, h)
+                tile_pm = pixmap.copy(phys_x, phys_y, phys_w, phys_h)
+                tile_pm.setDevicePixelRatio(dpr)
                 self._tile_cache.put(key, tile_pm, render_ms=0.0)
                 count += 1
 
@@ -261,13 +263,18 @@ class PdfViewer(QScrollArea):
     ) -> QWidget:
         """创建裁切图片 + 透明叠加层的段组件（始终渲染）。"""
         h = max(y1 - y0, 1)
+        dpr = pixmap.devicePixelRatio()
 
         if not blocks:
             w = QWidget()
             w.setFixedSize(pixmap.width(), h)
             return w
 
-        cropped = pixmap.copy(0, y0, pixmap.width(), h)
+        # QPixmap.copy() 使用物理像素坐标
+        phys_y0 = int(y0 * dpr)
+        phys_h = int(h * dpr)
+        cropped = pixmap.copy(0, phys_y0, pixmap.width() * dpr, phys_h)
+        cropped.setDevicePixelRatio(dpr)
 
         w = QWidget()
         w.setFixedSize(pixmap.width(), h)
@@ -462,8 +469,11 @@ class PdfViewer(QScrollArea):
             _logger.warning("PdfViewer: p%d pixmap 为空，跳过渲染", page_num)
             return
 
-        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d) → 切片+绘制",
-                     page_num, pixmap.width(), pixmap.height())
+        # 设置正确的屏幕 DPR，使 QPainter 做 1:1 物理像素映射
+        pixmap.setDevicePixelRatio(self._screen_dpr)
+        _logger.info("PdfViewer: p%d 全页 pixmap 就绪 (%dx%d, DPR=%.1f) → 切片+绘制",
+                     page_num, pixmap.width(), pixmap.height(),
+                     self._screen_dpr)
         container.render(pixmap, blocks, self._scale, self._connect_overlay,
                          tile_cache=self._tile_cache)
         for b in blocks:
@@ -571,13 +581,12 @@ class PdfViewer(QScrollArea):
         below_blocks = [b for b in all_blocks if b.bbox[1] * self._scale >= cut_y - 5]
 
         block_px_h = int((block.bbox[3] - block.bbox[1]) * self._scale)
-        page_w = pixmap.width()
         split = SplitWidget(
             block, mode=mode, position="below",
             block_pixel_height=max(block_px_h, 60),
-            page_width=page_w,
+            page_width=pixmap.width(),
         )
-        split.setFixedWidth(page_w)
+        split.setFixedWidth(pixmap.width())
         split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
         split.translation_requested.connect(self.block_translate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))

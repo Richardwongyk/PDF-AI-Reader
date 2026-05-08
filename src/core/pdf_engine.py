@@ -674,7 +674,7 @@ class DocumentEngine(BaseService):
 
         qpixmap: QPixmap | None = None
 
-        # 渲染到屏幕物理 DPI，不设置 devicePixelRatio —— 保证 1:1 像素映射
+        # 渲染到 dpi 物理精度；DPR 由 PdfViewer 在接收端设置
         try:
             page = self._doc[page_num]
             zoom = dpi / 72.0
