@@ -10,11 +10,9 @@ build/
 venv/
 env/
 
-# IDE
+# IDE / 编辑器
 .vscode/
 .idea/
-
-# 编辑器/工具本地配置目录
 .claude/
 .tools/
 
