@@ -136,20 +136,79 @@ class _LazyPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def paintEvent(self, event: object) -> None:
-        """使用 QPainter 绘制 — 借鉴 qpageview AbstractRenderer.paint()。
+        """瓦片化绘制 — 借鉴 qpageview AbstractRenderer.paint()。
 
-        当前：全页 pixmap 直接绘制（画质无损，1:1 像素映射）。
-        后台：_TileRenderTask 逐瓦片渲染 → TileCache → tile_ready → update()。
-        渐进切换：当 TileCache 中瓦片覆盖率足够高时，切换为逐瓦片绘制。
+        info()  → 计算瓦片网格 + 查 TileCache
+        paint() → 缓存命中直接画瓦片，缺失从全页 pixmap 裁剪回退（closest 等价）
+        schedule() → 全页 pixmap 切片存入 TileCache（瞬时操作，为后续刷新预热）
         """
         painter = QPainter(self)
 
-        if self._rendered and self._full_pixmap is not None and not self._full_pixmap.isNull():
+        if not self._rendered:
+            self._draw_placeholder(painter)
+            painter.end()
+            return
+
+        # 尝试瓦片路径
+        if self._tile_cache is not None and self._zoom > 0:
+            tile_px = int(TILE_SIZE * self._zoom)
+            if tile_px > 0 and self._page_w > tile_px:
+                self._paint_tiles(painter, tile_px)
+                painter.end()
+                return
+
+        # 回退：全页 pixmap 直接绘制
+        if self._full_pixmap is not None and not self._full_pixmap.isNull():
             painter.drawPixmap(0, 0, self._full_pixmap)
         else:
             self._draw_placeholder(painter)
-
         painter.end()
+
+    def _paint_tiles(self, painter: QPainter, tile_px: int) -> None:
+        """绘制瓦片网格 —— 借鉴 qpageview info() + paint()。
+
+        对每个瓦片：
+        1. 查 TileCache → 命中 → painter.drawPixmap() 直接绘制
+        2. TileCache 未命中 → 从 _full_pixmap 裁剪 → 绘制 + 存入 TileCache
+        3. 全页 pixmap 也未就绪 → 灰色占位
+        """
+        dpr = self._full_pixmap.devicePixelRatio() if self._full_pixmap else 1.0
+        cols = (self._page_w // tile_px) + 1
+        rows = (self._page_h // tile_px) + 1
+        drawn, cached, fallback = 0, 0, 0
+
+        for row in range(rows):
+            for col in range(cols):
+                key = TileKey(page_num=self.page_num, tile_x=col, tile_y=row,
+                              zoom_level=self._zoom)
+                x = col * tile_px
+                y = row * tile_px
+                w = min(tile_px, self._page_w - x)
+                h = min(tile_px, self._page_h - y)
+
+                tile_pm = self._tile_cache.get(key)
+                if tile_pm is not None:
+                    painter.drawPixmap(x, y, w, h, tile_pm)
+                    cached += 1
+                elif self._full_pixmap is not None:
+                    # 从全页 pixmap 裁剪（qpageview closest() 等价回退）
+                    phys_x = int(x * dpr)
+                    phys_y = int(y * dpr)
+                    phys_w = int(w * dpr)
+                    phys_h = int(h * dpr)
+                    tile_pm = self._full_pixmap.copy(phys_x, phys_y, phys_w, phys_h)
+                    tile_pm.setDevicePixelRatio(dpr)
+                    self._tile_cache.put(key, tile_pm)
+                    painter.drawPixmap(x, y, w, h, tile_pm)
+                    fallback += 1
+                else:
+                    painter.fillRect(x, y, w, h, QColor("#e8e8e8"))
+
+                drawn += 1
+
+        if drawn > 0:
+            _logger.debug("_LazyPageWidget._paint_tiles: p%d 绘制 %d 瓦片 (缓存:%d 裁剪:%d)",
+                          self.page_num, drawn, cached, fallback)
 
     def _draw_placeholder(self, painter: QPainter) -> None:
         """绘制未渲染状态的占位符。"""
