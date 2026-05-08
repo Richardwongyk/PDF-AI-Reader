@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 67 次提交 + 7 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (滚动性能优化完成，重构 Phase 1+2 收尾)
+> 基于 git 日志 77 次提交 + 11 个新增文件 + 5 个开源项目深度调研
+> 最后更新：2026-05-08 (阶段三应用层解耦完成 + 瓦片混合绘制 + QSS 清理)
 
 ---
 
@@ -223,16 +223,25 @@ UI 用 _current_answer            │
 | AICache 翻译集成 | 翻译请求 → 查缓存 → 命中直接显示 |
 | 公式恢复修复 | `_post_process` 调用修复 |
 | 智能路由回退 | 翻译路径恢复直接翻译 |
+| LiteLLM 预热 | 后台预热消除首次 ~47s 冷启动 |
+| 混合绘制策略 | <4096px 全页绘制 / ≥4096px 瓦片绘制 (GPU 纹理限制) |
+| PageCache 集成 | 替代 DocumentEngine 内嵌 _pixmap_cache |
+| TranslationFlow | 翻译协调器 (AICache→AIEngine→缓存) |
+| DocumentFlow | 文档生命周期协调器 (打开/关闭/知识库) |
+| ExplainFlow | 解释流程协调器 (OCR 线程管理) |
+| Pix2Text API 修复 | enable_formula/enable_table 正确 API |
+| 统一哈希 | file_hash.py → ChromaRepo + AICache |
+| EmbeddingService 单例 | 容器化依赖注入 |
+| QSS 清理 | 删除无效 QTextBrowser#result_area 规则 |
 
 ### 待完成
 
 | # | 问题 | 优先级 |
 |---|------|--------|
-| 1 | **MFR 全家桶加载** — Pix2Text 模块参数不生效 | 中 |
-| 2 | **瓦片渲染接入显示** — 逐瓦片后台渲染 → paintEvent | 中 |
-| 3 | **应用层解耦** — OpenDocumentFlow / TranslateBlockFlow | 低 |
-| 4 | **pytest 测试框架** — tests/ 目录 | 低 |
-| 5 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
+| 1 | **MFR 全家桶加载** — 首次 Pix2Text 加载 ~3s | 低 (已修复 API，加载时间不可免) |
+| 2 | **AskQuestionFlow** — 知识库检索逻辑迁移出 MainWindow | 低 |
+| 3 | **pytest 测试框架** — tests/ 目录 | 低 |
+| 4 | **2K/4K 高分屏 DPR 测试** — overlay 定位验证 | 低 |
 
 ---
 
@@ -366,21 +375,40 @@ pixmap 设置 `devicePixelRatio(DPR)`，QPainter 1:1 物理像素映射。
 
 ## 十一、总结
 
-**已交付 (16 commits，7 个新文件)**：
-- DI 容器 + 懒加载 (`build_services`: 0.33s)
+**已交付 (27 commits，11 个新文件)**：
+- DI 容器 + 懒加载 (`build_services`: 0.33s，11 个注册服务)
 - 四级错误处理 + 全局异常钩子
-- PageCache / AICache / TileCache / TileRenderer 四层缓存
-- 屏幕物理 DPI 渲染 (1:1 像素映射)
+- 四层缓存: PageCache / AICache / TileCache / TileRenderer
+- 屏幕物理 DPI 渲染 (1:1 像素映射) + 混合瓦片绘制 (大页面 GPU 纹理保护)
 - 方向感知预渲染 (Sioyek 趋势算法)
-- 翻译结果缓存 (AICache → SQLite)
-- 滚动性能优化 (_update_visible_pages: 15-32ms)
+- 翻译缓存 (AICache → SQLite) + LiteLLM 后台预热
+- 滚动性能: _update_visible_pages 1763ms → 15-32ms
+- 应用层协调器: TranslationFlow / DocumentFlow / ExplainFlow
+- 统一哈希工具 (file_hash.py) + EmbeddingService 单例化
 - 全部模块详细日志
+
+**新增文件 (11 个)**：
+
+| 文件 | 来源 | 用途 |
+|------|------|------|
+| `src/core/service_container.py` | 借鉴 PDFCrop | DI 容器 |
+| `src/core/error_handler.py` | 借鉴 PDFCrop | 四级错误处理 |
+| `src/infra/page_cache.py` | 借鉴 PDFCrop | 页面缓存 |
+| `src/infra/ai_cache.py` | 全新 | AI 结果缓存 |
+| `src/infra/tile_cache.py` | 借鉴 qpageview | 瓦片缓存 |
+| `src/infra/tile_renderer.py` | 借鉴 qpageview+Syncfusion | 瓦片渲染 |
+| `src/infra/file_hash.py` | 全新 | 统一哈希 |
+| `src/app/__init__.py` | — | 应用层包 |
+| `src/app/translate_flow.py` | 借鉴 Mad Professor | 翻译协调器 |
+| `src/app/document_flow.py` | 借鉴 Mad Professor | 文档协调器 |
+| `src/app/explain_flow.py` | 借鉴 Mad Professor | 解释协调器 |
 
 **架构**：
 ```
 src/
-  core/   — 领域层 (TranslationService, QAService, DocumentChunker, ServiceContainer)
-  infra/  — 基础设施层 [NEW] (PageCache, AICache, TileCache, TileRenderer)
+  core/   — 领域层 (ServiceContainer, ErrorHandler, TranslationService, QAService...)
+  infra/  — 基础设施层 [NEW] (PageCache, AICache, TileCache, TileRenderer, file_hash)
+  app/    — 应用层 [NEW] (TranslationFlow, DocumentFlow, ExplainFlow)
   ui/     — 表示层 (MainWindow, PdfViewer, SplitWidget, BlockOverlay)
   data/   — 数据层 (ConfigManager, ChromaRepo)
   main.py — 入口 + build_services (懒加载编排)
