@@ -95,6 +95,10 @@ class MainWindow(QMainWindow):
         from src.app.explain_flow import ExplainFlow
         self._explain_flow = ExplainFlow(self._ai_engine, self._doc_engine, self._ai_cache)
 
+        # 问答流程协调器（借鉴 Mad Professor AIManager 模式）
+        from src.app.ask_flow import AskQuestionFlow
+        self._ask_flow = AskQuestionFlow(self._ai_engine, self._knowledge_engine)
+
         # 当前文档状态
         self._current_doc_hash: str = ""
         self._current_blocks: list[DocumentBlock] = []
@@ -345,6 +349,7 @@ class MainWindow(QMainWindow):
 
         self._current_blocks = result.blocks
         self._current_doc_hash = self._document_flow.current_hash
+        self._ask_flow.set_doc_hash(self._current_doc_hash)
         self._status_progress.setVisible(False)
         self._status_page_label.setText(
             f"{result.title or Path(result.filepath).name} — {result.page_count} 页"
@@ -497,31 +502,16 @@ class MainWindow(QMainWindow):
         self._explain_flow.request_explanation(block, split)
 
     def _on_split_ask(self, question: str, block_id: str) -> None:
-        """裂缝中提交问题 → 调用 AI 问答。"""
+        """裂缝中提交问题 → 委托 AskQuestionFlow 协调器。"""
         block = self._find_block(block_id)
-        retrieved = []
-        if self._current_doc_hash and self._knowledge_engine.check_exists(self._current_doc_hash):
-            try:
-                retrieved_raw = self._knowledge_engine.retrieve(
-                    question, self._current_doc_hash, top_k=3,
-                    exclude_ids=[block_id] if block else None,
-                )
-                retrieved = [
-                    self._find_block(r["id"]) for r in retrieved_raw
-                    if self._find_block(r["id"])
-                ]
-            except Exception:
-                pass
-
         split = self._pdf_viewer.find_split_widget(block_id)
         chat_history = split.chat_history if split else None
-
-        self._ai_engine.request_answer(
+        self._ask_flow.request_answer(
             question=question,
-            current_block=block,
-            retrieved_blocks=retrieved,
+            block=block,
+            block_id=block_id,
             chat_history=chat_history,
-            split_id=block_id,
+            find_block_cb=self._find_block,
         )
 
     # =========================================================================
