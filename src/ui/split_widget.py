@@ -400,6 +400,7 @@ class SplitWidget(QFrame):
         self._page_ready = False
         self._pending_js: str | None = None
         self._pending_theme: str | None = None
+        self._pending_padding_js: str | None = None
 
         # QWebChannel — 使用 Pool 的永久 channel，只 swap bridge 对象
         self._height_bridge = _HeightBridge(self)
@@ -597,10 +598,17 @@ class SplitWidget(QFrame):
 
     # ── WebView ──
 
+    def set_content_padding(self, left_px: int, right_px: int) -> None:
+        """设置 WebView 内容区左右内边距，使文字宽度匹配段落 BBox。"""
+        js = f"document.body.style.paddingLeft='{left_px}px';document.body.style.paddingRight='{right_px}px';"
+        if self._page_ready:
+            self._result_view.page().runJavaScript(js)
+        else:
+            self._pending_padding_js = js
+
     def _update_webview(self, is_finished: bool = False) -> None:
         safe_text = json.dumps(self._current_answer)
         js_bool = "true" if is_finished else "false"
-        # 更新内容；高度变化由 ResizeObserver → QWebChannel 实时推送
         js_code = f"updateContent({safe_text}, {js_bool});"
         if self._page_ready:
             self._result_view.page().runJavaScript(js_code)
@@ -650,6 +658,9 @@ class SplitWidget(QFrame):
             if self._pending_theme:
                 self._result_view.page().runJavaScript(f"setTheme('{self._pending_theme}');")
                 self._pending_theme = None
+            if self._pending_padding_js:
+                self._result_view.page().runJavaScript(self._pending_padding_js)
+                self._pending_padding_js = None
             if self._pending_js:
                 self._result_view.page().runJavaScript(self._pending_js)
                 self._pending_js = None
