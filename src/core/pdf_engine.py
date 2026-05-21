@@ -189,18 +189,28 @@ class DocumentChunker:
             # 响应线程中断请求（用户关闭文档时及时退出）
             if QThread.currentThread().isInterruptionRequested():
                 break
-            page_blocks = self._extract_page_blocks(doc[page_num], page_num)
-            if not page_blocks:
-                continue
-            # 双栏检测与交错排列
-            columns = self._detect_columns(page_blocks)
-            if len(columns) > 1:
-                page_blocks = self._interleave_columns(columns)
-            # 重新编号
-            for i, b in enumerate(page_blocks):
-                b.id = f"p{page_num}_b{len(all_blocks) + i}"
-            all_blocks.extend(page_blocks)
+            all_blocks.extend(self.chunk_page(doc, page_num))
         return all_blocks
+
+    def chunk_page(self, doc: fitz.Document, page_num: int) -> list[DocumentBlock]:
+        """解析单页块结构。
+
+        块 ID 使用页内编号 ``p{page}_b{index}``。这让远距离跳转页可以独立
+        解析并立即交互，不依赖前面所有页面的全局块计数。
+        """
+        page_blocks = self._extract_page_blocks(doc[page_num], page_num)
+        if not page_blocks:
+            return []
+
+        # 双栏检测与交错排列
+        columns = self._detect_columns(page_blocks)
+        if len(columns) > 1:
+            page_blocks = self._interleave_columns(columns)
+
+        # 重新编号为稳定的页内 ID
+        for i, b in enumerate(page_blocks):
+            b.id = f"p{page_num}_b{i}"
+        return page_blocks
 
     def _extract_page_blocks(
         self, page: fitz.Page, page_num: int
@@ -529,10 +539,12 @@ class DocumentEngine(BaseService):
 
     # === 信号 ===
     parse_finished = Signal(ParseResult)
+    parse_completed = Signal(ParseResult)
     parse_progress = Signal(int, int)  # (当前页, 总页数)
     parse_error = Signal(str)
     formula_blocks_updated = Signal(list)  # list[dict] — MFD 精扫修正的块
     page_rendered = Signal(int, object)  # (page_num, QPixmap) — 异步渲染完成
+    page_blocks_ready = Signal(int, object)  # (page_num, list[DocumentBlock])
 
     def __init__(self, config: AppConfig, parent: QObject | None = None,
                  page_cache: object | None = None) -> None:
@@ -544,11 +556,18 @@ class DocumentEngine(BaseService):
         # 异步渲染
         self._render_pool = QThreadPool()
         self._render_pool.setMaxThreadCount(2)
-        self._pending_renders: set[int] = set()
+        self._pending_renders: set[tuple[int, int]] = set()
+        self._latest_render_dpi: dict[int, int] = {}
         self._thread: QThread | None = None
         # 使用 PageCache 替代内嵌字典（借鉴 PDFCrop，线程安全 + LRU + 高分辨率回退）
         self._page_cache = page_cache
         self._filepath: str = ""  # PageCache 缓存键需要文件路径
+        self._page_parse_pool = QThreadPool()
+        self._page_parse_pool.setMaxThreadCount(2)
+        self._pending_page_parses: set[int] = set()
+        self._parsed_page_blocks: dict[int, list[DocumentBlock]] = {}
+        self._parsed_pages: set[int] = set()
+        self._document_generation: int = 0
 
     @property
     def is_open(self) -> bool:
@@ -586,9 +605,16 @@ class DocumentEngine(BaseService):
         Args:
             filepath: PDF 文件的绝对路径。
         """
+        old_filepath = self._filepath
+        self._document_generation += 1
         self._filepath = filepath
         if self._page_cache:
+            if old_filepath and old_filepath != filepath:
+                self._page_cache.clear_document(old_filepath)
             self._page_cache.clear_document(filepath)
+        self._parsed_page_blocks.clear()
+        self._parsed_pages.clear()
+        self._pending_page_parses.clear()
         self.logger.info("打开文档: %s", filepath)
 
         # 清理上一个线程（协作式取消，不调用 terminate）
@@ -601,20 +627,34 @@ class DocumentEngine(BaseService):
             try:
                 self._thread.progress.disconnect()
                 self._thread.finished_parsing.disconnect()
+                self._thread.completed_parsing.disconnect()
                 self._thread.parse_error.disconnect()
                 self._thread.formula_blocks_updated.disconnect()
+                self._thread.page_blocks_ready.disconnect()
             except Exception:
                 pass
             self._thread.deleteLater()
             self._thread = None
             self.logger.info("上一解析线程已清理")
+        self._render_pool.clear()
+        self._render_pool.waitForDone(2000)
+        self._page_parse_pool.clear()
+        self._page_parse_pool.waitForDone(2000)
+        self._pending_renders.clear()
+        self._latest_render_dpi.clear()
+        self._pending_page_parses.clear()
+        if self._doc:
+            self._doc.close()
+            self._doc = None
 
         self.logger.info("创建新解析线程: %s", filepath)
         self._thread = _ParseThread(filepath, self._chunker)
         self._thread.progress.connect(self.parse_progress.emit)
         self._thread.finished_parsing.connect(self._on_parse_finished)
+        self._thread.completed_parsing.connect(self._on_parse_completed)
         self._thread.parse_error.connect(self.parse_error.emit)
         self._thread.formula_blocks_updated.connect(self.formula_blocks_updated.emit)
+        self._thread.page_blocks_ready.connect(self._on_thread_page_blocks_ready)
         self._thread.start()
         self.logger.info("新解析线程已启动")
 
@@ -631,11 +671,39 @@ class DocumentEngine(BaseService):
 
         if self._page_cache:
             self._page_cache.clear_document(result.filepath)
+        self._remember_page_blocks(result.blocks, result.parsed_pages)
         self.parse_finished.emit(result)
+
+    def _on_parse_completed(self, result: ParseResult) -> None:
+        """全量解析完成。"""
+        self._remember_page_blocks(result.blocks, result.parsed_pages)
+        self.parse_completed.emit(result)
+
+    def _on_thread_page_blocks_ready(
+        self, page_num: int, blocks: list[DocumentBlock]
+    ) -> None:
+        """解析线程渐进补齐单页 blocks。"""
+        self._parsed_page_blocks[page_num] = list(blocks)
+        self._parsed_pages.add(page_num)
+        self.page_blocks_ready.emit(page_num, list(blocks))
+
+    def _remember_page_blocks(
+        self, blocks: list[DocumentBlock], parsed_pages: list[int] | None = None
+    ) -> None:
+        for page_num in parsed_pages or []:
+            self._parsed_pages.add(page_num)
+            self._parsed_page_blocks.setdefault(page_num, [])
+        pages: dict[int, list[DocumentBlock]] = {}
+        for block in blocks:
+            pages.setdefault(block.page_num, []).append(block)
+        for page_num, page_blocks in pages.items():
+            self._parsed_pages.add(page_num)
+            self._parsed_page_blocks[page_num] = list(page_blocks)
 
     def close_document(self) -> None:
         """关闭当前文档，释放所有相关资源。"""
         self.logger.info("close_document: START")
+        self._document_generation += 1
 
         # 1. 停止解析线程
         if self._thread is not None:
@@ -646,22 +714,30 @@ class DocumentEngine(BaseService):
             try:
                 self._thread.progress.disconnect()
                 self._thread.finished_parsing.disconnect()
+                self._thread.completed_parsing.disconnect()
                 self._thread.parse_error.disconnect()
                 self._thread.formula_blocks_updated.disconnect()
+                self._thread.page_blocks_ready.disconnect()
             except Exception:
                 pass
             self._thread.deleteLater()
             self._thread = None
 
-        # 2. 关闭 PyMuPDF
+        # 2. 取消异步渲染 / 按需解析。必须先等后台任务退出，再关闭共享的 fitz.Document。
+        self._pending_renders.clear()
+        self._latest_render_dpi.clear()
+        self._pending_page_parses.clear()
+        self._render_pool.clear()
+        self._render_pool.waitForDone(2000)
+        self._page_parse_pool.clear()
+        self._page_parse_pool.waitForDone(2000)
+
+        # 3. 关闭 PyMuPDF
         if self._doc:
             self._doc.close()
             self._doc = None
-
-        # 3. 取消异步渲染
-        self._pending_renders.clear()
-        self._render_pool.clear()
-        self._render_pool.waitForDone(2000)
+        self._parsed_page_blocks.clear()
+        self._parsed_pages.clear()
 
         # 4. 清空缓存
         if self._page_cache:
@@ -707,6 +783,35 @@ class DocumentEngine(BaseService):
         for pn in page_nums:
             self.request_page_render_async(pn, dpi)
 
+    def get_page_blocks(self, page_num: int) -> list[DocumentBlock]:
+        """获取已解析的单页 blocks。未解析时返回空列表。"""
+        return list(self._parsed_page_blocks.get(page_num, []))
+
+    def has_page_blocks(self, page_num: int) -> bool:
+        """单页 blocks 是否已经解析完成。"""
+        return page_num in self._parsed_pages
+
+    def request_page_blocks_async(self, page_num: int) -> None:
+        """按需解析单页 blocks。
+
+        用于长文档远距离跳转：页面图像可以先出现，但目标页必须尽快补齐
+        BlockOverlay，保证双击翻译可用。
+        """
+        if not self._doc or page_num < 0 or page_num >= self._doc.page_count:
+            return
+        if page_num in self._parsed_pages:
+            self.page_blocks_ready.emit(page_num, self.get_page_blocks(page_num))
+            return
+        if page_num in self._pending_page_parses:
+            return
+
+        self._pending_page_parses.add(page_num)
+        task = _PageBlockParseTask(
+            self._doc, page_num, self._chunker, self._document_generation
+        )
+        task.result.connect(self._on_page_blocks_ready)
+        self._page_parse_pool.start(task)
+
     def request_page_render_async(self, page_num: int, dpi: int = 150) -> None:
         """异步请求渲染页面，完成后通过 page_rendered 信号通知。
 
@@ -717,6 +822,13 @@ class DocumentEngine(BaseService):
             page_num: 页码（0-based）。
             dpi: 渲染分辨率。
         """
+        # 文档已关闭
+        if not self._doc or page_num < 0 or page_num >= self._doc.page_count:
+            return
+
+        # 记录每页最新 DPI。缩放时旧 DPI 任务可能仍在后台运行，完成后必须丢弃。
+        self._latest_render_dpi[page_num] = dpi
+
         # 已在缓存 → 立即通知
         scale = dpi / 72.0
         if self._page_cache and self._filepath:
@@ -724,21 +836,32 @@ class DocumentEngine(BaseService):
             if cached is not None:
                 self.page_rendered.emit(page_num, cached)
                 return
-        # 正在渲染 → 跳过
-        if page_num in self._pending_renders:
-            return
-        # 文档已关闭
-        if not self._doc:
+
+        render_key = (page_num, dpi)
+        # 相同 DPI 正在渲染 → 跳过；不同 DPI 允许并发，新结果会覆盖旧结果。
+        if render_key in self._pending_renders:
             return
 
-        self._pending_renders.add(page_num)
-        task = _PageRenderTask(self._doc, page_num, dpi)
+        self._pending_renders.add(render_key)
+        task = _PageRenderTask(
+            self._doc, page_num, dpi, self._document_generation
+        )
         task.result.connect(self._on_async_page_rendered)
         self._render_pool.start(task)
 
-    def _on_async_page_rendered(self, page_num: int, dpi: int, qpixmap: QPixmap) -> None:
+    def _on_async_page_rendered(
+        self, generation: int, page_num: int, dpi: int, qpixmap: QPixmap
+    ) -> None:
         """异步渲染完成回调（主线程）。"""
-        self._pending_renders.discard(page_num)
+        if generation != self._document_generation:
+            return
+        self._pending_renders.discard((page_num, dpi))
+        if self._latest_render_dpi.get(page_num) != dpi:
+            self.logger.debug(
+                "丢弃过期页面渲染: p%d dpi=%d latest=%s",
+                page_num, dpi, self._latest_render_dpi.get(page_num),
+            )
+            return
         if qpixmap.isNull():
             return
         # 存入 PageCache
@@ -746,6 +869,17 @@ class DocumentEngine(BaseService):
         if self._page_cache and self._filepath:
             self._page_cache.put_pixmap(self._filepath, page_num, scale, qpixmap)
         self.page_rendered.emit(page_num, qpixmap)
+
+    def _on_page_blocks_ready(
+        self, generation: int, page_num: int, blocks: list[DocumentBlock]
+    ) -> None:
+        """按需单页解析完成回调。"""
+        if generation != self._document_generation:
+            return
+        self._pending_page_parses.discard(page_num)
+        self._parsed_page_blocks[page_num] = list(blocks)
+        self._parsed_pages.add(page_num)
+        self.page_blocks_ready.emit(page_num, list(blocks))
 
 
 # =============================================================================
@@ -760,13 +894,14 @@ class _PageRenderTask(QRunnable):
     """
 
     class _Signals(QObject):
-        result = Signal(int, int, QPixmap)  # page_num, dpi, QPixmap
+        result = Signal(int, int, int, QPixmap)  # generation, page_num, dpi, QPixmap
 
-    def __init__(self, doc: fitz.Document, page_num: int, dpi: int) -> None:
+    def __init__(self, doc: fitz.Document, page_num: int, dpi: int, generation: int) -> None:
         super().__init__()
         self._doc = doc
         self._page_num = page_num
         self._dpi = dpi
+        self._generation = generation
         self._signals = self._Signals()
 
     @property
@@ -784,9 +919,38 @@ class _PageRenderTask(QRunnable):
             pix = dl.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             qpixmap = QPixmap()
             qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
-            self._signals.result.emit(self._page_num, self._dpi, qpixmap)
+            self._signals.result.emit(self._generation, self._page_num, self._dpi, qpixmap)
         except Exception:
-            self._signals.result.emit(self._page_num, self._dpi, QPixmap())
+            self._signals.result.emit(self._generation, self._page_num, self._dpi, QPixmap())
+
+
+class _PageBlockParseTask(QRunnable):
+    """后台解析单页块结构。"""
+
+    class _Signals(QObject):
+        result = Signal(int, int, object)  # generation, page_num, list[DocumentBlock]
+
+    def __init__(
+        self, doc: fitz.Document, page_num: int, chunker: DocumentChunker,
+        generation: int,
+    ) -> None:
+        super().__init__()
+        self._doc = doc
+        self._page_num = page_num
+        self._chunker = chunker
+        self._generation = generation
+        self._signals = self._Signals()
+
+    @property
+    def result(self) -> Signal:
+        return self._signals.result
+
+    def run(self) -> None:
+        try:
+            blocks = self._chunker.chunk_page(self._doc, self._page_num)
+            self._signals.result.emit(self._generation, self._page_num, blocks)
+        except Exception:
+            self._signals.result.emit(self._generation, self._page_num, [])
 
 
 # =============================================================================
@@ -803,8 +967,12 @@ class _ParseThread(QThread):
 
     progress = Signal(int, int)
     finished_parsing = Signal(ParseResult)
+    completed_parsing = Signal(ParseResult)
     parse_error = Signal(str)
     formula_blocks_updated = Signal(list)  # list[dict] — 被 MFD 修正的块信息
+    page_blocks_ready = Signal(int, object)  # (page_num, list[DocumentBlock])
+
+    INITIAL_PARSE_PAGES = 8
 
     def __init__(self, filepath: str, chunker: DocumentChunker) -> None:
         super().__init__()
@@ -842,12 +1010,23 @@ class _ParseThread(QThread):
             except Exception:
                 pass
 
-            # ── 阶段一：启发式分块 ──
-            _log.getLogger("ParseThread").info("run: 阶段一 分块...")
+            # ── 阶段一：首屏优先分块 ──
+            _log.getLogger("ParseThread").info("run: 阶段一 首屏优先分块...")
             self.progress.emit(0, page_count)
-            blocks = self._chunker.chunk(doc)
-            _log.getLogger("ParseThread").info("run: 阶段一 完成, blocks=%d", len(blocks))
-            self.progress.emit(page_count, page_count)
+            blocks: list[DocumentBlock] = []
+            initial_pages = min(page_count, self.INITIAL_PARSE_PAGES)
+            for page_num in range(initial_pages):
+                if self.isInterruptionRequested():
+                    doc.close()
+                    return
+                page_blocks = self._chunker.chunk_page(doc, page_num)
+                blocks.extend(page_blocks)
+                self.progress.emit(page_num + 1, page_count)
+
+            _log.getLogger("ParseThread").info(
+                "run: 阶段一 完成, initial_pages=%d, blocks=%d",
+                initial_pages, len(blocks),
+            )
 
             result = ParseResult(
                 filepath=self._filepath,
@@ -856,6 +1035,7 @@ class _ParseThread(QThread):
                 page_count=page_count,
                 toc=toc,
                 blocks=blocks,
+                parsed_pages=list(range(initial_pages)),
             )
             _log.getLogger("ParseThread").info("run: emit finished_parsing...")
             self.finished_parsing.emit(result)
@@ -864,13 +1044,36 @@ class _ParseThread(QThread):
             import logging as _log2
             logger = _log2.getLogger("ParseThread")
 
-            # ── 阶段二：Pix2Text MFD 公式检测（后台，不阻塞阅读） ──
+            # ── 阶段二：后台补齐剩余页面分块 ──
             if self.isInterruptionRequested():
                 logger.info("run: 中断, 退出")
                 doc.close()
                 return
 
-            logger.info("run: 阶段二 MFD...")
+            logger.info("run: 阶段二 继续解析剩余页面...")
+            for page_num in range(initial_pages, page_count):
+                if self.isInterruptionRequested():
+                    logger.info("run: 中断于剩余页面解析, 退出")
+                    doc.close()
+                    return
+                page_blocks = self._chunker.chunk_page(doc, page_num)
+                blocks.extend(page_blocks)
+                self.page_blocks_ready.emit(page_num, page_blocks)
+                self.progress.emit(page_num + 1, page_count)
+
+            completed = ParseResult(
+                filepath=self._filepath,
+                title=title,
+                author=author,
+                page_count=page_count,
+                toc=toc,
+                blocks=list(blocks),
+                parsed_pages=list(range(page_count)),
+            )
+            self.completed_parsing.emit(completed)
+
+            # ── 阶段三：Pix2Text MFD 公式检测（后台，不阻塞阅读） ──
+            logger.info("run: 阶段三 MFD...")
             from src.core.formula_detector import Pix2TextMFDDetector
             try:
                 refined = Pix2TextMFDDetector(dpi=200).apply_to_blocks(blocks, doc)

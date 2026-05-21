@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 
 from PySide6.QtCore import QObject, Signal
 
@@ -43,7 +44,8 @@ class TranslationFlow(QObject):
         super().__init__(parent)
         self._ai_engine = ai_engine
         self._ai_cache = ai_cache
-        self._pending: dict[str, str] = {}  # block_id → doc_hash
+        self._pending: dict[str, tuple[str, str]] = {}  # block_id → (doc_hash, content_hash)
+        self._pending_blocks: dict[str, object] = {}
 
         # 连接 AIEngine 信号
         self._ai_engine.translation_finished.connect(self._on_translation_finished)
@@ -62,10 +64,18 @@ class TranslationFlow(QObject):
             False = 已委托 AIEngine，等待异步回调
         """
         block_id = block.id
+        content = getattr(block, "content", "") or ""
+        if self._is_passthrough_content(content):
+            self.translation_ready.emit(content, block_id)
+            return True
+
+        content_hash = self._ai_cache.hash_text(content)
 
         # 1. 查 AICache（借鉴 Mad Professor 的 RAG 缓存模式）
         if doc_hash:
-            cached = self._ai_cache.get(block_id, doc_hash, "translation")
+            cached = self._ai_cache.get(
+                block_id, doc_hash, "translation", content_hash
+            )
             if cached:
                 _logger.info("TranslationFlow: AICache HIT %s → 直接返回 (%d chars)",
                              block_id, len(cached))
@@ -79,7 +89,8 @@ class TranslationFlow(QObject):
 
         # 3. 记录待处理请求（用于回调时关联 doc_hash）
         if doc_hash:
-            self._pending[block_id] = doc_hash
+            self._pending[block_id] = (doc_hash, content_hash)
+            self._pending_blocks[block_id] = block
 
         # 4. 委托 AIEngine（借鉴 Mad Professor AIResponseThread.start()）
         _logger.info("TranslationFlow: 委托 AIEngine 翻译 %s", block_id)
@@ -93,9 +104,22 @@ class TranslationFlow(QObject):
     def _on_translation_finished(self, full_text: str, block_id: str) -> None:
         """AI 翻译完成 → 存入 AICache → 通知 UI。"""
         # 存入缓存
-        doc_hash = self._pending.pop(block_id, "")
+        doc_hash, content_hash = self._pending.pop(block_id, ("", ""))
+        block = self._pending_blocks.pop(block_id, None)
+        if block is not None and content_hash:
+            current_hash = self._ai_cache.hash_text(
+                getattr(block, "content", "") or ""
+            )
+            if current_hash != content_hash:
+                _logger.info(
+                    "TranslationFlow: 内容已更新，但保留本次翻译结果 %s（%s -> %s）",
+                    block_id, content_hash[:12], current_hash[:12],
+                )
         if doc_hash and full_text:
-            self._ai_cache.put(block_id, doc_hash, "translation", full_text, model="cloud")
+            self._ai_cache.put(
+                block_id, doc_hash, "translation", full_text,
+                model="cloud", content_hash=content_hash,
+            )
 
         # 通知 UI
         self.translation_ready.emit(full_text, block_id)
@@ -103,4 +127,22 @@ class TranslationFlow(QObject):
     def _on_translation_error(self, error_msg: str, block_id: str) -> None:
         """AI 翻译出错 → 清理 pending → 通知 UI。"""
         self._pending.pop(block_id, None)
+        self._pending_blocks.pop(block_id, None)
         self.translation_error.emit(error_msg, block_id)
+
+    @staticmethod
+    def _is_passthrough_content(text: str) -> bool:
+        """纯公式、页眉页脚、编号类短文本不调用云端，直接显示原文。"""
+        stripped = text.strip()
+        if not stripped:
+            return True
+        if len(stripped) <= 3:
+            return True
+        alpha = len(re.findall(r"[A-Za-z]", stripped))
+        cjk = len(re.findall(r"[\u4e00-\u9fff]", stripped))
+        if cjk > 0:
+            return True
+        mathish = len(re.findall(r"[=+\-*/^_{}\\()[\]<>∑∫√≤≥≈∞]", stripped))
+        if len(stripped) <= 80 and alpha <= 8 and mathish >= max(1, len(stripped) // 5):
+            return True
+        return False

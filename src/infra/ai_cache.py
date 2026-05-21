@@ -4,13 +4,14 @@ SQLite-backed persistent cache for AI results (translation, OCR, summary).
 Motivation: avoid repeated LLM calls when the user opens/closes the same
 document or re-clicks the same paragraph.  Typical cache hit saves 2-5 s.
 
-Cache key: (block_id, doc_hash, result_type)
+Cache key: (block_id, doc_hash, result_type, content_hash)
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+import hashlib
 
 from src.infra.file_hash import compute_sha256
 import time
@@ -36,13 +37,15 @@ class AICache:
                 block_id    TEXT NOT NULL,
                 doc_hash    TEXT NOT NULL,
                 result_type TEXT NOT NULL CHECK(result_type IN ('translation','ocr','summary','answer')),
+                content_hash TEXT NOT NULL DEFAULT '',
                 content     TEXT NOT NULL,
                 model       TEXT DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (block_id, doc_hash, result_type)
+                PRIMARY KEY (block_id, doc_hash, result_type, content_hash)
             )
         """)
         self._conn.commit()
+        self._migrate_content_hash()
         self._hits: int = 0
         self._misses: int = 0
         _logger.info("AICache: 初始化 %s", db_path)
@@ -59,41 +62,98 @@ class AICache:
         _logger.debug("AICache: hash_file(%s) = %s (%.2fs)", Path(filepath).name, result[:16], time.perf_counter() - t0)
         return result
 
-    def get(self, block_id: str, doc_hash: str, result_type: str) -> str | None:
+    @staticmethod
+    def hash_text(content: str) -> str:
+        """Compute a stable content hash for cache invalidation."""
+        return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+
+    def get(
+        self, block_id: str, doc_hash: str, result_type: str,
+        content_hash: str = "",
+    ) -> str | None:
         """Return cached result or None."""
         row = self._conn.execute(
-            "SELECT content, model, created_at FROM ai_cache WHERE block_id=? AND doc_hash=? AND result_type=?",
-            (block_id, doc_hash, result_type),
+            """
+            SELECT content, model, created_at FROM ai_cache
+            WHERE block_id=? AND doc_hash=? AND result_type=? AND content_hash=?
+            """,
+            (block_id, doc_hash, result_type, content_hash),
         ).fetchone()
         if row is None:
+            if result_type == "translation" and content_hash:
+                legacy = self._get_legacy_translation(block_id, doc_hash)
+                if legacy is not None:
+                    return legacy
             self._misses += 1
-            _logger.debug("AICache: MISS %s/%s/%s", block_id, doc_hash[:12], result_type)
+            _logger.debug(
+                "AICache: MISS %s/%s/%s/%s",
+                block_id, doc_hash[:12], result_type, content_hash[:12],
+            )
             return None
 
         self._hits += 1
         hr = 100 * self._hits / (self._hits + self._misses) if (self._hits + self._misses) > 0 else 0
-        _logger.info("AICache: HIT  %s/%s/%s (model=%s, created=%s, hit_rate=%.0f%%)",
-                     block_id, doc_hash[:12], result_type, row[1], row[2], hr)
+        _logger.info(
+            "AICache: HIT  %s/%s/%s/%s (model=%s, created=%s, hit_rate=%.0f%%)",
+            block_id, doc_hash[:12], result_type, content_hash[:12], row[1], row[2], hr,
+        )
         return row[0]
 
-    def put(self, block_id: str, doc_hash: str, result_type: str, content: str, model: str = "") -> None:
+    def _get_legacy_translation(self, block_id: str, doc_hash: str) -> str | None:
+        """Best-effort fallback for pre-content-hash translation rows."""
+        row = self._conn.execute(
+            """
+            SELECT content, model, created_at FROM ai_cache
+            WHERE block_id=? AND doc_hash=? AND result_type='translation'
+              AND content_hash=''
+            """,
+            (block_id, doc_hash),
+        ).fetchone()
+        if row is None:
+            return None
+        self._hits += 1
+        hr = 100 * self._hits / (self._hits + self._misses) if (self._hits + self._misses) > 0 else 0
+        _logger.info(
+            "AICache: HIT legacy %s/%s/translation (model=%s, created=%s, hit_rate=%.0f%%)",
+            block_id, doc_hash[:12], row[1], row[2], hr,
+        )
+        return row[0]
+
+    def put(
+        self, block_id: str, doc_hash: str, result_type: str, content: str,
+        model: str = "", content_hash: str = "",
+    ) -> None:
         """Insert or update a cached result."""
-        _logger.info("AICache: PUT %s/%s/%s (model=%s, len=%d)",
-                     block_id, doc_hash[:12], result_type, model, len(content))
+        _logger.info(
+            "AICache: PUT %s/%s/%s/%s (model=%s, len=%d)",
+            block_id, doc_hash[:12], result_type, content_hash[:12], model, len(content),
+        )
         self._conn.execute(
             """INSERT OR REPLACE INTO ai_cache
-               (block_id, doc_hash, result_type, content, model, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (block_id, doc_hash, result_type, content, model, datetime.now(timezone.utc).isoformat()),
+               (block_id, doc_hash, result_type, content_hash, content, model, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                block_id, doc_hash, result_type, content_hash, content, model,
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
         self._conn.commit()
 
-    def remove(self, block_id: str, doc_hash: str, result_type: str) -> None:
+    def remove(
+        self, block_id: str, doc_hash: str, result_type: str,
+        content_hash: str = "",
+    ) -> None:
         """Remove a single cache entry."""
-        _logger.debug("AICache: REMOVE %s/%s/%s", block_id, doc_hash[:12], result_type)
+        _logger.debug(
+            "AICache: REMOVE %s/%s/%s/%s",
+            block_id, doc_hash[:12], result_type, content_hash[:12],
+        )
         self._conn.execute(
-            "DELETE FROM ai_cache WHERE block_id=? AND doc_hash=? AND result_type=?",
-            (block_id, doc_hash, result_type),
+            """
+            DELETE FROM ai_cache
+            WHERE block_id=? AND doc_hash=? AND result_type=? AND content_hash=?
+            """,
+            (block_id, doc_hash, result_type, content_hash),
         )
         self._conn.commit()
 
@@ -138,3 +198,33 @@ class AICache:
                      self._hits, self._misses,
                      100 * self._hits / (self._hits + self._misses) if (self._hits + self._misses) > 0 else 0)
         self._conn.close()
+
+    def _migrate_content_hash(self) -> None:
+        """Add content_hash to older cache DBs without preserving unsafe legacy hits."""
+        columns = self._conn.execute("PRAGMA table_info(ai_cache)").fetchall()
+        column_names = {row[1] for row in columns}
+        if "content_hash" in column_names:
+            return
+
+        self._conn.execute("ALTER TABLE ai_cache RENAME TO ai_cache_legacy")
+        self._conn.execute("""
+            CREATE TABLE ai_cache (
+                block_id    TEXT NOT NULL,
+                doc_hash    TEXT NOT NULL,
+                result_type TEXT NOT NULL CHECK(result_type IN ('translation','ocr','summary','answer')),
+                content_hash TEXT NOT NULL DEFAULT '',
+                content     TEXT NOT NULL,
+                model       TEXT DEFAULT '',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (block_id, doc_hash, result_type, content_hash)
+            )
+        """)
+        self._conn.execute("""
+            INSERT OR REPLACE INTO ai_cache
+            (block_id, doc_hash, result_type, content_hash, content, model, created_at)
+            SELECT block_id, doc_hash, result_type, '', content, model, created_at
+            FROM ai_cache_legacy
+            WHERE result_type != 'translation'
+        """)
+        self._conn.execute("DROP TABLE ai_cache_legacy")
+        self._conn.commit()

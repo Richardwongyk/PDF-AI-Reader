@@ -8,6 +8,7 @@ MainWindow: 管理全局布局（菜单栏/工具栏/状态栏/中央阅读区/�
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
@@ -102,6 +103,14 @@ class MainWindow(QMainWindow):
         # 当前文档状态
         self._current_doc_hash: str = ""
         self._current_blocks: list[DocumentBlock] = []
+        self._blocks_by_id: dict[str, DocumentBlock] = {}
+        self._loaded_block_pages: set[int] = set()
+        self._pending_page_blocks: dict[int, list[DocumentBlock]] = {}
+        self._viewer_document_loaded: bool = False
+        self._has_native_toc: bool = False
+        self._active_translation_blocks: set[str] = set()
+        self._last_user_translation_at: float = 0.0
+        self._pymupdf4llm_pending_result: object | None = None
 
         self._init_ui()
         self._connect_signals()
@@ -264,6 +273,7 @@ class MainWindow(QMainWindow):
 
         # DocumentEngine 信号（DocumentFlow 未覆盖的）
         self._doc_engine.formula_blocks_updated.connect(self._on_formula_blocks_updated)
+        self._doc_engine.page_blocks_ready.connect(self._on_page_blocks_ready)
 
         # KnowledgeEngine 信号
         self._knowledge_engine.build_progress.connect(self._on_kb_progress)
@@ -333,6 +343,14 @@ class MainWindow(QMainWindow):
         self._pdf_viewer.clear()
         self._current_doc_hash = ""
         self._current_blocks.clear()
+        self._blocks_by_id.clear()
+        self._loaded_block_pages.clear()
+        self._pending_page_blocks.clear()
+        self._active_translation_blocks.clear()
+        self._last_user_translation_at = 0.0
+        self._pymupdf4llm_pending_result = None
+        self._viewer_document_loaded = False
+        self._has_native_toc = False
         self._status_page_label.setText("就绪")
         self.setWindowTitle("PDF AI Reader")
 
@@ -347,7 +365,12 @@ class MainWindow(QMainWindow):
         self.logger.info("_on_document_opened: %s (%d pages, %d blocks)",
                          result.filepath, result.page_count, len(result.blocks))
 
-        self._current_blocks = result.blocks
+        self._current_blocks = list(result.blocks)
+        self._blocks_by_id = {b.id: b for b in self._current_blocks}
+        self._loaded_block_pages = set(getattr(result, "parsed_pages", []))
+        if not self._loaded_block_pages:
+            self._loaded_block_pages = {b.page_num for b in self._current_blocks}
+        self._has_native_toc = bool(result.toc)
         self._current_doc_hash = self._document_flow.current_hash
         self._ask_flow.set_doc_hash(self._current_doc_hash)
         self._status_progress.setVisible(False)
@@ -356,29 +379,67 @@ class MainWindow(QMainWindow):
         )
         self.setWindowTitle(f"{result.title or Path(result.filepath).name} — PDF AI Reader")
 
-        # 加载到 PdfViewer
-        QApplication.processEvents()
+        # 加载到 PdfViewer。不要在这里 processEvents；长文档后台页块信号可能插队拖慢首屏。
         self._pdf_viewer.load_document(result)
-        QApplication.processEvents()
+        for page_num, page_blocks in sorted(self._pending_page_blocks.items()):
+            if page_num not in self._loaded_block_pages:
+                self._loaded_block_pages.add(page_num)
+                self._current_blocks = [
+                    block for block in self._current_blocks
+                    if block.page_num != page_num
+                ]
+                self._current_blocks.extend(page_blocks)
+                for block in page_blocks:
+                    self._blocks_by_id[block.id] = block
+            self._pdf_viewer.update_page_blocks(page_num, page_blocks)
+        self._pending_page_blocks.clear()
+        self._viewer_document_loaded = True
 
         # 加载目录
         if result.toc:
             self._navigator.load_toc(result.toc)
-        else:
+        elif result.blocks:
             self._navigator.generate_toc_from_blocks(result.blocks)
 
-        # 状态栏
         render_engine = "PyMuPDF"
-        if self._knowledge_engine.check_exists(self._current_doc_hash):
-            self._status_model_label.setText(f"📚 知识库就绪 | 🖥️ {render_engine}")
-        else:
-            self._status_model_label.setText(f"🔨 构建中... | 🖥️ {render_engine}")
+        self._status_model_label.setText(f"检查知识库... | {render_engine}")
+        QTimer.singleShot(0, self._refresh_knowledge_status)
 
         elapsed = time.time() - start
         self.logger.info("文档加载完成，耗时 %.2fs", elapsed)
 
-        # PyMuPDF4LLM 异步增强
-        QTimer.singleShot(2000, lambda: self._run_pymupdf4llm_enhance(result))
+        self._pymupdf4llm_pending_result = result
+        QTimer.singleShot(15000, self._maybe_run_pymupdf4llm_enhance)
+
+    def _refresh_knowledge_status(self) -> None:
+        """延后检查知识库状态，避免卡住长文档首屏加载。"""
+        if not self._current_doc_hash:
+            return
+        render_engine = "PyMuPDF"
+        if self._knowledge_engine.check_exists(self._current_doc_hash):
+            self._status_model_label.setText(f"知识库就绪 | {render_engine}")
+        else:
+            self._status_model_label.setText(f"知识库构建中... | {render_engine}")
+
+    def _on_page_blocks_ready(self, page_num: int, blocks: list[DocumentBlock]) -> None:
+        """长文档后台补齐某页 blocks。"""
+        page_blocks = list(blocks)
+        if page_num in self._loaded_block_pages:
+            return
+        self._loaded_block_pages.add(page_num)
+        self._current_blocks = [
+            block for block in self._current_blocks
+            if block.page_num != page_num
+        ]
+        self._current_blocks.extend(page_blocks)
+        for block in page_blocks:
+            self._blocks_by_id[block.id] = block
+        if self._viewer_document_loaded:
+            self._pdf_viewer.update_page_blocks(page_num, page_blocks)
+        else:
+            self._pending_page_blocks[page_num] = page_blocks
+        if not self._has_native_toc and any(b.block_type == BlockType.HEADING for b in page_blocks):
+            self._navigator.generate_toc_from_blocks(self._current_blocks)
 
     def _on_parse_progress(self, current: int, total: int) -> None:
         """解析进度更新。"""
@@ -468,6 +529,7 @@ class MainWindow(QMainWindow):
     def _on_block_translate(self, block_id: str) -> None:
         """右键 → 翻译段落（委托 TranslationFlow 协调器）。"""
         self.logger.info("翻译请求: %s", block_id)
+        self._last_user_translation_at = time.monotonic()
         block = self._find_block(block_id)
         split = self._pdf_viewer.open_split_widget(block_id, SplitMode.TRANSLATION)
 
@@ -482,6 +544,7 @@ class MainWindow(QMainWindow):
         # 委托 TranslationFlow（内部处理 AICache 检查 + AIEngine 调用）
         hit = self._translate_flow.request_translation(block, self._current_doc_hash)
         if not hit:
+            self._active_translation_blocks.add(block_id)
             split.set_busy(True)
 
     def _on_block_question(self, block_id: str) -> None:
@@ -528,6 +591,7 @@ class MainWindow(QMainWindow):
 
     def _on_translation_ready(self, full_text: str, block_id: str) -> None:
         """翻译就绪（来自 TranslationFlow，缓存或 AI）——渲染 Markdown/LaTeX。"""
+        self._active_translation_blocks.discard(block_id)
         split = self._pdf_viewer.find_split_widget(block_id)
         if split:
             text = full_text if full_text else split._current_answer
@@ -546,6 +610,7 @@ class MainWindow(QMainWindow):
 
     def _on_translation_error(self, message: str, block_id: str) -> None:
         """翻译出错。"""
+        self._active_translation_blocks.discard(block_id)
         self.logger.error("翻译失败 block=%s: %s", block_id, message)
         split = self._pdf_viewer.find_split_widget(block_id)
         if split:
@@ -660,10 +725,34 @@ class MainWindow(QMainWindow):
             "嵌入模型: BGE-M3",
         )
 
+    def _maybe_run_pymupdf4llm_enhance(self) -> None:
+        """只在阅读空闲时启动增强解析，避免打断打开/滚动/翻译。"""
+        result = self._pymupdf4llm_pending_result
+        if result is None or not self._current_doc_hash:
+            return
+        now = time.monotonic()
+        if self._active_translation_blocks or now - self._last_user_translation_at < 20.0:
+            QTimer.singleShot(10000, self._maybe_run_pymupdf4llm_enhance)
+            return
+        self._pymupdf4llm_pending_result = None
+        self._run_pymupdf4llm_enhance(result)
+
     def _run_pymupdf4llm_enhance(self, result) -> None:
         """启动 QThread 运行 PyMuPDF4LLM 增强解析，完成后通过 Signal 回到主线程。"""
+        if result is None:
+            return
+        if result.filepath != getattr(self._doc_engine, "_filepath", ""):
+            return
+        if getattr(result, "page_count", 0) > 200:
+            self.logger.info(
+                "PyMuPDF4LLM 增强跳过: 长文档 %d 页，优先保证打开/滚动/翻译速度",
+                result.page_count,
+            )
+            return
         # 仅拷贝非图片块，避免跨线程读写 UI 持有的原对象
         text_blocks = [b for b in result.blocks if b.block_type != BlockType.IMAGE]
+        if not text_blocks:
+            return
         thread = _PyMuPDF4LLMThread(result.filepath, text_blocks)
         thread.finished_signal.connect(self._on_pymupdf4llm_finished)
         thread.finished.connect(lambda t=thread: self._ai_engine._active_threads.remove(t) if t in self._ai_engine._active_threads else None)
@@ -672,9 +761,21 @@ class MainWindow(QMainWindow):
 
     def _on_pymupdf4llm_finished(self, enhanced_data: list[tuple[str, str]]) -> None:
         """主线程槽函数：安全更新 block.content。"""
+        if self._active_translation_blocks:
+            self.logger.info(
+                "PyMuPDF4LLM 增强结果暂不应用: %d 个翻译进行中",
+                len(self._active_translation_blocks),
+            )
+            QTimer.singleShot(
+                10000,
+                lambda data=list(enhanced_data): self._on_pymupdf4llm_finished(data),
+            )
+            return
         update_map = dict(enhanced_data)
         for block in self._current_blocks:
             if block.id in update_map:
+                if block.id in self._active_translation_blocks:
+                    continue
                 block.content = update_map[block.id]
                 block.metadata["enhanced_by"] = "pymupdf4llm"
         self.logger.info("PyMuPDF4LLM 增强完成: %d 个块", len(enhanced_data))
@@ -725,8 +826,12 @@ class MainWindow(QMainWindow):
         Returns:
             DocumentBlock 或 None。
         """
+        block = self._blocks_by_id.get(block_id)
+        if block is not None:
+            return block
         for block in self._current_blocks:
             if block.id == block_id:
+                self._blocks_by_id[block_id] = block
                 return block
         return None
 

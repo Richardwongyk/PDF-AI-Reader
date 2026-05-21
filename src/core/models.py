@@ -170,6 +170,7 @@ class ParseResult(BaseModel):
     page_count: int = 0
     toc: list[dict] = Field(default_factory=list)      # 原生大纲/目录
     blocks: list[DocumentBlock] = Field(default_factory=list)
+    parsed_pages: list[int] = Field(default_factory=list)  # 本次结果已完成块解析的页码
 
 
 class KnowledgeStatus(BaseModel):

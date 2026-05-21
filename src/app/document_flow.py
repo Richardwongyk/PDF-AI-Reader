@@ -54,6 +54,7 @@ class DocumentFlow(QObject):
 
         # 连接 DocumentEngine 信号（借鉴 DataManager 连接 Pipeline 信号模式）
         self._doc_engine.parse_finished.connect(self._on_parse_finished)
+        self._doc_engine.parse_completed.connect(self._on_parse_completed)
         self._doc_engine.parse_progress.connect(self.parse_progress)
         self._doc_engine.parse_error.connect(self.parse_error)
 
@@ -96,19 +97,12 @@ class DocumentFlow(QObject):
     # ------------------------------------------------------------------
 
     def _on_parse_finished(self, result: object) -> None:
-        """解析完成 → 构建知识库 + 更新术语表 → 通知 UI。"""
-        _logger.info("DocumentFlow: 解析完成 %s (%d pages, %d blocks)",
+        """首批页面解析完成 → 立即通知 UI。"""
+        _logger.info("DocumentFlow: 首批解析完成 %s (%d pages, %d blocks)",
                      result.filepath, result.page_count, len(result.blocks))
 
-        from src.data.chroma_repo import ChromaRepo
-        self._current_hash = ChromaRepo.compute_doc_hash(result.filepath)
-
-        # 知识库构建（借鉴 DataManager._add_paper_vector_store 模式）
-        if not self._knowledge_engine.check_exists(self._current_hash):
-            _logger.info("DocumentFlow: 构建知识库...")
-            self._knowledge_engine.build_knowledge_base(
-                result.blocks, self._current_hash
-            )
+        from src.infra.file_hash import compute_sha256
+        self._current_hash = compute_sha256(result.filepath)[:16]
 
         # 更新术语表
         self._ai_engine.translation_service.update_glossary(
@@ -116,3 +110,17 @@ class DocumentFlow(QObject):
         )
 
         self.document_opened.emit(result)
+
+    def _on_parse_completed(self, result: object) -> None:
+        """全量解析完成 → 构建知识库。"""
+        _logger.info("DocumentFlow: 全量解析完成 %s (%d blocks)",
+                     result.filepath, len(result.blocks))
+        if not self._current_hash:
+            return
+
+        # 知识库构建（借鉴 DataManager._add_paper_vector_store 模式）
+        if not self._knowledge_engine.check_exists(self._current_hash):
+            _logger.info("DocumentFlow: 构建知识库...")
+            self._knowledge_engine.build_knowledge_base(
+                result.blocks, self._current_hash
+            )

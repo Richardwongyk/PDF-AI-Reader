@@ -97,13 +97,12 @@ class PageCache:
         render_ms = (time.perf_counter() - t0) * 1000
 
         with self._lock:
-            estimated_mb = (pix.width * pix.height * 4) / (1024 * 1024)
+            estimated_mb = self._estimate_pixmap_mb(pixmap)
             evicted = 0
             while self.current_size_mb + estimated_mb > self.max_size_mb and self.cache:
                 self._evict_oldest()
                 evicted += 1
-            self._insert(key, pixmap)
-            self.current_size_mb += estimated_mb
+            self._insert(key, pixmap, estimated_mb)
             self.last_accessed[key] = time.time()
 
         _logger.debug("PageCache: PUT %s (%.0fms, %.1fMB, evicted=%d, total=%.1fMB/%d)",
@@ -113,14 +112,13 @@ class PageCache:
     def put_pixmap(self, doc_path: str, page_num: int, scale_factor: float, pixmap: QPixmap) -> None:
         """直接存入已渲染的 QPixmap（用于异步渲染回调路径）。"""
         key = self.get_cache_key(doc_path, page_num, scale_factor)
-        estimated_mb = (pixmap.width() * pixmap.height() * 4) / (1024 * 1024)
+        estimated_mb = self._estimate_pixmap_mb(pixmap)
         with self._lock:
             evicted = 0
             while self.current_size_mb + estimated_mb > self.max_size_mb and self.cache:
                 self._evict_oldest()
                 evicted += 1
-            self._insert(key, pixmap)
-            self.current_size_mb += estimated_mb
+            self._insert(key, pixmap, estimated_mb)
             self.last_accessed[key] = time.time()
         if evicted:
             _logger.debug("PageCache: put_pixmap %s evicted=%d", key, evicted)
@@ -152,19 +150,30 @@ class PageCache:
     # Internal
     # ------------------------------------------------------------------
 
-    def _insert(self, key: str, pixmap: QPixmap) -> None:
+    def _insert(self, key: str, pixmap: QPixmap, estimated_mb: float | None = None) -> None:
+        if key in self.cache:
+            self.current_size_mb -= self._estimate_pixmap_mb(self.cache[key])
         self.cache[key] = pixmap
+        self.current_size_mb += estimated_mb if estimated_mb is not None else self._estimate_pixmap_mb(pixmap)
+        if self.current_size_mb < 0 and not self.cache:
+            self.current_size_mb = 0.0
 
     def _remove_key(self, key: str) -> None:
         if key in self.cache:
             pixmap = self.cache[key]
-            mb = (pixmap.width() * pixmap.height() * 4) / (1024 * 1024)
+            mb = self._estimate_pixmap_mb(pixmap)
             self.current_size_mb -= mb
             del self.cache[key]
             self.last_accessed.pop(key, None)
+            if self.current_size_mb < 0 and not self.cache:
+                self.current_size_mb = 0.0
 
     def _evict_oldest(self) -> None:
         if not self.last_accessed:
             return
         oldest_key = min(self.last_accessed.items(), key=lambda x: x[1])[0]
         self._remove_key(oldest_key)
+
+    @staticmethod
+    def _estimate_pixmap_mb(pixmap: QPixmap) -> float:
+        return (pixmap.width() * pixmap.height() * 4) / (1024 * 1024)

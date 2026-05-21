@@ -505,10 +505,16 @@ class TranslationService:
         # 路由选择
         client = self._router.route(TaskType.TRANSLATION)
 
+        max_tokens = self._estimate_translation_tokens(protected_text)
+
         if stream:
-            return client.generate_stream(messages, temperature=0.1, max_tokens=8192)
+            return client.generate_stream(
+                messages, temperature=0.1, max_tokens=max_tokens, timeout=60
+            )
         else:
-            raw = client.generate(messages, temperature=0.1, max_tokens=8192)
+            raw = client.generate(
+                messages, temperature=0.1, max_tokens=max_tokens, timeout=60
+            )
             return self._post_process(raw)
 
     def translate_sentences(
@@ -614,6 +620,11 @@ class TranslationService:
         messages.append({"role": "user", "content": text})
 
         return messages
+
+    @staticmethod
+    def _estimate_translation_tokens(text: str) -> int:
+        """给翻译任务设置紧凑输出上限，减少云端首 token 和尾部等待时间。"""
+        return min(2048, max(192, int(len(text) * 1.8) + 96))
 
     def _format_glossary(self) -> str:
         """将术语表格式化为 Prompt 可注入的字符串。
