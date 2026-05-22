@@ -14,8 +14,6 @@ Usage:
     flow.request_translation(block, doc_hash)
 """
 
-from __future__ import annotations
-
 import logging
 import re
 

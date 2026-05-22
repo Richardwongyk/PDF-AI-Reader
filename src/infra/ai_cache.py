@@ -7,8 +7,6 @@ document or re-clicks the same paragraph.  Typical cache hit saves 2-5 s.
 Cache key: (block_id, doc_hash, result_type, content_hash)
 """
 
-from __future__ import annotations
-
 import logging
 import sqlite3
 import hashlib

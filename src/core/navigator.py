@@ -4,10 +4,9 @@
 Navigator: 管理文档的导航结构（目录树和书签列表）。
 """
 
-from __future__ import annotations
-
 import time
 import uuid
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
@@ -45,11 +44,11 @@ class Navigator(BaseService):
         return list(self._bookmarks)
 
     @property
-    def toc(self) -> list[dict]:
+    def toc(self) -> list[dict[str, Any]]:
         """获取当前目录树。"""
         return list(self._toc)
 
-    def load_toc(self, raw_toc: list[dict]) -> None:
+    def load_toc(self, raw_toc: list[dict[str, Any]]) -> None:
         """加载 PDF 原生大纲数据。
 
         Args:
@@ -58,7 +57,7 @@ class Navigator(BaseService):
         self._toc = raw_toc
         self.toc_ready.emit(self._toc)
 
-    def generate_toc_from_blocks(self, blocks: list[DocumentBlock]) -> list[dict]:
+    def generate_toc_from_blocks(self, blocks: list[DocumentBlock]) -> list[dict[str, Any]]:
         """当 PDF 无原生大纲时，从标题块推断目录结构。
 
         提取所有 block_type="heading" 的块，
@@ -76,7 +75,7 @@ class Navigator(BaseService):
             self.toc_ready.emit([])
             return []
 
-        toc: list[dict] = []
+        toc: list[dict[str, Any]] = []
         for h in headings:
             toc.append({
                 "title": h.content,
@@ -140,7 +139,7 @@ class Navigator(BaseService):
         self._bookmarks = new_order
         self.bookmarks_changed.emit(list(self._bookmarks))
 
-    def suggest_ai_bookmarks(self, blocks: list[DocumentBlock]) -> list[dict]:
+    def suggest_ai_bookmarks(self, blocks: list[DocumentBlock]) -> list[dict[str, Any]]:
         """AI 扫描全文，自动建议重要节点作为书签。
 
         策略：
@@ -153,7 +152,7 @@ class Navigator(BaseService):
         Returns:
             建议书签列表 [{"title": "...", "page": 0}, ...]。
         """
-        suggestions: list[dict] = []
+        suggestions: list[dict[str, Any]] = []
 
         # 收集标题块
         headings = [b for b in blocks if b.block_type.value == "heading"]

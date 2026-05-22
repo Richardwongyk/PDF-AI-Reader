@@ -5,14 +5,12 @@ ChromaDB 向量存储仓库。
 每个 PDF 文档对应一个独立的 Collection。
 """
 
-from __future__ import annotations
-
-from src.infra.file_hash import compute_sha256
 import os
 from typing import Any
 
 import chromadb
-from chromadb.api.types import Embedding
+
+from src.infra.file_hash import compute_sha256
 
 
 class ChromaRepo:

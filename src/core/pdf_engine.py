@@ -6,8 +6,6 @@ DocumentChunker: 智能段落分割与公式识别。
 TextPreprocessor: 翻译前文本清洗与公式保护。
 """
 
-from __future__ import annotations
-
 import re
 from typing import Any
 
@@ -249,7 +247,7 @@ class DocumentChunker:
                 continue
 
             # 收集 spans
-            spans: list[dict] = []
+            spans: list[dict[str, Any]] = []
             for line in block.get("lines", []):
                 spans.extend(line.get("spans", []))
             if not spans:
@@ -315,7 +313,7 @@ class DocumentChunker:
             indices[min_col] += 1
         return result
 
-    def _is_formula_from_spans(self, spans: list) -> bool:
+    def _is_formula_from_spans(self, spans: list[dict[str, Any]]) -> bool:
         """基于 span 级别检测数学公式。"""
         full_text = "".join(s.get("text", "") for s in spans)
         fonts = [s.get("font", "") for s in spans]

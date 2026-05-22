@@ -5,8 +5,6 @@
 提供术语的增删改查、生成翻译 Prompt 中使用的术语映射字符串。
 """
 
-from __future__ import annotations
-
 import logging
 
 from src.core.models import GlossaryEntry

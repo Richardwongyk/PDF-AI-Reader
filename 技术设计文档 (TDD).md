@@ -64,7 +64,7 @@
 
 | 特性 | PEP | 项目中的应用 |
 |------|-----|-------------|
-| 延迟注解求值 | PEP 649/749 | 默认行为；无需 `from __future__ import annotations`（代码仍保留以兼容 3.13） |
+| 延迟注解求值 | PEP 649/749 | 默认行为；代码不再使用 `from __future__ import annotations`，类型注解按 Python 3.14 原生语义书写 |
 | T-Strings | PEP 750 | 可用于 Prompt 模板安全构建（`t"..."`），避免注入 |
 | 无 GIL 构建 | PEP 779 | 后台嵌入/推理时可真正利用多核（需编译时启用 `--disable-gil`） |
 | 多解释器 | PEP 734 | `concurrent.interpreters` 可用于隔离模型调用 |

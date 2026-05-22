@@ -5,8 +5,6 @@
 全局配色通过 QApplication.setPalette() 实现，定制组件各自在本地设置 QSS。
 """
 
-from __future__ import annotations
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QWidget

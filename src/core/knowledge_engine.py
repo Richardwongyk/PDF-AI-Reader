@@ -5,8 +5,6 @@ EmbeddingService: 文本向量化（通过 Ollama BGE-M3）
 KnowledgeEngine: 知识库构建与语义检索的协调者
 """
 
-from __future__ import annotations
-
 from PySide6.QtCore import QObject, QReadLocker, QReadWriteLock, QThreadPool, QWriteLocker, Signal
 
 from src.core.base_service import BaseService
@@ -18,7 +16,7 @@ from src.core.models import (
 from src.data.chroma_repo import ChromaRepo
 
 # 嵌入客户端接口（避免循环依赖，仅用于类型注解）
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.core.ai_engine import BaseLLMClient
 
@@ -188,7 +186,7 @@ class KnowledgeEngine(BaseService):
         doc_hash: str,
         top_k: int = 3,
         exclude_ids: list[str] | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """从知识库中检索与查询最相关的块。
 
         工作流程：

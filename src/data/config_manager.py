@@ -5,11 +5,10 @@
 修改后发射 config_changed 信号通知所有订阅模块。
 """
 
-from __future__ import annotations
-
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 import yaml
 from PySide6.QtCore import QObject, Signal
@@ -68,7 +67,7 @@ class ConfigManager(QObject):
         yaml_ok = True
         try:
             with open(self._path, "r", encoding="utf-8") as f:
-                raw: dict = yaml.safe_load(f) or {}
+                raw: dict[str, Any] = yaml.safe_load(f) or {}
         except (yaml.YAMLError, OSError) as e:
             _logger.warning("配置文件 YAML 解析失败: %s", e)
             yaml_ok = False
@@ -109,7 +108,7 @@ class ConfigManager(QObject):
         Args:
             config: 要保存的配置对象。
         """
-        data: dict = {
+        data: dict[str, Any] = {
             "model": config.model.model_dump(),
             "routing": config.routing.model_dump(),
             "ui": config.ui.model_dump(),
@@ -127,7 +126,7 @@ class ConfigManager(QObject):
         """
         return self._config.model_copy(deep=True)
 
-    def update(self, partial: dict) -> None:
+    def update(self, partial: dict[str, Any]) -> None:
         """部分更新配置（深度合并）。
 
         例如 update({"ui": {"theme": "dark"}}) 仅修改主题，
@@ -138,7 +137,7 @@ class ConfigManager(QObject):
         """
         full = self._config.model_dump()
 
-        def _deep_merge(base: dict, overrides: dict) -> None:
+        def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> None:
             """递归合并 overrides 到 base。"""
             for key, value in overrides.items():
                 if key in base and isinstance(base[key], dict) and isinstance(value, dict):

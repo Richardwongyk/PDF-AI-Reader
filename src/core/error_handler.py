@@ -7,14 +7,14 @@ Provides:
   - Global exception hook setup (replaces the ad-hoc hook in main.py)
 """
 
-from __future__ import annotations
-
 import logging
 import sys
 import traceback
 from collections.abc import Callable
 from enum import Enum
-from typing import Any
+from types import TracebackType
+
+from PySide6.QtWidgets import QWidget
 
 _logger = logging.getLogger(__name__)
 
@@ -39,24 +39,29 @@ class ErrorHandler:
             handler.handle(e, "loading PDF", ErrorSeverity.ERROR)
     """
 
-    def __init__(self, parent_widget: Any | None = None) -> None:
+    _ExceptionHook = Callable[[type[BaseException], BaseException, TracebackType | None], None]
+    _ErrorCallback = Callable[[BaseException, str], None]
+
+    def __init__(self, parent_widget: QWidget | None = None) -> None:
         self._parent_widget = parent_widget
-        self._error_callbacks: dict[type, Callable] = {}
+        self._error_callbacks: dict[type[BaseException], ErrorHandler._ErrorCallback] = {}
         self._show_dialogs: bool = True
 
-    def set_parent_widget(self, widget: Any) -> None:
+    def set_parent_widget(self, widget: QWidget) -> None:
         self._parent_widget = widget
 
     def set_show_dialogs(self, show: bool) -> None:
         self._show_dialogs = show
 
-    def register_callback(self, error_type: type, callback: Callable) -> None:
+    def register_callback(
+        self, error_type: type[BaseException], callback: _ErrorCallback
+    ) -> None:
         """Register a type-specific error callback."""
         self._error_callbacks[error_type] = callback
 
     def handle(
         self,
-        error: Exception,
+        error: BaseException,
         context: str = "",
         severity: ErrorSeverity = ErrorSeverity.ERROR,
         show_dialog: bool | None = None,
@@ -89,9 +94,9 @@ class ErrorHandler:
 
     def handle_exception(
         self,
-        exc_type: type,
-        exc_value: Exception,
-        exc_tb: Any,
+        exc_type: type[BaseException],
+        exc_value: BaseException,
+        exc_tb: TracebackType | None,
         context: str = "",
     ) -> None:
         """Handle an uncaught exception (sys.excepthook callback)."""
@@ -99,10 +104,14 @@ class ErrorHandler:
         _logger.critical("Uncaught exception in %s:\n%s", context, tb_text)
         self.handle(exc_value, f"Uncaught exception in {context}", ErrorSeverity.CRITICAL)
 
-    def create_exception_hook(self, context: str = "application") -> Callable:
+    def create_exception_hook(self, context: str = "application") -> _ExceptionHook:
         """Create a sys.excepthook-compatible function."""
 
-        def _hook(exc_type: type, exc_value: BaseException, exc_tb: Any) -> None:
+        def _hook(
+            exc_type: type[BaseException],
+            exc_value: BaseException,
+            exc_tb: TracebackType | None,
+        ) -> None:
             if issubclass(exc_type, KeyboardInterrupt):
                 sys.__excepthook__(exc_type, exc_value, exc_tb)
                 return

@@ -5,8 +5,6 @@ UI 层通过此注册中心获取所有 Core 服务实例，
 而不是直接 import 具体服务类，从而实现松耦合。
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 

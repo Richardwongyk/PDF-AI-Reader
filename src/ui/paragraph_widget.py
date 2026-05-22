@@ -6,8 +6,6 @@ BlockOverlay: 透明 QWidget，覆盖在 PDF 页面图片的对应坐标上。
 不显示任何文本——完全保留 PDF 原始渲染的视觉效果。
 """
 
-from __future__ import annotations
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QAction
 from PySide6.QtWidgets import (

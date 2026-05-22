@@ -13,8 +13,6 @@ Architecture:
          └── _TileRenderTask (QRunnable) — one per tile, renders via fitz
 """
 
-from __future__ import annotations
-
 import logging
 import time
 

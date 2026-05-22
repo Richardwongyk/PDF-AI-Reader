@@ -8,8 +8,6 @@ Key design decisions:
   - threading.Lock for concurrent access from QThreadPool workers
 """
 
-from __future__ import annotations
-
 import logging
 import threading
 import time

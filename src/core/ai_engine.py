@@ -10,8 +10,6 @@ QAService: 基于知识库的文档问答服务
 AIEngine: AI 引擎顶层协调器（信号驱动）
 """
 
-from __future__ import annotations
-
 import re
 import time
 from abc import ABC, abstractmethod

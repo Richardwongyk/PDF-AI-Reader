@@ -2,12 +2,11 @@
 数据模型 —— PDF AI Reader 全部数据结构的 Pydantic 模型定义。
 
 每个模型都是 Pydantic BaseModel，提供自动验证、序列化/反序列化、
-JSON Schema 导出等能力。所有类型注解使用 Python 3.13 标准语法。
+JSON Schema 导出等能力。所有类型注解使用 Python 3.14 原生语法。
 """
 
-from __future__ import annotations
-
 from enum import Enum
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -91,7 +90,7 @@ class DocumentBlock(BaseModel):
     section_title: str = ""
     # 所属章节标题（由最近的 heading 块确定）
 
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     # 扩展元数据，可包含:
     # - "summary": AI 生成的摘要（≤50字）
     # - "is_theorem": bool, 是否为定理/证明环境
@@ -168,7 +167,7 @@ class ParseResult(BaseModel):
     title: str = ""
     author: str = ""
     page_count: int = 0
-    toc: list[dict] = Field(default_factory=list)      # 原生大纲/目录
+    toc: list[dict[str, Any]] = Field(default_factory=list)      # 原生大纲/目录
     blocks: list[DocumentBlock] = Field(default_factory=list)
     parsed_pages: list[int] = Field(default_factory=list)  # 本次结果已完成块解析的页码
 

@@ -4,8 +4,6 @@
 提供服务生命周期管理、线程支持、配置注入和日志记录的统一模板。
 """
 
-from __future__ import annotations
-
 import abc
 import logging
 

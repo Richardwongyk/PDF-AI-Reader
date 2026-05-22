@@ -5,8 +5,6 @@
 支持内置学科术语包的加载，以及用户自定义文件的导入。
 """
 
-from __future__ import annotations
-
 import csv
 import json
 import logging

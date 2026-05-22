@@ -11,8 +11,6 @@ CPU 加速策略：
 - 适中的图片尺寸平衡速度与精度
 """
 
-from __future__ import annotations
-
 import io
 import logging
 import os

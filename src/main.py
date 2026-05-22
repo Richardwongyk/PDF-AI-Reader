@@ -5,12 +5,11 @@ PDF AI Reader — 程序主入口。
 构建 MainWindow，启动事件循环。
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import cast
 
 # 必须在任何 chromadb 导入之前禁用 telemetry，避免 posthog 报错
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -29,6 +28,9 @@ from PySide6.QtWebEngineCore import QWebEngineProfile
 from src.core.models import AppConfig
 from src.core.service_container import ServiceContainer
 from src.data.config_manager import ConfigManager
+
+
+REQUIRED_PYTHON = (3, 14, 4)
 
 
 def setup_logging() -> None:
@@ -114,16 +116,19 @@ def build_services() -> ServiceContainer:
     container.register_singleton("embed_client", _build_embed_client)
 
     def _build_embedding_service():
+        from src.core.ai_engine import BaseLLMClient
         from src.core.knowledge_engine import EmbeddingService
-        return EmbeddingService(container.get("embed_client"))
+        return EmbeddingService(cast(BaseLLMClient, container.get("embed_client")))
 
     container.register_singleton("embedding_service", _build_embedding_service)
 
     def _build_knowledge_engine():
         from src.core.knowledge_engine import KnowledgeEngine
+        from src.core.knowledge_engine import EmbeddingService
+        from src.data.chroma_repo import ChromaRepo
         return KnowledgeEngine(
-            container.get("embedding_service"),
-            container.get("chroma_repo"),
+            cast(EmbeddingService, container.get("embedding_service")),
+            cast(ChromaRepo, container.get("chroma_repo")),
         )
 
     container.register_singleton("knowledge_engine", _build_knowledge_engine)
@@ -161,7 +166,8 @@ def build_services() -> ServiceContainer:
 
     def _build_document_engine():
         from src.core.pdf_engine import DocumentEngine
-        page_cache = container.get("page_cache")
+        from src.infra.page_cache import PageCache
+        page_cache = cast(PageCache, container.get("page_cache"))
         return DocumentEngine(config, page_cache=page_cache)
 
     container.register_factory("document_engine", _build_document_engine)
@@ -176,6 +182,17 @@ def build_services() -> ServiceContainer:
 
 def main() -> int:
     setup_logging()
+
+    if sys.version_info[:3] != REQUIRED_PYTHON:
+        required = ".".join(map(str, REQUIRED_PYTHON))
+        current = ".".join(map(str, sys.version_info[:3]))
+        message = (
+            f"本项目要求 Python {required}，当前解释器为 Python {current}。\n"
+            "请使用 run_py314.bat 或 conda 环境 pdf_ai_reader_314 启动。"
+        )
+        logging.critical("Python 版本不匹配: %s", message)
+        sys.stderr.write(message + "\n")
+        return 1
 
     # 全局异常处理（四级严重度）
     from src.core.error_handler import ErrorHandler

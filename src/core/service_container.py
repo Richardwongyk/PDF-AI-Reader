@@ -15,12 +15,9 @@ Usage:
     config = container.get("config")
 """
 
-from __future__ import annotations
-
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -29,22 +26,22 @@ class ServiceContainer:
     """Lightweight DI container with three lifetime modes."""
 
     def __init__(self) -> None:
-        self._instances: dict[str, Any] = {}      # register_instance destinations
-        self._factories: dict[str, Callable] = {}  # name → factory callable
-        self._singletons: dict[str, Any] = {}      # cache for singleton results
+        self._instances: dict[str, object] = {}      # register_instance destinations
+        self._factories: dict[str, Callable[[], object]] = {}  # name → factory callable
+        self._singletons: dict[str, object] = {}      # cache for singleton results
 
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
 
-    def register_instance(self, name: str, instance: Any) -> None:
+    def register_instance(self, name: str, instance: object) -> None:
         """Register an already-constructed instance. Always returns the same object."""
         self._instances[name] = instance
         _logger.info("ServiceContainer: 注册实例 %s → %s", name, type(instance).__name__)
 
-    def register_singleton(self, name: str, factory: Callable[[], Any]) -> None:
+    def register_singleton(self, name: str, factory: Callable[[], object]) -> None:
         """Register a lazy singleton. Factory is called once, result cached forever."""
-        def _singleton_factory() -> Any:
+        def _singleton_factory() -> object:
             if name not in self._singletons:
                 t0 = time.perf_counter()
                 _logger.info("ServiceContainer: 首次创建单例 %s ...", name)
@@ -56,7 +53,7 @@ class ServiceContainer:
         self._factories[name] = _singleton_factory
         _logger.debug("ServiceContainer: 注册单例工厂: %s", name)
 
-    def register_factory(self, name: str, factory: Callable[[], Any]) -> None:
+    def register_factory(self, name: str, factory: Callable[[], object]) -> None:
         """Register a transient factory. Every get() creates a new instance."""
         self._factories[name] = factory
         _logger.debug("Registered factory: %s", name)
@@ -65,7 +62,7 @@ class ServiceContainer:
     # Retrieval
     # ------------------------------------------------------------------
 
-    def get(self, name: str) -> Any:
+    def get(self, name: str) -> object:
         """Retrieve a service by name.
 
         Raises ValueError if the name is not registered.

@@ -1,4 +1,5 @@
 # PDF AI Reader — 精确依赖清单
+# Python == 3.14.4
 # GUI
 PySide6>=6.11.0
 # PDF 处理

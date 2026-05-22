@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.13+-blue?logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/Python-3.14.4-blue?logo=python" alt="Python">
   <img src="https://img.shields.io/badge/PySide-6.11-green?logo=qt" alt="PySide6">
   <img src="https://img.shields.io/badge/MuPDF-latest-orange?logo=adobeacrobatreader" alt="PyMuPDF">
   <img src="https://img.shields.io/badge/license-MIT-purple" alt="License">
@@ -42,7 +42,7 @@ src/
 
 ### 环境要求
 
-- Python 3.13+
+- Python 3.14.4（请使用 `run_py314.bat` 或 conda 环境 `pdf_ai_reader_314`）
 - PySide6 ≥ 6.11
 - PyMuPDF ≥ 1.25
 - Ollama (可选，本地翻译/嵌入)

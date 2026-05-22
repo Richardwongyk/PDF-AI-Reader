@@ -1,0 +1,23 @@
+[project]
+name = "pdf-ai-reader"
+version = "1.0.0"
+description = "AI-assisted academic PDF reader built with PySide6 and PyMuPDF."
+requires-python = "==3.14.4"
+dependencies = [
+    "PySide6>=6.11.0",
+    "PyMuPDF>=1.27.2",
+    "ollama>=0.6.1",
+    "litellm>=1.77.3",
+    "chromadb>=0.5.0",
+    "pydantic>=2.12.0",
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

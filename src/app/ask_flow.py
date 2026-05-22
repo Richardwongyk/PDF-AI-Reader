@@ -11,11 +11,12 @@ Usage:
     flow.request_answer(question, block, block_id, chat_history, find_block_cb)
 """
 
-from __future__ import annotations
-
 import logging
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject
+
+from src.core.models import DocumentBlock
 
 _logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class AskQuestionFlow(QObject):
         block: object | None,
         block_id: str,
         chat_history: list[dict[str, str]] | None,
-        find_block_cb,
+        find_block_cb: Callable[[str], DocumentBlock | None],
     ) -> None:
         """执行知识库检索 + 委托 AIEngine 生成答案。
 
@@ -61,7 +62,7 @@ class AskQuestionFlow(QObject):
             chat_history: 多轮对话历史。
             find_block_cb: 根据 block_id 查找 DocumentBlock 的回调。
         """
-        retrieved: list = []
+        retrieved: list[DocumentBlock] = []
         if self._current_doc_hash and self._knowledge_engine.check_exists(self._current_doc_hash):
             try:
                 retrieved_raw = self._knowledge_engine.retrieve(

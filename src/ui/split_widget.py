@@ -4,8 +4,6 @@
 双击段落或翻译框切换折叠/展开。
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os

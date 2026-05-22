@@ -5,8 +5,6 @@
 未来可接入：Pix2Text / Texo / UniRec 等 ML 模型
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from typing import Any
 
