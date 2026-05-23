@@ -222,6 +222,7 @@ PDF / OCR / MFR
   配置的 key 可供 `deepseek/deepseek-v4-pro` 使用。
 - 真实云端 smoke test 已可用：设置 `PDF_AI_READER_RUN_CLOUD_TESTS=1` 后运行
   `tests/test_cloud_models.py`，会使用当前 `config.yaml` 的 DeepSeek reasoning 配置验证生成和 QAService 链路。
+- 最新真实云端 smoke 覆盖同步生成、QAService 回答、流式生成三条链路；QA 线程在 streaming 失败时会非流式重试一次。
 
 ## 第一阶段落地任务
 

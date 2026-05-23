@@ -1299,14 +1299,23 @@ class _QAThread(QThread):
 
     def run(self) -> None:
         try:
-            result = self._service.answer(
-                self._question, self._current_block,
-                self._retrieved_blocks, self._chat_history, stream=True,
-            )
             full_text = ""
-            for token in result:  # type: ignore[union-attr]
-                full_text += token
-                self.token_generated.emit(token)
+            try:
+                result = self._service.answer(
+                    self._question, self._current_block,
+                    self._retrieved_blocks, self._chat_history, stream=True,
+                )
+                for token in result:  # type: ignore[union-attr]
+                    full_text += token
+                    self.token_generated.emit(token)
+            except Exception:
+                result = self._service.answer(
+                    self._question, self._current_block,
+                    self._retrieved_blocks, self._chat_history, stream=False,
+                )
+                full_text = str(result or "")
+                if full_text:
+                    self.token_generated.emit(full_text)
             self.finished_signal.emit(full_text)
             try:
                 followups = self._service.generate_followup_questions(self._question, full_text)

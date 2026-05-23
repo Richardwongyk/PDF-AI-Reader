@@ -196,6 +196,8 @@
 - evidence 中包含 `retrieval_score / lexical_score / vector_score`。
 - UI 展示证据编号、页码、块类型、相关度、词面/向量分数和片段，不暴露原始向量 distance。
 - `QAService` prompt 已把检索片段组织成 `[S1]`、`[S2]` 证据，并要求回答中引用证据编号，不能引用未提供来源。
+- QA 线程流式回答失败时会自动用同一 QAService 做一次非流式重试，避免 UI 只显示底层 streaming 异常。
+- 已用当前 `config.yaml` 的 DeepSeek provider key 做真实云端 smoke：DeepSeek V4 Pro 同步生成、QAService 回答和流式生成均通过。
 
 ### 检索质量
 

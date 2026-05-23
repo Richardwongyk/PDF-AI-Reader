@@ -1,6 +1,6 @@
 import pytest
 
-from src.core.ai_engine import HashingEmbeddingClient, HybridModelRouter, MockLLMClient, QAService
+from src.core.ai_engine import HashingEmbeddingClient, HybridModelRouter, MockLLMClient, QAService, _QAThread
 from src.core.knowledge_engine import KnowledgeEngine
 from src.core.model_providers import normalize_litellm_model
 from src.core.models import AppConfig, DocumentBlock, BlockType, TaskType
@@ -235,3 +235,48 @@ def test_followup_parser_tolerates_numbered_model_output() -> None:
         "位置编码起什么作用？",
         "多头注意力的优势是什么？",
     ]
+
+
+class _StreamFailQAService:
+    def __init__(self) -> None:
+        self.calls: list[bool] = []
+
+    def answer(
+        self,
+        question: str,
+        current_block: DocumentBlock | None,
+        retrieved_blocks: list[DocumentBlock],
+        chat_history: list[dict[str, str]] | None,
+        stream: bool = True,
+    ) -> object:
+        self.calls.append(stream)
+        if stream:
+            raise RuntimeError("stream failed")
+        return "fallback answer"
+
+    def generate_followup_questions(self, question: str, answer: str) -> list[str]:
+        return []
+
+
+def test_qa_thread_falls_back_to_non_streaming_answer() -> None:
+    service = _StreamFailQAService()
+    thread = _QAThread(  # type: ignore[arg-type]
+        service,
+        "question",
+        current_block=None,
+        retrieved_blocks=[],
+        chat_history=None,
+    )
+    tokens: list[str] = []
+    finished: list[str] = []
+    errors: list[str] = []
+    thread.token_generated.connect(tokens.append)
+    thread.finished_signal.connect(finished.append)
+    thread.error_signal.connect(errors.append)
+
+    thread.run()
+
+    assert service.calls == [True, False]
+    assert tokens == ["fallback answer"]
+    assert finished == ["fallback answer"]
+    assert errors == []

@@ -80,3 +80,20 @@ def test_qa_service_uses_configured_reasoning_model_for_real_answer() -> None:
 
     assert isinstance(answer, str)
     assert answer.strip()
+
+
+def test_configured_deepseek_reasoning_model_streams_text() -> None:
+    client = _configured_reasoning_client()
+
+    chunks = list(client.generate_stream(
+        [
+            {"role": "system", "content": "Return a short plain answer."},
+            {"role": "user", "content": "Say OK in one word."},
+        ],
+        temperature=0,
+        max_tokens=512,
+        timeout=60,
+    ))
+
+    assert chunks
+    assert "".join(chunks).strip()
