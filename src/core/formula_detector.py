@@ -49,10 +49,14 @@ class Pix2TextMFDDetector(FormulaDetector):
         dpi: int = 200,
         max_existing_ocr_blocks: int = 6,
         max_scanned_ocr_blocks: int = 8,
+        max_existing_uncached_ocr_blocks: int = 0,
+        max_scanned_uncached_ocr_blocks: int = 0,
     ) -> None:
         self._dpi = dpi
         self._max_existing_ocr_blocks = max_existing_ocr_blocks
         self._max_scanned_ocr_blocks = max_scanned_ocr_blocks
+        self._max_existing_uncached_ocr_blocks = max_existing_uncached_ocr_blocks
+        self._max_scanned_uncached_ocr_blocks = max_scanned_uncached_ocr_blocks
         self._mfd = None
 
     def name(self) -> str:
@@ -285,7 +289,10 @@ class Pix2TextMFDDetector(FormulaDetector):
             return {}
         try:
             from src.core.math_ocr import MathOCR
-            latex_results = MathOCR().recognize_batch(images)
+            latex_results = MathOCR().recognize_batch(
+                images,
+                max_uncached=max(0, self._max_existing_uncached_ocr_blocks),
+            )
         except Exception as exc:
             logger.warning("现有公式块 MFR OCR 不可用，保留原文本: %s", exc)
             return {}
@@ -320,6 +327,8 @@ class Pix2TextMFDDetector(FormulaDetector):
             key=lambda item: self._scanned_formula_ocr_priority(item[1]),
             reverse=True,
         )
+        if self._max_scanned_ocr_blocks >= 0:
+            prioritized = prioritized[:self._max_scanned_ocr_blocks]
         images: list[bytes] = []
         image_indices: list[int] = []
         for idx, formula in prioritized:
@@ -336,7 +345,7 @@ class Pix2TextMFDDetector(FormulaDetector):
             return {}
         try:
             from src.core.math_ocr import MathOCR
-            max_uncached = max(0, self._max_scanned_ocr_blocks)
+            max_uncached = max(0, self._max_scanned_uncached_ocr_blocks)
             latex_results = MathOCR().recognize_batch(images, max_uncached=max_uncached)
         except Exception as exc:
             logger.warning("MFR 公式 OCR 不可用，保留待识别状态: %s", exc)
@@ -351,7 +360,7 @@ class Pix2TextMFDDetector(FormulaDetector):
             "MFR OCR 完成: %d/%d 个图片公式识别为 LaTeX，预算=%d",
             len(recognized),
             len(formulas),
-            self._max_scanned_ocr_blocks,
+            self._max_scanned_uncached_ocr_blocks,
         )
         return recognized
 

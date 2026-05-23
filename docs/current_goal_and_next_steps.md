@@ -71,6 +71,9 @@
 - `MathOCR.recognize_batch(..., max_uncached=N)` 支持缓存优先和未命中推理预算。
 - 扫描版/图片公式的 MFR 已按页、置信度、面积做优先级排序，默认只识别少量高优先级未命中项。
 - 未进入预算或识别失败的公式仍写入 `DocumentBlock`，标记 `needs_ocr=True`，为后台公式索引继续补扫保留稳定位置。
+- 新增 `FormulaIndexFlow`，对 `needs_ocr=True` 的公式块做后台预算式 OCR。
+- 公式后台识别成功后会刷新页面 block，并通过 `KnowledgeEngine.upsert_blocks()` 增量写回知识库。
+- 如果公式识别早于基础知识库构建完成，主窗口会暂存增量块，等 `build_finished` 后统一写入，避免竞态导致全文问答漏掉公式。
 
 ## 异步公式索引与知识图谱规划
 
@@ -207,7 +210,8 @@ PDF 打开/滚动/缩放
 
 3. **把公式结果增量写回知识库**
    - 已有 `DocumentBlock` 更新。
-   - 增量 upsert 公式块到当前知识库后端。
+   - 已新增 `KnowledgeEngine.upsert_blocks()` 和后端 `upsert_blocks()`。
+   - 后台公式识别结果会增量 upsert 到当前知识库后端。
    - 全文问答可引用识别后的公式。
 
 4. **评估 Qdrant hybrid**

@@ -209,7 +209,10 @@ def test_math_ocr_zero_uncached_budget_uses_cache_only(monkeypatch, tmp_path) ->
 
 
 def test_scanned_formula_ocr_budget_keeps_placeholders(monkeypatch) -> None:
-    detector = Pix2TextMFDDetector(max_scanned_ocr_blocks=1)
+    detector = Pix2TextMFDDetector(
+        max_scanned_ocr_blocks=1,
+        max_scanned_uncached_ocr_blocks=1,
+    )
     doc = type("FakeDoc", (), {"page_count": 2})()
     blocks = [
         DocumentBlock(
@@ -266,7 +269,7 @@ def test_scanned_formula_ocr_budget_keeps_placeholders(monkeypatch) -> None:
     refined = detector.apply_to_blocks(blocks, doc=doc)
     formulas = [b for b in refined if b.block_type == BlockType.FORMULA]
 
-    assert calls == [([b"page-0", b"page-1"], 1)]
+    assert calls == [([b"page-0"], 1)]
     assert len(formulas) == 2
     recognized = [b for b in formulas if b.metadata["needs_ocr"] is False]
     pending = [b for b in formulas if b.metadata["needs_ocr"] is True]
@@ -275,3 +278,56 @@ def test_scanned_formula_ocr_budget_keeps_placeholders(monkeypatch) -> None:
     assert recognized[0].content == r"\alpha+\beta"
     assert len(pending) == 1
     assert pending[0].content == "[图片公式，等待 OCR 识别]"
+
+
+def test_scanned_formula_ocr_defaults_to_cache_only(monkeypatch) -> None:
+    detector = Pix2TextMFDDetector(max_scanned_ocr_blocks=2)
+    formulas = [
+        {"page": 0, "bbox": (0.0, 0.0, 20.0, 20.0), "score": 0.9},
+        {"page": 1, "bbox": (0.0, 0.0, 20.0, 20.0), "score": 0.8},
+    ]
+
+    monkeypatch.setattr(
+        detector,
+        "_crop_formula_image",
+        lambda doc, formula: f"page-{formula['page']}".encode(),
+    )
+    calls: list[int | None] = []
+
+    class FakeMathOCR:
+        def recognize_batch(
+            self, images: list[bytes], max_uncached: int | None = None
+        ) -> list[str]:
+            calls.append(max_uncached)
+            return ["", ""]
+
+    monkeypatch.setattr("src.core.math_ocr.MathOCR", FakeMathOCR)
+
+    assert detector._recognize_scanned_formulas(object(), formulas) == {}
+    assert calls == [0]
+
+
+def test_existing_formula_ocr_defaults_to_cache_only(monkeypatch) -> None:
+    detector = Pix2TextMFDDetector(max_existing_ocr_blocks=1)
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content="Attention(Q,K,V)=softmax(QK T)",
+        bbox=(0, 0, 100, 20),
+    )
+
+    monkeypatch.setattr(detector, "_crop_bbox_image", lambda *args, **kwargs: b"formula")
+    calls: list[int | None] = []
+
+    class FakeMathOCR:
+        def recognize_batch(
+            self, images: list[bytes], max_uncached: int | None = None
+        ) -> list[str]:
+            calls.append(max_uncached)
+            return [""]
+
+    monkeypatch.setattr("src.core.math_ocr.MathOCR", FakeMathOCR)
+
+    assert detector._recognize_existing_formula_blocks(object(), [block]) == {}
+    assert calls == [0]

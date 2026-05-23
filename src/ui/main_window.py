@@ -106,6 +106,10 @@ class MainWindow(QMainWindow):
         from src.app.ask_flow import AskQuestionFlow
         self._ask_flow = AskQuestionFlow(self._ai_engine, self._knowledge_engine)
 
+        # 公式索引流程：异步补扫图片/扫描公式，并增量写回知识库
+        from src.app.formula_index_flow import FormulaIndexFlow
+        self._formula_index_flow = FormulaIndexFlow(self)
+
         # 当前文档状态
         self._current_doc_hash: str = ""
         self._current_blocks: list[DocumentBlock] = []
@@ -121,6 +125,7 @@ class MainWindow(QMainWindow):
         self._dock_answer_split_id: str = "__dock_qa__"
         self._dock_last_question: str = ""
         self._dock_followup_questions: list[str] = []
+        self._pending_kb_upserts: dict[str, DocumentBlock] = {}
 
         self._init_ui()
         self._connect_signals()
@@ -347,6 +352,9 @@ class MainWindow(QMainWindow):
         self._knowledge_engine.build_progress.connect(self._on_kb_progress)
         self._knowledge_engine.build_finished.connect(self._on_kb_finished)
         self._knowledge_engine.build_error.connect(self._on_kb_error)
+        self._knowledge_engine.blocks_upserted.connect(self._on_kb_blocks_upserted)
+        self._formula_index_flow.formulas_updated.connect(self._on_background_formula_blocks_updated)
+        self._formula_index_flow.scan_finished.connect(self._on_formula_index_scan_finished)
 
         # PdfViewer → 内部处理
         self._pdf_viewer.block_double_clicked.connect(self._on_block_double_clicked)
@@ -420,6 +428,8 @@ class MainWindow(QMainWindow):
         self._active_translation_blocks.clear()
         self._last_user_translation_at = 0.0
         self._pymupdf4llm_pending_result = None
+        self._pending_kb_upserts.clear()
+        self._formula_index_flow.stop()
         self._viewer_document_loaded = False
         self._has_native_toc = False
         self._status_page_label.setText("就绪")
@@ -560,6 +570,7 @@ class MainWindow(QMainWindow):
         """MFD/MFR 精扫完成：更新块类型、LaTeX 内容并刷新 overlay。"""
         update_map = {u["id"]: u for u in updated}
         touched_pages: set[int] = set()
+        changed_blocks: list[DocumentBlock] = []
         for block in self._current_blocks:
             if block.id in update_map:
                 info = update_map[block.id]
@@ -569,6 +580,7 @@ class MainWindow(QMainWindow):
                 # MFR 阶段：用识别到的 LaTeX 替换公式块内容
                 if "content" in info:
                     block.content = info["content"]
+                changed_blocks.append(block)
         for info in updated:
             if not info.get("is_new") or info["id"] in self._blocks_by_id:
                 continue
@@ -583,6 +595,7 @@ class MainWindow(QMainWindow):
             self._current_blocks.append(block)
             self._blocks_by_id[block.id] = block
             touched_pages.add(block.page_num)
+            changed_blocks.append(block)
         for page_num in touched_pages:
             page_blocks = [b for b in self._current_blocks if b.page_num == page_num]
             self._pdf_viewer.update_page_blocks(page_num, page_blocks)
@@ -600,6 +613,53 @@ class MainWindow(QMainWindow):
         self._status_model_label.setText(
             f"📚 知识库就绪 | ✅ 公式精扫完成 | 🖥️ {'QtPdf' if self._doc_engine.using_qtpdf else 'PyMuPDF'}"
         )
+        if changed_blocks:
+            self._queue_knowledge_upsert(changed_blocks)
+        pending = [
+            block for block in changed_blocks
+            if block.block_type == BlockType.FORMULA and block.metadata.get("needs_ocr")
+        ]
+        if pending:
+            filepath = getattr(self._doc_engine, "_filepath", "")
+            priority_pages = {block.page_num for block in pending[:4]}
+            self._formula_index_flow.enqueue_blocks(
+                filepath,
+                pending,
+                priority_pages=priority_pages,
+                batch_budget=8,
+                drain_queue=False,
+                cache_only=True,
+            )
+
+    def _on_background_formula_blocks_updated(self, updated_blocks: list[DocumentBlock]) -> None:
+        """后台公式索引返回 LaTeX：刷新页面并增量更新知识库。"""
+        if not updated_blocks:
+            return
+        touched_pages: set[int] = set()
+        for updated in updated_blocks:
+            existing = self._blocks_by_id.get(updated.id)
+            if existing is None:
+                self._current_blocks.append(updated)
+                self._blocks_by_id[updated.id] = updated
+                existing = updated
+            else:
+                existing.content = updated.content
+                existing.block_type = updated.block_type
+                existing.metadata.update(updated.metadata)
+            touched_pages.add(existing.page_num)
+        for page_num in touched_pages:
+            page_blocks = [b for b in self._current_blocks if b.page_num == page_num]
+            self._pdf_viewer.update_page_blocks(page_num, page_blocks)
+        blocks = [self._blocks_by_id[b.id] for b in updated_blocks if b.id in self._blocks_by_id]
+        self._queue_knowledge_upsert(blocks)
+        self.logger.info("后台公式索引更新 %d 个公式块", len(updated_blocks))
+
+    def _on_formula_index_scan_finished(self, recognized: int, pending: int) -> None:
+        """后台公式索引一批完成。"""
+        if recognized or pending:
+            self._ai_doc_status.setText(
+                f"知识库就绪\n公式索引: 本批识别 {recognized}，待补扫 {pending}"
+            )
 
     # =========================================================================
     # KnowledgeEngine 回调
@@ -623,6 +683,7 @@ class MainWindow(QMainWindow):
         except Exception:
             count = 0
         self._ai_doc_status.setText(f"知识库就绪\n{count or '未知'} 块")
+        self._flush_pending_knowledge_upserts(doc_hash)
 
     def _on_kb_error(self, message: str) -> None:
         """知识库构建失败。"""
@@ -630,6 +691,34 @@ class MainWindow(QMainWindow):
         self._status_model_label.setText("⚠️ 知识库构建失败")
         self._ai_doc_status.setText("知识库构建失败")
         self.logger.warning("知识库构建失败: %s", message)
+
+    def _on_kb_blocks_upserted(self, doc_hash: str, count: int) -> None:
+        """知识库增量更新完成。"""
+        if doc_hash != self._current_doc_hash:
+            return
+        self.logger.info("知识库增量更新完成: %d 个块", count)
+
+    def _queue_knowledge_upsert(self, blocks: list[DocumentBlock]) -> None:
+        """Queue or run incremental index updates for formula-enriched blocks."""
+        if not blocks or not self._current_doc_hash:
+            return
+        unique_blocks = {block.id: block for block in blocks if block.id}
+        if not unique_blocks:
+            return
+        if self._knowledge_engine.check_exists(self._current_doc_hash):
+            self._knowledge_engine.upsert_blocks(list(unique_blocks.values()), self._current_doc_hash)
+            return
+        self._pending_kb_upserts.update(unique_blocks)
+        self.logger.info("知识库尚未就绪，暂存 %d 个增量公式块", len(unique_blocks))
+
+    def _flush_pending_knowledge_upserts(self, doc_hash: str) -> None:
+        """Flush formula OCR updates collected while the base index was building."""
+        if doc_hash != self._current_doc_hash or not self._pending_kb_upserts:
+            return
+        blocks = list(self._pending_kb_upserts.values())
+        self._pending_kb_upserts.clear()
+        self._knowledge_engine.upsert_blocks(blocks, doc_hash)
+        self.logger.info("知识库就绪后写入暂存公式块: %d", len(blocks))
 
     def _on_build_knowledge_base(self) -> None:
         """手动触发知识库构建/重建。"""
@@ -1124,6 +1213,7 @@ class MainWindow(QMainWindow):
         确保 ChromaDB WAL 文件正确刷入磁盘。
         """
         # 1. 关闭文档（停止解析线程，关闭 PDF 文件）
+        self._formula_index_flow.stop()
         self._doc_engine.close_document()
         # 2. 关闭知识库引擎（等待构建任务完成，关闭数据库连接）
         self._knowledge_engine.close()

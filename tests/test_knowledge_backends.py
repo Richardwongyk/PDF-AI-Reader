@@ -100,6 +100,39 @@ def test_legacy_backend_builds_with_progress_and_status() -> None:
     assert status.total_blocks == 2
 
 
+def test_legacy_backend_upserts_formula_ocr_metadata() -> None:
+    repo = _Repo()
+    embedded_texts: list[list[str]] = []
+    backend = LegacyChromaBackend(
+        repo,  # type: ignore[arg-type]
+        embed_texts=lambda texts: embedded_texts.append(texts) or [[0.5, 0.5] for _ in texts],
+    )
+    formula = DocumentBlock(
+        id="p1_b2",
+        page_num=1,
+        block_type=BlockType.FORMULA,
+        content=r"\frac{a}{b}",
+        bbox=(10, 20, 30, 40),
+        metadata={
+            "needs_ocr": False,
+            "formula_detector": "pix2text-mfd",
+            "formula_ocr": "pix2text-mfr",
+            "latex_source": "background_formula_index",
+            "source": "image_or_scan",
+        },
+    )
+
+    backend.upsert_blocks([formula], "doc-1")
+
+    assert embedded_texts == [[r"\frac{a}{b}"]]
+    assert repo.upserts[-1]["block_ids"] == ["p1_b2"]
+    metadata = repo.upserts[-1]["metadatas"][0]  # type: ignore[index]
+    assert metadata["type"] == "formula"
+    assert metadata["needs_ocr"] is False
+    assert metadata["formula_ocr"] == "pix2text-mfr"
+    assert metadata["latex_source"] == "background_formula_index"
+
+
 def test_backend_factory_rejects_unknown_backend() -> None:
     repo = _Repo()
 

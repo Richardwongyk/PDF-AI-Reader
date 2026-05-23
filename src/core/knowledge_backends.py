@@ -47,6 +47,11 @@ class KnowledgeIndexBackend(ABC):
         ...
 
     @abstractmethod
+    def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
+        """Incrementally insert or update blocks without rebuilding the full index."""
+        ...
+
+    @abstractmethod
     def delete(self, doc_hash: str) -> None:
         """Delete a document index."""
         ...
@@ -116,6 +121,23 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
                 metadatas=metadatas[batch_start:batch_end],
             )
             emit_progress(batch_end, total)
+
+    def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
+        total = len(blocks)
+        if total == 0:
+            return
+        text_contents = [block.content for block in blocks]
+        vectors = self._embed_texts(text_contents)
+        for batch_start in range(0, total, self._BATCH_SIZE):
+            batch_end = min(batch_start + self._BATCH_SIZE, total)
+            batch_blocks = blocks[batch_start:batch_end]
+            self._repo.upsert_blocks(
+                doc_hash,
+                block_ids=[block.id for block in batch_blocks],
+                documents=text_contents[batch_start:batch_end],
+                vectors=vectors[batch_start:batch_end],
+                metadatas=[_block_metadata(block) for block in batch_blocks],
+            )
 
     def retrieve(
         self,
@@ -216,6 +238,30 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
                 ],
             )
             emit_progress(batch_end, total)
+
+    def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
+        total = len(blocks)
+        if total == 0:
+            return
+        collection = self._repo.create_or_get_collection(doc_hash, self.COLLECTION_PREFIX)
+        for batch_start in range(0, total, self._BATCH_SIZE):
+            batch_end = min(batch_start + self._BATCH_SIZE, total)
+            batch_blocks = blocks[batch_start:batch_end]
+            batch_texts = [block.content for block in batch_blocks]
+            vectors = self._embed_texts(batch_texts)
+            collection.upsert(
+                ids=[block.id for block in batch_blocks],
+                documents=batch_texts,
+                embeddings=vectors,
+                metadatas=[
+                    {
+                        **_block_metadata(block),
+                        "block_id": block.id,
+                        "index_backend": self.name,
+                    }
+                    for block in batch_blocks
+                ],
+            )
 
     def retrieve(
         self,
@@ -338,6 +384,11 @@ def _block_metadata(block: DocumentBlock) -> dict[str, Any]:
         "summary": block.metadata.get("summary", ""),
         "keywords": str(keywords or ""),
         "bbox": bbox,
+        "needs_ocr": bool(block.metadata.get("needs_ocr", False)),
+        "formula_detector": str(block.metadata.get("formula_detector", "")),
+        "formula_ocr": str(block.metadata.get("formula_ocr", "")),
+        "latex_source": str(block.metadata.get("latex_source", "")),
+        "source": str(block.metadata.get("source", "")),
     }
 
 

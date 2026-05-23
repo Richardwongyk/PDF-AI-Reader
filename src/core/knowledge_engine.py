@@ -138,6 +138,7 @@ class KnowledgeEngine(BaseService):
     build_progress = Signal(int, int)        # (已完成块数, 总块数)
     build_finished = Signal(str)             # (文档哈希)
     build_error = Signal(str)                # (错误信息)
+    blocks_upserted = Signal(str, int)        # (文档哈希, 更新块数)
 
     def __init__(
         self,
@@ -199,6 +200,15 @@ class KnowledgeEngine(BaseService):
         worker = _BuildWorker(self._backend, blocks, doc_hash, force_rebuild, self._db_lock)
         worker.progress.connect(self.build_progress.emit)
         worker.finished.connect(self.build_finished.emit)
+        worker.error.connect(self.build_error.emit)
+        self._pool.start(worker)
+
+    def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
+        """增量写入或更新知识库块，避免公式 OCR 后重建整个文档索引。"""
+        if not blocks:
+            return
+        worker = _UpsertWorker(self._backend, blocks, doc_hash, self._db_lock)
+        worker.finished.connect(self.blocks_upserted.emit)
         worker.error.connect(self.build_error.emit)
         self._pool.start(worker)
 
@@ -522,4 +532,57 @@ class _BuildWorker(QRunnable):
 
         except Exception as e:
             _logger.error("知识库构建失败: %s", e)
+            self._signals.error.emit(str(e))
+
+
+class _UpsertWorker(QRunnable):
+    """在 QThreadPool 中执行知识库增量 upsert。"""
+
+    def __init__(
+        self,
+        backend: KnowledgeIndexBackend,
+        blocks: list[DocumentBlock],
+        doc_hash: str,
+        db_lock: QReadWriteLock | None = None,
+    ) -> None:
+        super().__init__()
+        self._backend = backend
+        self._blocks = [block.model_copy(deep=True) for block in blocks]
+        self._doc_hash = doc_hash
+        self._db_lock = db_lock
+
+        from PySide6.QtCore import Signal, QObject
+
+        class _Signals(QObject):
+            finished = Signal(str, int)
+            error = Signal(str)
+
+        self._signals = _Signals()
+
+    @property
+    def finished(self) -> Signal:
+        return self._signals.finished
+
+    @property
+    def error(self) -> Signal:
+        return self._signals.error
+
+    def run(self) -> None:
+        import logging
+        _logger = logging.getLogger("KnowledgeEngine")
+        try:
+            if self._db_lock:
+                with QWriteLocker(self._db_lock):
+                    self._backend.upsert_blocks(self._blocks, self._doc_hash)
+            else:
+                self._backend.upsert_blocks(self._blocks, self._doc_hash)
+            _logger.info(
+                "知识库增量更新完成: backend=%s, doc_hash=%s, blocks=%d",
+                self._backend.name,
+                self._doc_hash,
+                len(self._blocks),
+            )
+            self._signals.finished.emit(self._doc_hash, len(self._blocks))
+        except Exception as e:
+            _logger.error("知识库增量更新失败: %s", e)
             self._signals.error.emit(str(e))
