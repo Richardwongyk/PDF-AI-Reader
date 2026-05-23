@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,15 +26,21 @@ from typing import Any
 
 import pyautogui
 from pywinauto import Application
-from pywinauto.findwindows import ElementNotFoundError
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.born_digital_math_audit import audit_pdf as audit_born_digital_pdf
+from tools.formula_latex_audit import _audit_case as audit_formula_latex_case
+
 PYTHON = Path(r"C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe")
 APP_LOG = ROOT / "logs" / "app.log"
 ARTIFACT_DIR = ROOT / "test_artifacts" / "e2e"
 COMMAND_FILE = ARTIFACT_DIR / "commands.jsonl"
 EVENT_FILE = ARTIFACT_DIR / "events.jsonl"
+FORMULA_ARTIFACT_DIR = ROOT / "test_artifacts" / "formula_audit"
 
 
 @dataclass
@@ -60,6 +67,7 @@ class CaseResult:
     log_summary: dict[str, Any]
     performance: dict[str, Any]
     image_metrics: dict[str, Any]
+    formula_audit: dict[str, Any]
     ok: bool
     error: str = ""
 
@@ -113,6 +121,23 @@ def _reset_logs() -> None:
                     time.sleep(0.25)
             else:
                 raise
+
+
+def _clear_history_logs() -> None:
+    """Clear stale app logs before a closed-loop test run."""
+    logs_dir = ROOT / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    for path in logs_dir.glob("*.log"):
+        if path.name.startswith("keep_awake"):
+            continue
+        try:
+            path.unlink()
+        except PermissionError:
+            _terminate_existing_reader_processes()
+            try:
+                path.unlink()
+            except PermissionError:
+                pass
 
 
 def _terminate_existing_reader_processes() -> None:
@@ -226,6 +251,8 @@ def _summarize_log() -> dict[str, Any]:
         for name, pattern in patterns.items()
     }
     return {
+        "path": str(APP_LOG.relative_to(ROOT)),
+        "size_bytes": APP_LOG.stat().st_size if APP_LOG.exists() else 0,
         "line_count_tail": len(lines),
         "levels": levels,
         "counts": counts,
@@ -462,6 +489,202 @@ def _first_block_point(window: Any) -> tuple[int, int] | None:
     return (int((rect.left + rect.right) / 2), int((rect.top + rect.bottom) / 2))
 
 
+def _pick_visible_block_point(page: int = 0) -> tuple[str, tuple[int, int] | None, dict[str, Any]]:
+    event_index = len(_read_events())
+    _send_command({"cmd": "pick_block", "page": page})
+    event = _wait_for_event("block_picked", event_index, timeout=10)
+    block_id = str(event.get("block_id") or "")
+    center = event.get("center")
+    scale = _screen_scale_from_event(event)
+    if isinstance(center, list) and len(center) == 2:
+        return block_id, (int(center[0] * scale), int(center[1] * scale)), event
+    return block_id, None, event
+
+
+def _screen_scale_from_event(event: dict[str, Any]) -> float:
+    screen = event.get("screen") or {}
+    width = screen.get("width")
+    height = screen.get("height")
+    if not width or not height:
+        return 1.0
+    try:
+        screenshot = pyautogui.screenshot()
+        sx = screenshot.width / float(width)
+        sy = screenshot.height / float(height)
+        if 0.5 <= sx <= 4.0 and 0.5 <= sy <= 4.0:
+            return (sx + sy) / 2.0
+    except Exception:
+        return 1.0
+    return 1.0
+
+
+def _snapshot_state(timeout: float = 10) -> dict[str, Any]:
+    event_index = len(_read_events())
+    _send_command({"cmd": "snapshot_state"})
+    return _wait_for_event("state", event_index, timeout=timeout)
+
+
+def _wait_for_split_count_at_least(count: int, timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        state = _snapshot_state(timeout=min(3.0, max(0.5, deadline - time.monotonic())))
+        last_state = state
+        if int(state.get("split_count", 0)) >= count:
+            return state
+        time.sleep(0.3)
+    raise TimeoutError(f"split_count did not reach {count}: {last_state}")
+
+
+def _first_split_id(state: dict[str, Any]) -> str:
+    splits = state.get("splits") or []
+    return str(splits[0]) if splits else ""
+
+
+def _split_collapsed(state: dict[str, Any], block_id: str) -> bool | None:
+    collapsed = state.get("split_collapsed") or {}
+    if block_id not in collapsed:
+        return None
+    return bool(collapsed[block_id])
+
+
+def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) -> tuple[str, str]:
+    point = _first_block_point(window)
+    picked_block_id = ""
+    method = "mouse"
+    if point is None:
+        try:
+            picked_block_id, point, pick_event = _pick_visible_block_point(page=0)
+            if point is not None:
+                method = "mouse_bridge_geometry"
+        except Exception:
+            pick_event = {}
+            point = None
+    if point is None:
+        method = "bridge_fallback"
+        t = time.perf_counter()
+        event_index = len(_read_events())
+        command = {"cmd": "open_translation", "page": 0}
+        if picked_block_id:
+            command["block_id"] = picked_block_id
+        _send_command(command)
+        event = _wait_for_event("translation_requested", event_index, timeout=20)
+        block_id = str(event.get("block_id") or "")
+        _action(actions, "double_click_open_fallback", t, block_id=block_id)
+    else:
+        t = time.perf_counter()
+        pyautogui.doubleClick(*point, interval=0.08)
+        state = _wait_for_split_count_at_least(1, timeout=20)
+        block_id = _first_split_id(state)
+        _action(
+            actions,
+            "double_click_open",
+            t,
+            block_id=block_id,
+            point=point,
+            method=method,
+            picked_block_id=picked_block_id,
+            pick_event=_json_safe(pick_event),
+        )
+    if not block_id:
+        raise RuntimeError("translation split did not open")
+
+    for index, expected_collapsed in enumerate((True, False)):
+        t = time.perf_counter()
+        if point is None:
+            event_index = len(_read_events())
+            _send_command({"cmd": "toggle_split", "block_id": block_id})
+            _wait_for_event("split_toggled", event_index, timeout=20)
+        else:
+            pyautogui.doubleClick(*point, interval=0.08)
+        deadline = time.monotonic() + 20
+        last_state: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            last_state = _snapshot_state(timeout=3)
+            collapsed = _split_collapsed(last_state, block_id)
+            if collapsed is expected_collapsed:
+                break
+            time.sleep(0.3)
+        else:
+            raise TimeoutError(
+                f"split collapse state did not become {expected_collapsed}: {last_state}"
+            )
+        _action(
+            actions,
+            "double_click_toggle",
+            t,
+            index=index,
+            block_id=block_id,
+            collapsed=expected_collapsed,
+            point=point,
+        )
+    return block_id, method
+
+
+def _json_safe(value: Any) -> Any:
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _formula_audit(case: PdfCase) -> dict[str, Any]:
+    start = time.perf_counter()
+    FORMULA_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    born_pages = 6 if case.name == "attention" else 20
+    born_start = 0 if case.name == "attention" else 60
+    latex_max_pages = 0 if case.name == "attention" else 120
+    try:
+        born_report = audit_born_digital_pdf(
+            pdf_path=case.pdf,
+            start_page=born_start,
+            max_pages=born_pages,
+            sample_limit=6,
+            latex_root=case.latex_root,
+        )
+        latex_report = audit_formula_latex_case(
+            case,
+            run_mfd=False,
+            mfd_pages=None,
+            max_pages=latex_max_pages,
+            max_match_candidates=60,
+            min_command_recall=0.35,
+            min_weak_match_rate=0.35,
+            max_low_similarity_pdf_rate=0.60,
+        )
+        latex_payload = asdict(latex_report)
+        gate_passed = bool(latex_report.quality_gate["passed"])
+        payload = {
+            "ok": bool(
+                born_report.get("unknown_glyph_count", 0) == 0
+                and born_report.get("pages", 0) > 0
+                and gate_passed
+            ),
+            "elapsed_sec": round(time.perf_counter() - start, 3),
+            "born_digital": born_report,
+            "latex_alignment": latex_payload,
+        }
+        if not gate_passed:
+            payload["expected_quality_gate_failure"] = True
+            payload["reason"] = "current baseline is below LaTeX alignment gate"
+        out_path = FORMULA_ARTIFACT_DIR / f"{case.name}_closed_loop_formula.json"
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload["artifact"] = str(out_path.relative_to(ROOT))
+        return payload
+    except Exception as exc:
+        return {
+            "ok": False,
+            "elapsed_sec": round(time.perf_counter() - start, 3),
+            "error": repr(exc),
+            "traceback": traceback.format_exc(limit=12),
+        }
+
+
 def _screenshot(case_dir: Path, label: str) -> str:
     path = case_dir / f"{label}.png"
     img = pyautogui.screenshot()
@@ -549,25 +772,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
         )
         _action(actions, "rebuild_kb", t, wait_source=kb_wait_source)
 
-        block_id = ""
-        for i, command in enumerate((
-            {"cmd": "open_translation", "page": 0},
-            {"cmd": "toggle_split"},
-            {"cmd": "toggle_split"},
-        )):
-            t = time.perf_counter()
-            if block_id and "block_id" not in command:
-                command["block_id"] = block_id
-            event_index = len(_read_events())
-            _send_command(command)
-            event = _wait_for_event(
-                "translation_requested" if i == 0 else "split_toggled",
-                event_index,
-                timeout=20,
-            )
-            block_id = str(event.get("block_id") or block_id)
-            time.sleep(1.0)
-            _action(actions, "translation_cycle", t, index=i, block_id=block_id)
+        block_id, translation_method = _double_click_translation_cycle(window, actions)
         screenshots.append(_screenshot(case_dir, "06_double_click_cycle"))
 
         t = time.perf_counter()
@@ -621,6 +826,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
         log_summary = _summarize_log()
         performance = _summarize_performance(case)
         image_metrics = _summarize_image_metrics(screenshots)
+        formula_audit = _formula_audit(case)
         dock_action = next(
             (item for item in actions if item.get("name") == "ask_dock_question"),
             {},
@@ -636,7 +842,10 @@ def _drive_case(case: PdfCase) -> CaseResult:
             and int(dock_action.get("dock_followup_count", 0)) > 0
             and performance["within_budget"]
             and image_metrics["within_budget"]
+            and formula_audit["ok"]
         )
+        if translation_method:
+            ok = ok and any(item.get("name") == "double_click_open" for item in actions)
         if case.expected_min_pages > 0:
             title = window.window_text()
             ok = ok and bool(title)
@@ -652,6 +861,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
             log_summary={**log_summary, "events": _read_events()[-80:]},
             performance=performance,
             image_metrics=image_metrics,
+            formula_audit=_json_safe(formula_audit),
             ok=ok,
         )
     except Exception as exc:
@@ -672,6 +882,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
             log_summary={**_summarize_log(), "events": _read_events()[-80:]},
             performance=_summarize_performance(case),
             image_metrics=_summarize_image_metrics(screenshots),
+            formula_audit={"ok": False, "error": "workflow failed before formula audit"},
             ok=False,
             error=repr(exc),
         )
@@ -696,6 +907,7 @@ def main() -> int:
     args = parser.parse_args()
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    _clear_history_logs()
     selected = [case for case in _cases() if args.case in ("all", case.name)]
     results = [_drive_case(case) for case in selected]
 

@@ -69,6 +69,12 @@ class TestCommandBridge(QObject):
             self._window._on_block_double_clicked(block_id)
             self._emit("translation_requested", {"block_id": block_id})
             return
+        if cmd == "pick_block":
+            block_id = self._pick_block(command)
+            if not block_id:
+                raise RuntimeError("no block available for pick_block")
+            self._emit("block_picked", {"block_id": block_id, **self._block_geometry(block_id)})
+            return
         if cmd == "toggle_split":
             block_id = str(command.get("block_id") or "")
             if not block_id:
@@ -144,6 +150,45 @@ class TestCommandBridge(QObject):
                     return block.id
         return blocks[0].id if blocks else ""
 
+    def _block_geometry(self, block_id: str) -> dict[str, Any]:
+        viewer = self._window._pdf_viewer
+        overlay = getattr(viewer, "_overlays", {}).get(block_id)
+        if overlay is None:
+            return {"visible": False, "rect": None, "center": None}
+        try:
+            top_left = overlay.mapToGlobal(overlay.rect().topLeft())
+            rect = overlay.geometry()
+            center = overlay.mapToGlobal(overlay.rect().center())
+            return {
+                "visible": bool(overlay.isVisible()),
+                "rect": {
+                    "x": int(top_left.x()),
+                    "y": int(top_left.y()),
+                    "width": int(rect.width()),
+                    "height": int(rect.height()),
+                },
+                "center": [int(center.x()), int(center.y())],
+                "screen": self._screen_geometry(),
+            }
+        except RuntimeError:
+            return {"visible": False, "rect": None, "center": None}
+
+    def _screen_geometry(self) -> dict[str, Any]:
+        try:
+            screen = self._window.screen()
+            if screen is None:
+                return {}
+            geo = screen.geometry()
+            return {
+                "x": int(geo.x()),
+                "y": int(geo.y()),
+                "width": int(geo.width()),
+                "height": int(geo.height()),
+                "device_pixel_ratio": float(screen.devicePixelRatio()),
+            }
+        except RuntimeError:
+            return {}
+
     def _state(self) -> dict[str, Any]:
         viewer = self._window._pdf_viewer
         splits = getattr(viewer, "_splits", {})
@@ -152,6 +197,10 @@ class TestCommandBridge(QObject):
             "blocks": len(getattr(self._window, "_current_blocks", [])),
             "splits": list(splits.keys()),
             "split_count": len(splits),
+            "split_collapsed": {
+                split_id: bool(getattr(split, "collapsed", False))
+                for split_id, split in splits.items()
+            },
             "pages": self._window._doc_engine.page_count,
             "dock": self._dock_state(),
             "split_followups": self._split_followup_state(splits),

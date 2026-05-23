@@ -15,7 +15,7 @@
 - `pyautogui`：真实鼠标双击、滚轮滚动、快捷键缩放、截图。
 - `pytest-qt`：后续补充 Qt 组件级交互测试。
 
-调研依据：`pywinauto` 适合 Windows UI Automation；`PyAutoGUI` 提供跨平台鼠标、键盘、截图能力；`pytest-qt` 提供 Qt/PySide 测试夹具。
+调研依据：`pywinauto` 官方文档支持 Windows UI Automation 后端；`PyAutoGUI` 官方文档提供鼠标、键盘和截图 API；`pytest-qt` 官方文档提供 Qt/PySide 的 `qtbot` 测试夹具。桌面闭环优先使用真实鼠标/键盘动作，文件命令桥只用于稳定跳页、重建知识库、读取 UI 状态和在真实鼠标定位失败时兜底。
 
 ## 流程
 
@@ -29,11 +29,12 @@
 6. 执行多次跳转尝试，截图。
 7. 执行 `Ctrl+=` 放大、`Ctrl+-` 缩小，截图并检查日志中的缩放记录。
 8. 强制重建当前文档知识库，并等待日志或测试事件确认完成。
-9. 回到顶部附近，打开翻译裂缝并覆盖折叠、再次展开。
+9. 回到顶部附近，优先通过真实鼠标双击打开翻译裂缝，再双击折叠、再次双击展开；若 UIA 找不到段落热区，才使用测试命令桥兜底并在报告中标记。
 10. 发起一次裂缝内问答，检查全文检索和回答完成日志。
 11. 发起一次右侧全文问答，检查证据列表、回答区、引用状态和追问建议。
 12. 再滚动一次，截图。
-13. 收集日志尾部、错误/警告数量、关键行为计数和截图路径，写入 `test_artifacts/e2e/report.json`。
+13. 对同一 PDF 执行 born-digital 结构审计和 LaTeX 源码对照审计，把公式质量门禁纳入报告。
+14. 收集日志尾部、错误/警告数量、关键行为计数、截图路径、性能样本和公式审计路径，写入 `test_artifacts/e2e/report.json`。
 
 ## 当前自动化命令
 
@@ -41,6 +42,8 @@
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case attention
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case napkin
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case all
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/test_log_audit.py --clear
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/test_log_audit.py --output test_artifacts/log_audit.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --output test_artifacts/formula_audit_attention.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case napkin --max-pages 120 --output test_artifacts/formula_audit_napkin_120.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --quality-gate --output test_artifacts/formula_audit_gate.json
@@ -52,11 +55,12 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 
 - 主窗口成功启动并保持响应。
 - PDF 成功打开并记录 `文档加载完成`。
-- 滚动、页码跳转、缩放、翻译折叠、知识库重建、裂缝问答、右侧全文问答动作完成并生成截图。
+- 滚动、页码跳转、缩放、真实鼠标双击翻译折叠/展开、知识库重建、裂缝问答、右侧全文问答动作完成并生成截图。
 - 右侧全文问答必须产生至少 1 条检索依据、非空回答和追问建议。
 - 日志中无 `ERROR`、`WARNING`、`CRITICAL`。
 - 输出 `test_artifacts/e2e/report.json`。
 - 公式审计输出 LaTeX 对照报告；使用 `--quality-gate` 时，若公式质量低于阈值必须返回非零退出码。
+- 当前公式质量未过门禁时，E2E 总体应失败并写明 `expected_quality_gate_failure`，不能把低质量公式识别当作通过。
 
 公式审计门槛：
 
@@ -79,3 +83,18 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 - Napkin 全文知识库仍使用哈希嵌入兜底，不是真语义 embedding。
 - 右侧全文问答已有证据面板、检索状态、引用页跳转和追问建议；仍需补真实模型质量评估和更细粒度的引用高亮。
 - 公式审计已经能统计 LaTeX 源和 PDF 抽取差距；扫描/图片公式已接入 Pix2Text MFR OCR，但整体 LaTeX 保真仍明显不足，需要继续做源码对齐和文本公式恢复。
+
+## 本轮闭环结果
+
+2026-05-24 本轮已跑 Attention 和 Napkin 桌面闭环。结论如下：
+
+- Attention：真实鼠标双击打开/折叠/展开翻译裂缝已通过；滚动、跳页、缩放、裂缝问答、右侧全文问答、截图和日志检查均完成；日志无 `ERROR/WARNING/CRITICAL`。公式 LaTeX 对照门禁失败，`common_source_command_recall=0.000`、`source_weak_match_rate=0.049`、`low_similarity_pdf_rate=0.611`。
+- Napkin：1050 页长文档滚动、跳页、缩放、真实鼠标双击翻译循环、裂缝问答、右侧全文问答均完成；日志无 `ERROR/WARNING/CRITICAL`。缩放 max 约 232.7ms，渲染 max 约 43.4ms，visible update max 约 248.6ms。知识库强制重建耗时约 108.5s，必须优化；公式 LaTeX 对照门禁失败，`common_source_command_recall=0.000`、`source_weak_match_rate=0.039`、`low_similarity_pdf_rate=0.665`。
+- 真实鼠标坐标在 Windows 高 DPI 下必须从 Qt 逻辑坐标换算到物理截图坐标；E2E 已自动换算，并把 `screen.device_pixel_ratio` 和点击点写入报告。
+- 当前闭环测试总结果按预期失败，因为公式质量门禁没有达标。这个失败是后续优化入口，不能降级为通过。
+
+下一步性能改进优先级：
+
+- 手动“重建知识库”不应无条件删除并重写未变化的 Napkin 索引；应先用指纹快跳过，真正清空重建另设高级入口。
+- 在没有真实 embedding 时，优先评估 SQLite FTS5 / Qdrant hybrid 等更合适的全文检索后端，避免 Chroma + 哈希向量成为长文档默认瓶颈。
+- 公式质量继续走 born-digital PDF 结构解析和源码对照，不用 OCR 处理可解析文本层公式。
