@@ -212,6 +212,7 @@
 - 指纹一致时跳过删除 collection、重新 embedding 和批量 upsert。
 - 允许后台公式 OCR 增量块存在于 collection 中，不因 collection 总块数大于基础块数而误判失配。
 - 新增 `sqlite_fts` 轻量全文索引后端，不引入新环境或新模型，作为长文档快速召回基线。
+- 运行时如果实际 embedding 只是 `HashingEmbeddingClient` 兜底，会自动把知识库后端从 `legacy_chroma` 切到 `sqlite_fts`；真实 embedding 可用时仍保留配置后端。
 
 关键性能结论：
 
@@ -220,6 +221,7 @@
 - 旧向量后端首次写入长文档仍然慢；最新 Napkin E2E 中，非跳过的 Chroma 首次构建约 108.5s。
 - SQLite FTS5 基准：Attention 全量 488 blocks 构建 0.030s、检索 0.0346s；Napkin 120 页 1831 blocks 构建 0.080s、检索 0.0422s；Napkin 全量 21687 blocks 构建 0.835s、检索 0.1028s。
 - 结论：默认阅读路径应优先拥有一个秒级全文索引；高质量语义检索、rerank 和 GraphRAG 在此基础上异步叠加。
+- 在没有真实语义 embedding 时，FTS5 已成为默认实际后端，避免旧 Chroma + 哈希向量拖慢长文档首次索引。
 
 ### RAG / GraphRAG 迁移
 

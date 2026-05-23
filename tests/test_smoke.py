@@ -59,6 +59,22 @@ def test_build_services_smoke() -> None:
     assert "service smoke ok" in result.stdout
 
 
+def test_build_services_uses_fts_for_hash_embedding() -> None:
+    result = _run_python(
+        """
+        from src.main import setup_logging, build_services
+
+        setup_logging()
+        services = build_services(test_mode=True)
+        engine = services.get("knowledge_engine")
+        assert engine.backend_name == "sqlite_fts"
+        services.shutdown()
+        print("fts fallback smoke ok")
+        """
+    )
+    assert "fts fallback smoke ok" in result.stdout
+
+
 def test_sample_pdf_parse_smoke() -> None:
     if not SAMPLE_PDF.exists():
         pytest.skip("sample PDF is not available in this checkout")

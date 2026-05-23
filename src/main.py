@@ -152,10 +152,18 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         from src.core.knowledge_engine import KnowledgeEngine
         from src.core.knowledge_engine import EmbeddingService
         from src.data.chroma_repo import ChromaRepo
+        effective_config = config.model_copy(deep=True)
+        embed_client = container.get("embed_client")
+        if (
+            effective_config.rag.backend == "legacy_chroma"
+            and type(embed_client).__name__ == "HashingEmbeddingClient"
+        ):
+            logging.info("使用哈希嵌入兜底，知识库后端自动切换为 sqlite_fts")
+            effective_config.rag.backend = "sqlite_fts"
         return KnowledgeEngine(
             cast(EmbeddingService, container.get("embedding_service")),
             cast(ChromaRepo, container.get("chroma_repo")),
-            config,
+            effective_config,
             sqlite_fts_dir=str(data_dir / "knowledge_bases_fts"),
         )
 
