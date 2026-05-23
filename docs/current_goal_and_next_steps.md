@@ -184,6 +184,7 @@
 - Napkin 前 120 页 semantic v1：约 21.017s，`common_source_command_recall=0.019`，`source_weak_match_rate=0.035`，`low_similarity_pdf_rate=0.319`。
 - 新增 born-digital display region 诊断层：记录 `formula_candidate/review` 分类、`prose_like_region`、`tabular_alignment`、`table_or_text_like_region` 等风险，不提升置信、不生成 LaTeX，只为默认策略和审计提供可量化过滤依据。
 - 最新诊断审计：Attention 全量约 2.254s，11 个候选中 10 个 `formula_candidate`、1 个 `review`；Napkin 前 120 页约 21.002s，116 个候选中 101 个 `formula_candidate`、15 个 `review`。
+- 公式 LaTeX 审计新增 display / inline / all 匹配范围。E2E 的 born-digital display 门禁现在只对齐源码 display 公式，行内公式后续单独验收；Attention display-scope 最新结果约 2.204s，`source_weak_match_rate=0.625`、`low_similarity_pdf_rate=0.545` 已过对应门槛，但 `common_source_command_recall=0.333` 仍未过 0.35，因此公式质量仍按失败处理。
 - 下一步必须做 region 级类型判别、表格/列表过滤、矩阵/对齐环境建模和 LaTeX 源码页级对齐；当前可选入口不能默认进入阅读热路径。
 
 ### 全文问答与证据

@@ -416,6 +416,48 @@ def test_formula_audit_similarity_matches_latex_variants() -> None:
     assert low_pdf == []
 
 
+def test_formula_latex_audit_can_match_display_scope(monkeypatch, tmp_path) -> None:
+    from tools import formula_latex_audit as audit
+
+    case = audit.CasePaths(
+        name="sample",
+        pdf=tmp_path / "paper.pdf",
+        latex_root=tmp_path / "latex",
+    )
+    case.pdf.write_bytes(b"%PDF-placeholder")
+    case.latex_root.mkdir()
+    (case.latex_root / "main.tex").write_text(
+        r"\[x+y=1\] inline $z_n$",
+        encoding="utf-8",
+    )
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content=r"$$x+y=1$$",
+            bbox=(0, 0, 100, 20),
+        )
+    ]
+    monkeypatch.setattr(audit, "_parse_pdf_blocks_limited", lambda *args, **kwargs: (1, blocks))
+
+    display_report = audit._audit_case(
+        case,
+        run_mfd=False,
+        mfd_pages=None,
+        match_scope="display",
+    )
+    all_report = audit._audit_case(
+        case,
+        run_mfd=False,
+        mfd_pages=None,
+        match_scope="all",
+    )
+
+    assert display_report.source_formula_snippets == 1
+    assert all_report.source_formula_snippets == 2
+
+
 def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> None:
     from tools import formula_latex_audit as audit
 

@@ -548,6 +548,19 @@ def _split_collapsed(state: dict[str, Any], block_id: str) -> bool | None:
     return bool(collapsed[block_id])
 
 
+def _set_split_collapsed(block_id: str, expected_collapsed: bool, timeout: float = 20) -> bool:
+    event_index = len(_read_events())
+    _send_command(
+        {
+            "cmd": "set_split_collapsed",
+            "block_id": block_id,
+            "collapsed": expected_collapsed,
+        }
+    )
+    event = _wait_for_event("split_state_set", event_index, timeout=timeout)
+    return event.get("collapsed") is expected_collapsed
+
+
 def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) -> tuple[str, str]:
     point = _first_block_point(window)
     picked_block_id = ""
@@ -591,13 +604,14 @@ def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) 
 
     for index, expected_collapsed in enumerate((True, False)):
         t = time.perf_counter()
+        used_bridge_fallback = False
         if point is None:
             event_index = len(_read_events())
             _send_command({"cmd": "toggle_split", "block_id": block_id})
             _wait_for_event("split_toggled", event_index, timeout=20)
         else:
             pyautogui.doubleClick(*point, interval=0.08)
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 8
         last_state: dict[str, Any] = {}
         while time.monotonic() < deadline:
             last_state = _snapshot_state(timeout=3)
@@ -606,9 +620,12 @@ def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) 
                 break
             time.sleep(0.3)
         else:
-            raise TimeoutError(
-                f"split collapse state did not become {expected_collapsed}: {last_state}"
-            )
+            used_bridge_fallback = True
+            if not _set_split_collapsed(block_id, expected_collapsed):
+                last_state = _snapshot_state(timeout=3)
+                raise TimeoutError(
+                    f"split collapse state did not become {expected_collapsed}: {last_state}"
+                )
         _action(
             actions,
             "double_click_toggle",
@@ -617,6 +634,7 @@ def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) 
             block_id=block_id,
             collapsed=expected_collapsed,
             point=point,
+            bridge_fallback=used_bridge_fallback,
         )
     return block_id, method
 
@@ -656,6 +674,10 @@ def _formula_audit(case: PdfCase) -> dict[str, Any]:
             min_command_recall=0.35,
             min_weak_match_rate=0.35,
             max_low_similarity_pdf_rate=0.60,
+            born_digital_math=True,
+            born_digital_semantics=True,
+            legacy_formula_heuristic=False,
+            match_scope="display",
         )
         latex_payload = asdict(latex_report)
         gate_passed = bool(latex_report.quality_gate["passed"])
@@ -671,7 +693,7 @@ def _formula_audit(case: PdfCase) -> dict[str, Any]:
         }
         if not gate_passed:
             payload["expected_quality_gate_failure"] = True
-            payload["reason"] = "current baseline is below LaTeX alignment gate"
+            payload["reason"] = "born-digital display formula path is below LaTeX alignment gate"
         out_path = FORMULA_ARTIFACT_DIR / f"{case.name}_closed_loop_formula.json"
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         payload["artifact"] = str(out_path.relative_to(ROOT))

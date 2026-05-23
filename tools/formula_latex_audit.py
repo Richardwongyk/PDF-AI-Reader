@@ -458,6 +458,7 @@ def _audit_case(
     born_digital_math: bool = False,
     born_digital_semantics: bool = False,
     legacy_formula_heuristic: bool = True,
+    match_scope: str = "all",
 ) -> FormulaReport:
     start = time.perf_counter()
     if not case.pdf.exists():
@@ -466,7 +467,12 @@ def _audit_case(
         raise FileNotFoundError(case.latex_root)
 
     source_display, source_inline, tex_files = _extract_source_formulas(case.latex_root)
-    source_formulas = source_display + source_inline
+    if match_scope == "display":
+        source_formulas = source_display
+    elif match_scope == "inline":
+        source_formulas = source_inline
+    else:
+        source_formulas = source_display + source_inline
     source_commands = _command_counts(source_formulas)
 
     page_count, blocks = _parse_pdf_blocks_limited(
@@ -679,6 +685,12 @@ def main() -> int:
         action="store_true",
         help="Disable the old span-level formula classifier for comparison.",
     )
+    parser.add_argument(
+        "--match-scope",
+        choices=["all", "display", "inline"],
+        default="all",
+        help="Which LaTeX source formulas to use for similarity and quality gates.",
+    )
     parser.add_argument("--min-command-recall", type=float, default=0.35)
     parser.add_argument("--min-weak-match-rate", type=float, default=0.35)
     parser.add_argument("--max-low-similarity-pdf-rate", type=float, default=0.60)
@@ -699,6 +711,7 @@ def main() -> int:
             born_digital_math=args.born_digital_math,
             born_digital_semantics=args.born_digital_semantics,
             legacy_formula_heuristic=not args.no_legacy_formula_heuristic,
+            match_scope=args.match_scope,
         )
         for case in selected
     ]
@@ -711,6 +724,7 @@ def main() -> int:
         "mfd_pages": [p + 1 for p in mfd_pages] if mfd_pages is not None else None,
         "max_pages": max(0, args.max_pages),
         "max_match_candidates": max(1, args.max_match_candidates),
+        "match_scope": args.match_scope,
         "reports": [asdict(report) for report in reports],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

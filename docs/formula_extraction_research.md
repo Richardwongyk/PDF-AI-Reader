@@ -279,6 +279,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - 新增 `PdfFormulaSemanticReconstructor` v1，可选从 display region 的 glyph/bbox/vector 事实恢复上下标、局部分式线、根号、常见 Unicode 数学符号和 upright 字母串；不使用样本词表，不使用 OCR。
 - Attention 全量、纯 born-digital display + semantic v1：耗时约 2.276s，公式块 11 个，`common_source_command_recall=0.353`，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。公式 1 可恢复 `\frac{Q K^{T}}{\sqrt{d_{k}}}` 结构。
 - Napkin 前 120 页、semantic v1：耗时约 21.017s，公式块 116 个，`common_source_command_recall=0.019`，`source_weak_match_rate=0.035`，`low_similarity_pdf_rate=0.319`。教材混排仍会吸入正文词，不能默认启用。
+- 公式 LaTeX 审计新增 `match_scope`：born-digital display 路线先对齐源码 display 公式，行内公式另走 inline 审计，避免用混合指标掩盖具体失败面。Attention 全量 display-scope 审计约 2.204s，8 个源码 display snippets、11 个 PDF display 候选，`source_weak_match_rate=0.625`，`low_similarity_pdf_rate=0.545`，但 `common_source_command_recall=0.333` 仍略低于 0.35 门槛，主要缺口是 `\dmodel`、`\sum`、`\text`、`\vec` 等命令恢复。
 
 当前边界：
 

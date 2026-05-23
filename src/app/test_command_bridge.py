@@ -91,6 +91,28 @@ class TestCommandBridge(QObject):
                 },
             )
             return
+        if cmd == "set_split_collapsed":
+            block_id = str(command.get("block_id") or "")
+            if not block_id:
+                block_id = self._pick_block(command)
+            if not block_id:
+                raise RuntimeError("no block available for set_split_collapsed")
+            target = bool(command.get("collapsed", False))
+            split = self._window._pdf_viewer.find_split_widget(block_id)
+            for _ in range(2):
+                if split is not None and bool(getattr(split, "collapsed", False)) is target:
+                    break
+                self._window._on_block_double_clicked(block_id)
+                split = self._window._pdf_viewer.find_split_widget(block_id)
+            self._emit(
+                "split_state_set",
+                {
+                    "block_id": block_id,
+                    "collapsed": bool(getattr(split, "collapsed", False)) if split else None,
+                    "target": target,
+                },
+            )
+            return
         if cmd == "rebuild_kb":
             self._kb_rebuild_pending = True
             self._window._on_build_knowledge_base()
