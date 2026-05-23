@@ -136,6 +136,7 @@ class MathOCR:
     _instance = None
     _lock = threading.Lock()
     _default_backend: str = "pix2text-mfr"
+    _default_backend_kwargs: dict[str, object] = {}
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -148,6 +149,7 @@ class MathOCR:
         if self._initialized:
             return
         self._backend_name = str(backend or self.__class__._default_backend or "pix2text-mfr")
+        self._backend_kwargs = dict(self.__class__._default_backend_kwargs)
         self._recognizer: FormulaRecognizer | None = None
         self._num_threads: int = os.cpu_count() or 4
         self._cache = _FormulaOcrCache()
@@ -158,9 +160,16 @@ class MathOCR:
     def set_default_backend(cls, backend: str) -> None:
         """Set process-wide backend before the singleton is first constructed."""
         backend_name = str(backend or "pix2text-mfr").strip() or "pix2text-mfr"
+        cls.set_default_backend_config(backend_name)
+
+    @classmethod
+    def set_default_backend_config(cls, backend: str, **kwargs: object) -> None:
+        """Set process-wide backend and optional backend-specific configuration."""
+        backend_name = str(backend or "pix2text-mfr").strip() or "pix2text-mfr"
         if cls._instance is not None and getattr(cls._instance, "_initialized", False):
             current = getattr(cls._instance, "_backend_name", "")
-            if current != backend_name:
+            current_kwargs = getattr(cls._instance, "_backend_kwargs", {})
+            if current != backend_name or current_kwargs != kwargs:
                 _logger.warning(
                     "公式 OCR 后端已初始化为 %s，忽略后续切换到 %s",
                     current,
@@ -168,6 +177,7 @@ class MathOCR:
                 )
                 return
         cls._default_backend = backend_name
+        cls._default_backend_kwargs = dict(kwargs)
 
     # ------------------------------------------------------------------
     # 公开属性
@@ -244,11 +254,12 @@ class MathOCR:
             self._ensure_model()
             miss_images = [images[i] for i, _ in misses]
             miss_results = self._recognize_batch_impl(miss_images)
+            cache_namespace = self._cache_namespace()
             for (original_index, image_hash), latex in zip(misses, miss_results, strict=False):
                 cleaned = str(latex or "").strip()
                 cached_results[original_index] = cleaned
                 if cleaned:
-                    self._cache.put(image_hash, cleaned, self._backend_name)
+                    self._cache.put(image_hash, cleaned, cache_namespace)
             return cached_results
         except Exception as e:
             _logger.warning("MFR 批量识别失败: %s", e)
@@ -270,11 +281,12 @@ class MathOCR:
         results: list[str] = [""] * len(images)
         misses: list[tuple[int, str]] = []
         hits = 0
+        cache_namespace = self._cache_namespace()
         for index, image in enumerate(images):
             if not image:
                 continue
             image_hash = self._cache.hash_image(image)
-            cached = self._cache.get(image_hash, self._backend_name)
+            cached = self._cache.get(image_hash, cache_namespace)
             if cached is not None:
                 results[index] = cached
                 hits += 1
@@ -290,8 +302,12 @@ class MathOCR:
                 self._backend_name,
                 batch_size=self._BATCH_SIZE,
                 num_threads=self._num_threads,
+                **self._backend_kwargs,
             )
         return self._recognizer
+
+    def _cache_namespace(self) -> str:
+        return self._get_recognizer().cache_namespace
 
     def _ensure_model(self) -> None:
         """Lazily initialize the selected formula recognizer backend."""

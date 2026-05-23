@@ -82,7 +82,10 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
     container.register_instance("config_manager", config_manager)
     config: AppConfig = config_manager.get()
     from src.core.math_ocr import MathOCR
-    MathOCR.set_default_backend(config.model.formula_ocr_backend)
+    MathOCR.set_default_backend_config(
+        config.model.formula_ocr_backend,
+        model_name=config.model.formula_ocr_model,
+    )
     logging.info("公式 OCR 后端: %s", config.model.formula_ocr_backend)
     if test_mode:
         config.routing.translation = "cloud_only"

@@ -4,7 +4,10 @@ model:
   cloud_translation: deepseek/deepseek-chat
   cloud_reasoning: deepseek/deepseek-v4-pro
   embed_local: bge-m3
+  # pix2text-mfr is the default. Install PaddleOCR and set paddle_formula for
+  # PP-FormulaNet_plus high-accuracy formula OCR in explicit/background scans.
   formula_ocr_backend: pix2text-mfr
+  formula_ocr_model: PP-FormulaNet_plus-S
   ollama_host: http://localhost:11434
 rag:
   backend: legacy_chroma

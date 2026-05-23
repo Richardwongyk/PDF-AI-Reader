@@ -394,6 +394,79 @@ def test_formula_recognizer_registry_exposes_default_backend() -> None:
     assert "pix2text-mfr" in FormulaRecognizerRegistry.available_names()
 
 
+def test_formula_recognizer_registry_exposes_paddle_backend() -> None:
+    from src.core.formula_recognizers import FormulaRecognizerRegistry
+
+    recognizer = FormulaRecognizerRegistry.create(
+        "paddle_formula",
+        batch_size=2,
+        num_threads=1,
+        model_name="PP-FormulaNet_plus-M",
+    )
+
+    assert recognizer.name == "paddle_formula"
+    assert recognizer.cache_namespace == "paddle_formula:PP-FormulaNet_plus-M:png-v1"
+    assert "paddle_formula" in FormulaRecognizerRegistry.available_names()
+
+
+def test_paddle_formula_recognizer_extracts_official_result_shapes() -> None:
+    from src.core.formula_recognizers import PaddleFormulaRecognizer
+
+    class ResultObject:
+        def to_json(self) -> dict[str, object]:
+            return {"res": {"rec_formula": r"\frac{a}{b}"}}
+
+    assert PaddleFormulaRecognizer._extract_latex({"rec_formula": r"\alpha+\beta"}) == r"\alpha+\beta"
+    assert PaddleFormulaRecognizer._extract_latex({"res": {"rec_formula": r"\sqrt{x}"}}) == r"\sqrt{x}"
+    assert PaddleFormulaRecognizer._extract_latex(ResultObject()) == r"\frac{a}{b}"
+    assert PaddleFormulaRecognizer._normalize_outputs(
+        [{"rec_formula": r"x"}, {"res": {"rec_formula": r"y"}}],
+        expected=3,
+    ) == [r"x", r"y", ""]
+
+
+def test_paddle_formula_recognizer_uses_batch_predict_api(monkeypatch) -> None:
+    import io
+
+    from PIL import Image
+
+    from src.core.formula_recognizers import PaddleFormulaRecognizer
+
+    init_kwargs: dict[str, object] = {}
+    predict_kwargs: dict[str, object] = {}
+
+    class FakeFormulaRecognition:
+        def __init__(self, **kwargs: object) -> None:
+            init_kwargs.update(kwargs)
+
+        def predict(self, **kwargs: object) -> list[dict[str, str]]:
+            predict_kwargs.update(kwargs)
+            return [{"rec_formula": r"\alpha"}, {"rec_formula": r"\beta"}]
+
+    def png_bytes() -> bytes:
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    monkeypatch.setattr(
+        PaddleFormulaRecognizer,
+        "_formula_cls",
+        staticmethod(lambda: FakeFormulaRecognition),
+    )
+    recognizer = PaddleFormulaRecognizer(
+        batch_size=8,
+        num_threads=3,
+        model_name="PP-FormulaNet_plus-M",
+    )
+
+    assert recognizer.is_available is True
+    assert recognizer.recognize_batch([png_bytes(), png_bytes()]) == [r"\alpha", r"\beta"]
+    assert init_kwargs["model_name"] == "PP-FormulaNet_plus-M"
+    assert init_kwargs["cpu_threads"] == 3
+    assert predict_kwargs["batch_size"] == 8
+    assert len(predict_kwargs["input"]) == 2
+
+
 def test_formula_ocr_cache_is_model_scoped(tmp_path) -> None:
     from src.core.math_ocr import _FormulaOcrCache
 
@@ -446,6 +519,40 @@ def test_math_ocr_uses_process_default_backend(monkeypatch, tmp_path) -> None:
     ocr._cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
 
     assert ocr.backend_name == "pix2text"
+
+    MathOCR._instance = None
+    MathOCR.set_default_backend("pix2text-mfr")
+
+
+def test_math_ocr_cache_uses_recognizer_namespace(monkeypatch, tmp_path) -> None:
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    class FakeRecognizer:
+        name = "paddle_formula"
+        cache_namespace = "paddle_formula:PP-FormulaNet_plus-M:png-v1"
+
+        @property
+        def is_available(self) -> bool:
+            return True
+
+        def recognize_batch(self, images: list[bytes]) -> list[str]:
+            return [r"\theta"]
+
+    MathOCR._instance = None
+    MathOCR.set_default_backend_config(
+        "paddle_formula",
+        model_name="PP-FormulaNet_plus-M",
+    )
+    cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    image = b"same-image"
+    cache.put(cache.hash_image(image), r"\alpha", "paddle_formula:PP-FormulaNet_plus-S:png-v1")
+    ocr = MathOCR()
+    ocr._cache = cache
+    monkeypatch.setattr(ocr, "_get_recognizer", lambda: FakeRecognizer())
+
+    assert ocr.recognize(image) == r"\theta"
+    assert cache.get(cache.hash_image(image), "paddle_formula:PP-FormulaNet_plus-M:png-v1") == r"\theta"
+    assert cache.get(cache.hash_image(image), "paddle_formula:PP-FormulaNet_plus-S:png-v1") == r"\alpha"
 
     MathOCR._instance = None
     MathOCR.set_default_backend("pix2text-mfr")

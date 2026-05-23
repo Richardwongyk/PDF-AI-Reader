@@ -242,6 +242,8 @@ PDF 打开/滚动/缩放
 
 在不损失精度的前提下，大幅提升公式 OCR 性能主要靠管线优化，而不是简单降低模型大小。
 
+详细设计见：[formula_ocr_performance_design.md](formula_ocr_performance_design.md)。
+
 已落地的无损优化：
 
 - MFD 与 MFR 解耦：页面级 MFD 先找 bbox，MFR 只处理需要 LaTeX 的裁剪图。
@@ -268,21 +270,28 @@ PDF 打开/滚动/缩放
 - 接入方式优先 `pybind11` 或稳定 C ABI 小模块；每个 native 模块必须有 Python fallback、独立基准和 Attention/Napkin 回归测试。
 - 只有当 Python 侧算法和数据结构稳定后再写 C++，否则会把错误架构固化成更难维护的二进制扩展。
 
-下一步可插拔后端：
+可插拔后端状态：
 
 - `pix2text`: 继续作为当前默认后端，兼容已有缓存和代码路径。
-- `paddle_formula`: 评估 PaddleOCR 3.x 的 PP-FormulaNet / PP-FormulaNet_plus。官方公式识别模块支持 `PP-FormulaNet_plus-S/M/L`、`UniMERNet` 和 `batch_size` 配置，适合作为本地高性能后端。
+- `paddle_formula`: 已接入 PaddleOCR 3.x `FormulaRecognition` 适配层。官方模块支持 `PP-FormulaNet_plus-S/M/L`、`UniMERNet` 和 `batch_size` 配置；当前配置项 `model.formula_ocr_model` 默认 `PP-FormulaNet_plus-S`，用于优先验证速度/精度平衡。
 - `unimernet`: 作为复杂真实公式的高精度备选，适合放在低置信度修正轮。
 - `nougat`: 适合整页科学 PDF 转 Markdown 的离线增强，不适合作为交互式逐公式 OCR 主链路。
 
 迁移原则：
 
 - 新后端必须实现同一个 `FormulaRecognizer` 接口，不能把 Paddle/UniMERNet 直接写死在 UI 或知识库流程里。
-- `MathOCR` 已改为通过 `FormulaRecognizerRegistry` 创建后端，默认 `formula_ocr_backend=pix2text-mfr`；Paddle/UniMERNet 后续只需新增后端实现并复用现有缓存、限流和任务队列。
-- 每个后端独立缓存 key 必须包含 `image_hash/model/model_version/preprocess_version`，避免新旧模型结果冲突。
+- `MathOCR` 已改为通过 `FormulaRecognizerRegistry` 创建后端，默认 `formula_ocr_backend=pix2text-mfr`；Paddle 后端已复用现有缓存、限流和任务队列。
+- 每个后端独立缓存 key 必须包含 `image_hash/model/model_version/preprocess_version`，避免新旧模型结果冲突；`paddle_formula` 当前缓存命名空间为 `paddle_formula:{formula_ocr_model}:png-v1`。
 - 默认模式必须保证 Attention/Napkin 打开、滚动、缩放性能不回退。
 - 高精度模式允许更慢，但必须可暂停、可恢复、有进度、有低置信度修正队列。
 - 引入新工具前必须跑 Attention/Napkin PDF 与 LaTeX 源公式的 recall/precision 审计，不以主观观感替代验收。
+
+当前性能判断：
+
+- 这次接入不会改变默认阅读路径；没有安装 PaddleOCR 时不会在启动时导入或加载 Paddle。
+- `paddle_formula` 只在 `model.formula_ocr_backend=paddle_formula` 且显式/后台公式扫描真正触发 OCR 时加载模型。
+- 不能直接宣称 Paddle 后端已经“够好”。必须先安装 PaddleOCR 后对 Attention/Napkin 跑真实 MFR、再用 `tools/formula_latex_audit.py --quality-gate` 与源 LaTeX 对齐审计。
+- 若 `PP-FormulaNet_plus-S` 速度够快但复杂公式准确率不够，下一轮才比较 `PP-FormulaNet_plus-M/L` 或 UniMERNet，并把慢模型限制在低置信度修正轮。
 
 ## 下一步执行顺序
 

@@ -179,6 +179,8 @@ PDF / OCR / MFR
 
 公式识别不能以牺牲阅读体验为代价全量同步运行。后续改造按三层执行：
 
+更细的公式 OCR 性能设计见 [formula_ocr_performance_design.md](formula_ocr_performance_design.md)。
+
 - 快速打开层：PDF 首屏、滚动、缩放只依赖 PyMuPDF 原生文本和已有缓存。
 - 按需精扫层：只对视口附近、用户双击、问答证据涉及的疑似公式块触发有限预算 MFD/MFR。
 - 后台批处理层：空闲时增量扫描，结果写入公式 OCR 缓存；长文档按页优先级队列运行，可暂停和恢复。
@@ -203,7 +205,7 @@ PDF / OCR / MFR
 
 - 全篇高精度确认流：允许用户主动开启更激进的 `max_mfd_pages/max_uncached`，但必须可暂停和恢复。
 - 公式精度审计：把 Attention / Napkin 的 PDF 抽取结果与 LaTeX 源公式做 recall/precision 对照。
-- 可插拔公式识别后端：评估 PaddleOCR PP-FormulaNet / PP-FormulaNet_plus 与 UniMERNet，默认保持 Pix2Text，候选后端必须通过 Attention/Napkin 性能和精度审计。
+- 可插拔公式识别后端：PaddleOCR `FormulaRecognition` 适配层已接入为 `paddle_formula`；默认保持 Pix2Text，候选后端必须通过 Attention/Napkin 性能和精度审计后才能进入默认策略。
 - `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
 
 验收门槛：
@@ -217,7 +219,9 @@ PDF / OCR / MFR
 - 不直接在 UI 或知识库层绑定某个 OCR 库，新增 `FormulaRecognizer` 抽象后再接入 Paddle/UniMERNet。
 - 缓存 key 必须包含 `image_hash/model/model_version/preprocess_version`，防止不同模型结果互相污染。
 - 默认后端以速度稳定为先，高精度后端只进入用户确认的精扫或低置信度修正轮。
+- `paddle_formula` 使用 PaddleOCR 3.x 模块 API：`FormulaRecognition(model_name=...)` 初始化模型，`predict(input=..., batch_size=...)` 批量识别裁剪公式图，并读取结果中的 `rec_formula`；模型名由 `model.formula_ocr_model` 控制，缓存命名空间包含具体模型名。
 - PP-FormulaNet_plus-S 优先作为“快且准”的候选，PP-FormulaNet_plus-M/L 和 UniMERNet 作为更高精度候选。
+- 当前环境尚未安装 `paddleocr/paddlepaddle`，因此本阶段只能验证适配层、缓存隔离和默认路径不回退；真实准确率和速度必须在安装后用 Attention/Napkin 源 LaTeX 对齐审计判断。
 
 ## 官方资料
 
