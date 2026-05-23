@@ -955,6 +955,22 @@ class PdfViewer(QScrollArea):
             _logger.info("PdfViewer: _update_visible_pages 耗时 %.1fms (needed=%d, pool=%d)",
                          elapsed, len(needed), len(self._widget_pool))
 
+    def visible_pages(self, margin_pages: bool = False) -> set[int]:
+        """Return current viewport pages without triggering rendering."""
+        if not self._vlayout:
+            return set()
+        viewport_h = self.viewport().height()
+        if viewport_h <= 0:
+            return set()
+        margin = viewport_h if margin_pages else 0
+        return set(
+            self._vlayout.page_range_for_viewport(
+                float(self.verticalScrollBar().value()),
+                float(viewport_h),
+                float(margin),
+            )
+        )
+
     # ── 页面渲染 ──
 
     def _render_page(self, page_num: int) -> None:

@@ -13,6 +13,7 @@ import hashlib
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore
 from src.core.models import BlockType, DocumentBlock
 
@@ -90,6 +91,23 @@ class FormulaIndexFlow(QObject):
         )
         budget = self.DEFAULT_BATCH_BUDGET if batch_budget is None else batch_budget
         self._start_next_batch(filepath, budget)
+
+    def enqueue_plan(
+        self,
+        filepath: str,
+        doc_hash: str,
+        plan: FormulaScanPlan,
+    ) -> None:
+        """Enqueue a scheduler-produced scan plan."""
+        self.enqueue_blocks(
+            filepath=filepath,
+            blocks=plan.blocks,
+            doc_hash=doc_hash,
+            priority_pages=plan.priority_pages,
+            batch_budget=plan.batch_budget,
+            drain_queue=plan.drain_queue,
+            cache_only=plan.cache_only,
+        )
 
     def stop(self) -> None:
         """Stop the active worker if one is running."""

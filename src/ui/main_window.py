@@ -51,6 +51,7 @@ from src.core.service_container import ServiceContainer
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget
 from src.ui.theme import apply_theme
+from src.app.formula_index_scheduler import FormulaScanTrigger
 
 
 class MainWindow(QMainWindow):
@@ -108,7 +109,9 @@ class MainWindow(QMainWindow):
 
         # 公式索引流程：异步补扫图片/扫描公式，并增量写回知识库
         from src.app.formula_index_flow import FormulaIndexFlow
+        from src.app.formula_index_scheduler import FormulaIndexScheduler
         self._formula_index_flow = FormulaIndexFlow(self)
+        self._formula_index_scheduler = FormulaIndexScheduler()
 
         # 当前文档状态
         self._current_doc_hash: str = ""
@@ -126,6 +129,11 @@ class MainWindow(QMainWindow):
         self._dock_last_question: str = ""
         self._dock_followup_questions: list[str] = []
         self._pending_kb_upserts: dict[str, DocumentBlock] = {}
+        self._last_formula_viewport_pages: set[int] = set()
+        self._formula_viewport_timer = QTimer(self)
+        self._formula_viewport_timer.setSingleShot(True)
+        self._formula_viewport_timer.setInterval(250)
+        self._formula_viewport_timer.timeout.connect(self._schedule_viewport_formula_scan)
 
         self._init_ui()
         self._connect_signals()
@@ -361,6 +369,7 @@ class MainWindow(QMainWindow):
         self._pdf_viewer.block_translate_requested.connect(self._on_block_translate)
         self._pdf_viewer.block_question_requested.connect(self._on_block_question)
         self._pdf_viewer.block_explain_requested.connect(self._on_block_explain)
+        self._pdf_viewer.viewport_changed.connect(self._on_viewport_changed)
         self._pdf_viewer.split_close_requested.connect(self._on_split_closed)
 
         # AIEngine 流式信号（由 PdfViewer 内部的 SplitWidget 消费）
@@ -482,6 +491,7 @@ class MainWindow(QMainWindow):
             self._pdf_viewer.update_page_blocks(page_num, page_blocks)
         self._pending_page_blocks.clear()
         self._viewer_document_loaded = True
+        self._last_formula_viewport_pages.clear()
 
         # 加载目录
         if result.toc:
@@ -499,6 +509,7 @@ class MainWindow(QMainWindow):
 
         self._pymupdf4llm_pending_result = result
         QTimer.singleShot(15000, self._maybe_run_pymupdf4llm_enhance)
+        self._formula_viewport_timer.start(1200)
 
     def _refresh_knowledge_status(self) -> None:
         """延后检查知识库状态，避免卡住长文档首屏加载。"""
@@ -622,14 +633,11 @@ class MainWindow(QMainWindow):
         if pending:
             filepath = getattr(self._doc_engine, "_filepath", "")
             priority_pages = {block.page_num for block in pending[:4]}
-            self._formula_index_flow.enqueue_blocks(
-                filepath,
-                pending,
-                doc_hash=self._current_doc_hash,
-                priority_pages=priority_pages,
-                batch_budget=8,
-                drain_queue=False,
-                cache_only=True,
+            self._schedule_formula_scan(
+                pages=priority_pages,
+                trigger=FormulaScanTrigger.USER_ACTION,
+                filepath=filepath,
+                blocks=pending,
             )
 
     def _on_background_formula_blocks_updated(self, updated_blocks: list[DocumentBlock]) -> None:
@@ -661,6 +669,62 @@ class MainWindow(QMainWindow):
             self._ai_doc_status.setText(
                 f"知识库就绪\n公式索引: 本批识别 {recognized}，待补扫 {pending}"
             )
+
+    def _on_viewport_changed(self, value: int, maximum: int) -> None:
+        """Schedule a tiny cache-only formula scan for pages near the viewport."""
+        if not self._viewer_document_loaded or not self._current_doc_hash:
+            return
+        self._formula_viewport_timer.start()
+
+    def _schedule_viewport_formula_scan(self) -> None:
+        pages = self._pdf_viewer.visible_pages(margin_pages=False)
+        if not pages or pages == self._last_formula_viewport_pages:
+            return
+        self._last_formula_viewport_pages = set(pages)
+        self._schedule_formula_scan(pages=pages, trigger=FormulaScanTrigger.VIEWPORT)
+
+    def _schedule_evidence_formula_scan(self, evidence: list[dict[str, Any]]) -> None:
+        if not evidence or not self._current_doc_hash:
+            return
+        filepath = getattr(self._doc_engine, "_filepath", "")
+        plan = self._formula_index_scheduler.plan_for_evidence(
+            self._current_blocks,
+            evidence,
+            self._doc_engine.page_count,
+        )
+        self._enqueue_formula_plan(filepath, plan, "evidence")
+
+    def _schedule_formula_scan(
+        self,
+        pages: set[int],
+        trigger: FormulaScanTrigger,
+        filepath: str = "",
+        blocks: list[DocumentBlock] | None = None,
+    ) -> None:
+        if not self._current_doc_hash:
+            return
+        filepath = filepath or getattr(self._doc_engine, "_filepath", "")
+        source_blocks = blocks if blocks is not None else self._current_blocks
+        plan = self._formula_index_scheduler.plan_for_pages(
+            source_blocks,
+            pages,
+            trigger,
+            self._doc_engine.page_count,
+        )
+        self._enqueue_formula_plan(filepath, plan, trigger.value)
+
+    def _enqueue_formula_plan(self, filepath: str, plan: Any, reason: str) -> None:
+        if not filepath or not plan.blocks:
+            return
+        self.logger.info(
+            "公式扫描调度: reason=%s blocks=%d budget=%d cache_only=%s pages=%s",
+            reason,
+            len(plan.blocks),
+            plan.batch_budget,
+            plan.cache_only,
+            sorted(plan.priority_pages)[:8],
+        )
+        self._formula_index_flow.enqueue_plan(filepath, self._current_doc_hash, plan)
 
     # =========================================================================
     # KnowledgeEngine 回调
@@ -838,6 +902,7 @@ class MainWindow(QMainWindow):
             tree_item.setData(1, Qt.ItemDataRole.UserRole, item.get("id", ""))
             tree_item.setText(0, f"第{page}页 · {relevance:.2f}")
         self._ai_doc_status.setText(f"检索到 {len(evidence)} 条依据")
+        self._schedule_evidence_formula_scan(evidence)
 
     def _on_evidence_item_activated(self, item: QTreeWidgetItem, column: int) -> None:
         """双击右侧证据片段跳转到来源页。"""

@@ -90,6 +90,8 @@
 - 未进入预算或识别失败的公式仍写入 `DocumentBlock`，标记 `needs_ocr=True`，为后台公式索引继续补扫保留稳定位置。
 - 新增 `FormulaIndexFlow`，对 `needs_ocr=True` 的公式块做后台预算式 OCR。
 - 新增 `FormulaIndexStore`，使用 SQLite 持久化 `doc_hash/block_id/page/bbox/priority/status/latex/image_hash/model/error/attempts`，支持 queued / running / done / failed / skipped 状态。
+- 新增 `FormulaIndexScheduler` / `FormulaScanPolicy`，把视口页、全文问答 evidence 页、用户触发页转换为统一扫描计划。
+- 默认阅读路径使用 cache-only 小批量扫描；只有显式高精度计划才允许 MFR 加载模型推理。
 - 公式索引任务数据库写入 `data/formula_index_jobs.db`，已加入 `.gitignore`，不会进入版本库。
 - 公式后台识别成功后会刷新页面 block，并通过 `KnowledgeEngine.upsert_blocks()` 增量写回知识库。
 - 如果公式识别早于基础知识库构建完成，主窗口会暂存增量块，等 `build_finished` 后统一写入，避免竞态导致全文问答漏掉公式。
@@ -98,7 +100,7 @@
 
 这个过程分成三条可独立回滚的后台流水线，不能混成一个同步任务。
 
-当前已经落地的是第一条和第二条的基础闭环：阅读路径保持轻量，全文 RAG 基础索引可快速可用，公式 OCR 任务已经持久化，识别结果能增量 upsert 回知识库。还没有完成的是空闲批处理调度器、动态扫描策略和 GraphRAG 图谱 worker。
+当前已经落地的是第一条和第二条的基础闭环：阅读路径保持轻量，全文 RAG 基础索引可快速可用，公式 OCR 任务已经持久化，视口/evidence/用户触发页已有统一调度策略，识别结果能增量 upsert 回知识库。还没有完成的是后台空闲全量补扫、显式高精度扫描 UI 和 GraphRAG 图谱 worker。
 
 ```text
 PDF 打开/滚动/缩放
@@ -227,10 +229,11 @@ PDF 打开/滚动/缩放
    - 需要通过 Attention / Napkin E2E。
    - 提交前后继续检查无额外自动署名。
 
-2. **实现公式扫描调度器**
+2. **完善公式扫描调度器**
    - 持久任务表已完成。
-   - 下一步把视口、问答 evidence、用户点击和后台空闲扫描统一写入优先级队列。
-   - 每批动态限制 MFD/MFR 数量，避免 CPU 抢占阅读和渲染。
+   - 视口、问答 evidence、用户触发页已经统一生成扫描计划。
+   - 下一步补后台空闲扫描入口和显式高精度扫描 UI。
+   - 每批继续动态限制 MFD/MFR 数量，避免 CPU 抢占阅读和渲染。
    - 二次打开时从任务表恢复 queued / failed 任务，done 任务直接依赖 OCR cache 和知识库 metadata。
 
 3. **完善公式结果增量写回知识库**
