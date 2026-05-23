@@ -85,7 +85,61 @@ def _cases() -> list[PdfCase]:
 def _reset_logs() -> None:
     (ROOT / "logs").mkdir(exist_ok=True)
     if APP_LOG.exists():
-        APP_LOG.unlink()
+        try:
+            APP_LOG.unlink()
+        except PermissionError:
+            _terminate_existing_reader_processes()
+            for _ in range(20):
+                try:
+                    APP_LOG.unlink()
+                    break
+                except PermissionError:
+                    time.sleep(0.25)
+            else:
+                raise
+
+
+def _terminate_existing_reader_processes() -> None:
+    """Close stale app instances that keep app.log locked between E2E runs."""
+    if os.name != "nt":
+        return
+    script = r"""
+$selfPid = $PID
+Get-CimInstance Win32_Process | Where-Object {
+    $_.ProcessId -ne $selfPid -and
+    @('python.exe','pythonw.exe','conda.exe','cmd.exe') -contains $_.Name -and
+    $_.CommandLine -match 'src[\\/]+main\.py'
+} | Select-Object -ExpandProperty ProcessId
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return
+    pids: list[int] = []
+    for raw in result.stdout.splitlines():
+        raw = raw.strip()
+        if not raw.isdigit():
+            continue
+        pid = int(raw)
+        if pid and pid not in pids:
+            pids.append(pid)
+    for pid in pids:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    if pids:
+        time.sleep(1.0)
 
 
 def _reset_bridge_files() -> None:

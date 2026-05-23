@@ -184,13 +184,13 @@ PDF / OCR / MFR
 - 交互式默认不跑 MFD 页扫描；显式精扫可通过 `max_mfd_pages>0` 开启，并按图片、已有公式块、LaTeX/数学符号密度排序候选页。
 - MFD 找到的图片/扫描公式先按优先级进入有限 OCR 预算，其余保留 `needs_ocr=True` 占位，等待后台公式索引补扫。
 - `FormulaIndexFlow` 已接入主窗口，后台补扫 `needs_ocr=True` 的公式块。
+- `FormulaIndexStore` 已用 SQLite 持久化公式扫描任务，记录 `doc_hash/page/bbox/block_id/image_hash/status/priority/latex/model/error/attempts`，支持重启后继续调度。
 - 识别完成的公式通过 `KnowledgeEngine.upsert_blocks()` 增量写入当前知识库后端，不重建整个文档索引。
 - 知识库未就绪时，公式增量块会先暂存，等基础索引构建完成后 flush。
 
 待落地的异步索引层：
 
-- 持久化 `FormulaIndexWorker` 任务表，字段包含 `doc_hash/page/bbox/block_id/image_hash/status/priority/latex/model/error`。
-- `FormulaIndexScheduler`：把视口、点击解释、问答 evidence、后台空闲扫描合并成一个持久优先级队列。
+- `FormulaIndexScheduler`：把视口、点击解释、问答 evidence、后台空闲扫描合并进已持久化任务表，并按优先级启动批次。
 - `FormulaScanPolicy`：按文档大小、设备负载和用户模式动态决定 `max_mfd_pages/max_uncached`，高精度模式可以更激进，阅读模式必须保守。
 - `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
 

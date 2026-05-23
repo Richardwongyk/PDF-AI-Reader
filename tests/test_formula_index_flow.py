@@ -1,4 +1,5 @@
 from src.app.formula_index_flow import FormulaIndexFlow
+from src.app.formula_index_store import FormulaIndexStore
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -96,9 +97,16 @@ def test_formula_index_flow_default_worker_is_cache_only() -> None:
     workers: list[object] = []
 
     class FakeWorker:
-        def __init__(self, filepath: str, blocks: list[DocumentBlock], cache_only: bool = True) -> None:
+        def __init__(
+            self,
+            filepath: str,
+            blocks: list[DocumentBlock],
+            doc_hash: str = "",
+            cache_only: bool = True,
+        ) -> None:
             self.filepath = filepath
             self.blocks = blocks
+            self.doc_hash = doc_hash
             self.cache_only = cache_only
             self.finished_signal = _Signal()
             self.finished = _Signal()
@@ -130,7 +138,14 @@ def test_formula_index_flow_explicit_full_scan_can_load_model() -> None:
     workers: list[object] = []
 
     class FakeWorker:
-        def __init__(self, filepath: str, blocks: list[DocumentBlock], cache_only: bool = True) -> None:
+        def __init__(
+            self,
+            filepath: str,
+            blocks: list[DocumentBlock],
+            doc_hash: str = "",
+            cache_only: bool = True,
+        ) -> None:
+            self.doc_hash = doc_hash
             self.cache_only = cache_only
             self.finished_signal = _Signal()
             self.finished = _Signal()
@@ -160,6 +175,75 @@ def test_formula_index_flow_explicit_full_scan_can_load_model() -> None:
 
     assert len(workers) == 1
     assert workers[0].cache_only is False
+
+
+def test_formula_index_store_persists_status_transitions(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula("p0_b1", 0, score=0.7)
+
+    inserted = store.enqueue_blocks("doc-1", "paper.pdf", [block], priority_pages={0})
+    store.mark_running("doc-1", ["p0_b1"])
+    store.mark_done("doc-1", "p0_b1", r"\frac{a}{b}", "hash-1")
+
+    tasks = store.list_tasks("doc-1")
+    assert inserted == 1
+    assert store.counts("doc-1") == {"done": 1}
+    assert tasks[0].status == "done"
+    assert tasks[0].attempts == 1
+    assert tasks[0].latex == r"\frac{a}{b}"
+    assert tasks[0].image_hash == "hash-1"
+
+
+def test_formula_index_store_requeues_changed_done_block(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula("p0_b1", 0)
+    store.enqueue_blocks("doc-1", "paper.pdf", [block])
+    store.mark_done("doc-1", "p0_b1", r"x", "hash-1")
+
+    changed = block.model_copy(update={"content": "changed placeholder"})
+    store.enqueue_blocks("doc-1", "paper.pdf", [changed])
+
+    assert store.counts("doc-1") == {"queued": 1}
+    task = store.list_tasks("doc-1")[0]
+    assert task.latex == r"x"
+    assert task.status == "queued"
+
+
+def test_formula_index_flow_records_worker_result_in_store(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    block = _formula("p0_b1", 0)
+    flow.enqueue_blocks(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        batch_budget=0,
+    )
+
+    updated = block.model_copy(update={
+        "content": r"\sum_i x_i",
+        "metadata": {**block.metadata, "needs_ocr": False, "mfr_recognized": True},
+    })
+    flow._on_worker_finished(
+        {
+            "doc_hash": "doc-1",
+            "updated": [updated],
+            "pending": 0,
+            "done": [{
+                "block_id": "p0_b1",
+                "latex": r"\sum_i x_i",
+                "image_hash": "hash-2",
+                "model": "pix2text-mfr",
+            }],
+            "skipped": [],
+            "failed": [],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    assert store.counts("doc-1") == {"done": 1}
+    assert store.list_tasks("doc-1")[0].latex == r"\sum_i x_i"
 
 
 class _Signal:

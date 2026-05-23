@@ -89,6 +89,8 @@
 - 扫描版/图片公式的 MFR 已按页、置信度、面积做优先级排序；默认只走缓存回填，不对未命中图片即时推理。
 - 未进入预算或识别失败的公式仍写入 `DocumentBlock`，标记 `needs_ocr=True`，为后台公式索引继续补扫保留稳定位置。
 - 新增 `FormulaIndexFlow`，对 `needs_ocr=True` 的公式块做后台预算式 OCR。
+- 新增 `FormulaIndexStore`，使用 SQLite 持久化 `doc_hash/block_id/page/bbox/priority/status/latex/image_hash/model/error/attempts`，支持 queued / running / done / failed / skipped 状态。
+- 公式索引任务数据库写入 `data/formula_index_jobs.db`，已加入 `.gitignore`，不会进入版本库。
 - 公式后台识别成功后会刷新页面 block，并通过 `KnowledgeEngine.upsert_blocks()` 增量写回知识库。
 - 如果公式识别早于基础知识库构建完成，主窗口会暂存增量块，等 `build_finished` 后统一写入，避免竞态导致全文问答漏掉公式。
 
@@ -96,7 +98,7 @@
 
 这个过程分成三条可独立回滚的后台流水线，不能混成一个同步任务。
 
-当前已经落地的是第一条和第二条的基础闭环：阅读路径保持轻量，全文 RAG 基础索引可快速可用，公式 OCR 结果能增量 upsert 回知识库。还没有完成的是持久化公式任务表、空闲批处理调度器和 GraphRAG 图谱 worker。
+当前已经落地的是第一条和第二条的基础闭环：阅读路径保持轻量，全文 RAG 基础索引可快速可用，公式 OCR 任务已经持久化，识别结果能增量 upsert 回知识库。还没有完成的是空闲批处理调度器、动态扫描策略和 GraphRAG 图谱 worker。
 
 ```text
 PDF 打开/滚动/缩放
@@ -220,23 +222,23 @@ PDF 打开/滚动/缩放
 
 ## 下一步执行顺序
 
-1. **提交当前交互式 MFD 限流改动**
+1. **提交当前持久公式任务队列改动**
    - 已通过 `pytest -q`。
-   - 已通过 Attention / Napkin E2E。
+   - 需要通过 Attention / Napkin E2E。
    - 提交前后继续检查无额外自动署名。
 
-2. **实现持久公式扫描任务队列**
-   - 新增公式 OCR job model。
-   - 按页、视口、问答证据、用户点击排序。
-   - 每批限制 OCR 数量，避免 CPU 抢占阅读和渲染。
-   - 任务状态至少包含 queued / running / done / failed / skipped，支持二次打开恢复。
+2. **实现公式扫描调度器**
+   - 持久任务表已完成。
+   - 下一步把视口、问答 evidence、用户点击和后台空闲扫描统一写入优先级队列。
+   - 每批动态限制 MFD/MFR 数量，避免 CPU 抢占阅读和渲染。
+   - 二次打开时从任务表恢复 queued / failed 任务，done 任务直接依赖 OCR cache 和知识库 metadata。
 
 3. **完善公式结果增量写回知识库**
    - 已有 `DocumentBlock` 更新。
    - 已新增 `KnowledgeEngine.upsert_blocks()` 和后端 `upsert_blocks()`。
    - 后台公式识别结果会增量 upsert 到当前知识库后端。
    - 全文问答可引用识别后的公式。
-   - 下一步要把任务表、缓存 hash 和知识库 metadata 串起来，避免重复扫描。
+   - 下一步要把任务表 done 状态、缓存 hash 和知识库 metadata 串起来，避免重复扫描。
 
 4. **评估 Qdrant hybrid**
    - 目标不是“换库”，而是更快更强的 dense+sparse 检索。

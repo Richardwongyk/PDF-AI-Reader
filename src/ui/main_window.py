@@ -625,6 +625,7 @@ class MainWindow(QMainWindow):
             self._formula_index_flow.enqueue_blocks(
                 filepath,
                 pending,
+                doc_hash=self._current_doc_hash,
                 priority_pages=priority_pages,
                 batch_budget=8,
                 drain_queue=False,
