@@ -139,7 +139,7 @@ PDF / OCR / MFR
 - `doc_hash` 仍是文档主键；索引版本作为 collection 前缀。
 - `DocumentBlock.id` 是 UI 定位主键，任何新工具返回结果都必须映射回该 id。
 - 配置缺字段时由 Pydantic 默认值补齐，旧 `config.yaml` 不需要手工编辑。
-- 每阶段独立 git commit；提交信息不加入共同贡献者字样。
+- 每阶段独立 git commit；提交信息不加入额外自动署名。
 
 ## 性能策略
 
@@ -147,6 +147,7 @@ PDF / OCR / MFR
 - Chroma 批量写入默认使用 512 块一批；5000 块合成基准从 batch=50 的约 16.2s 降至约 9.9s。
 - 基础索引写入 `index_fingerprint/index_block_count/index_schema`，手动重建时如果当前 `DocumentBlock` 指纹一致则跳过全量 embedding/upsert。
 - 增量公式 OCR 块允许追加到 collection；指纹只判断基础块集合，避免后台公式块导致无变化文档反复全量重建。
+- 默认交互式解析的 MFD 页扫描预算为 0，避免长文档打开后加载重型公式检测模型抢占 UI、翻译和渲染。
 - 默认打开文档不阻塞等待 GraphRAG。
 - 长文档默认先建基础向量/混合索引，图谱抽取排队或手动触发。
 - 重排候选池由 `rag.candidate_pool` 控制，默认 48。
@@ -173,13 +174,14 @@ PDF / OCR / MFR
 公式识别不能以牺牲阅读体验为代价全量同步运行。后续改造按三层执行：
 
 - 快速打开层：PDF 首屏、滚动、缩放只依赖 PyMuPDF 原生文本和已有缓存。
-- 按需精扫层：只对视口附近、用户双击、问答证据涉及的疑似公式块触发 MFD/MFR。
+- 按需精扫层：只对视口附近、用户双击、问答证据涉及的疑似公式块触发有限预算 MFD/MFR。
 - 后台批处理层：空闲时增量扫描，结果写入公式 OCR 缓存；长文档按页优先级队列运行，可暂停和恢复。
 
 当前已落地的性能闸门：
 
 - 公式图片先按 hash 查 `data/formula_ocr_cache.db`，缓存命中不加载 Pix2Text。
 - `MathOCR.recognize_batch(..., max_uncached=N)` 可以限制本轮 MFR 推理的缓存未命中数量。
+- 交互式默认不跑 MFD 页扫描；显式精扫可通过 `max_mfd_pages>0` 开启，并按图片、已有公式块、LaTeX/数学符号密度排序候选页。
 - MFD 找到的图片/扫描公式先按优先级进入有限 OCR 预算，其余保留 `needs_ocr=True` 占位，等待后台公式索引补扫。
 - `FormulaIndexFlow` 已接入主窗口，后台补扫 `needs_ocr=True` 的公式块。
 - 识别完成的公式通过 `KnowledgeEngine.upsert_blocks()` 增量写入当前知识库后端，不重建整个文档索引。
@@ -189,6 +191,7 @@ PDF / OCR / MFR
 
 - 持久化 `FormulaIndexWorker` 任务表，字段包含 `doc_hash/page/bbox/block_id/image_hash/status/priority/latex/model/error`。
 - `FormulaIndexScheduler`：把视口、点击解释、问答 evidence、后台空闲扫描合并成一个持久优先级队列。
+- `FormulaScanPolicy`：按文档大小、设备负载和用户模式动态决定 `max_mfd_pages/max_uncached`，高精度模式可以更激进，阅读模式必须保守。
 - `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
 
 验收门槛：

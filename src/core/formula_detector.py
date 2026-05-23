@@ -51,12 +51,14 @@ class Pix2TextMFDDetector(FormulaDetector):
         max_scanned_ocr_blocks: int = 8,
         max_existing_uncached_ocr_blocks: int = 0,
         max_scanned_uncached_ocr_blocks: int = 0,
+        max_mfd_pages: int = 0,
     ) -> None:
         self._dpi = dpi
         self._max_existing_ocr_blocks = max_existing_ocr_blocks
         self._max_scanned_ocr_blocks = max_scanned_ocr_blocks
         self._max_existing_uncached_ocr_blocks = max_existing_uncached_ocr_blocks
         self._max_scanned_uncached_ocr_blocks = max_scanned_uncached_ocr_blocks
+        self._max_mfd_pages = max_mfd_pages
         self._mfd = None
 
     def name(self) -> str:
@@ -143,6 +145,33 @@ class Pix2TextMFDDetector(FormulaDetector):
                 if pat in b.content:
                     return True
         return False
+
+    def _rank_candidate_pages(self, blocks: list[DocumentBlock], pages: list[int]) -> list[int]:
+        """Sort and budget MFD candidate pages so long documents do not monopolize CPU."""
+        scored = [
+            (self._page_formula_priority(blocks, page_num), page_num)
+            for page_num in pages
+        ]
+        scored.sort(reverse=True)
+        ranked = [page_num for _, page_num in scored]
+        if self._max_mfd_pages >= 0:
+            ranked = ranked[:self._max_mfd_pages]
+        return ranked
+
+    @staticmethod
+    def _page_formula_priority(blocks: list[DocumentBlock], page_num: int) -> tuple[int, int, int]:
+        """Higher score means a page is more valuable for the limited MFD budget."""
+        page_blocks = [block for block in blocks if block.page_num == page_num]
+        image_count = sum(1 for block in page_blocks if block.block_type == BlockType.IMAGE)
+        formula_count = sum(1 for block in page_blocks if block.block_type == BlockType.FORMULA)
+        text = "\n".join(block.content or "" for block in page_blocks)
+        math_markers = sum(text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫")
+        latex_markers = sum(
+            text.count(marker)
+            for marker in (r"\frac", r"\sum", r"\int", r"\sqrt", r"\begin", r"\end")
+        )
+        score = min(image_count * 8 + formula_count * 5 + latex_markers * 3 + math_markers, 100)
+        return (score, -page_num, -len(page_blocks))
 
     def _crop_formula_image(self, doc: fitz.Document, formula: dict[str, Any]) -> bytes:
         """按 MFD bbox 从 PDF 页面裁剪公式图片，供 MFR 识别。"""
@@ -378,6 +407,8 @@ class Pix2TextMFDDetector(FormulaDetector):
         # 只对有公式特征的页面跑 MFD
         candidate_pages = [pn for pn in range(doc.page_count)
                            if self._page_has_formulas(blocks, pn)]
+        candidate_total = len(candidate_pages)
+        candidate_pages = self._rank_candidate_pages(blocks, candidate_pages)
         existing_ocr_results = self._recognize_existing_formula_blocks(doc, blocks)
         existing_ocr_count = 0
         for block in blocks:
@@ -404,8 +435,13 @@ class Pix2TextMFDDetector(FormulaDetector):
             return blocks
         import logging
         logger = logging.getLogger("Pix2TextMFD")
-        logger.info("需检测页: %d/%d (%s)", len(candidate_pages), doc.page_count,
-                     ','.join(str(p+1) for p in candidate_pages))
+        logger.info(
+            "需检测页: %d/%d candidates=%d (%s)",
+            len(candidate_pages),
+            doc.page_count,
+            candidate_total,
+            ','.join(str(p+1) for p in candidate_pages),
+        )
         formulas = self.detect_specific_pages(doc, candidate_pages)
         matched = 0
         added = 0

@@ -17,8 +17,69 @@ def test_mfd_candidate_pages_include_image_blocks() -> None:
     assert detector._page_has_formulas(blocks, 0) is True
 
 
+def test_mfd_candidate_pages_are_ranked_and_budgeted() -> None:
+    detector = Pix2TextMFDDetector(max_mfd_pages=2)
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.PARAGRAPH,
+            content="plain text with a=b",
+            bbox=(0, 0, 100, 20),
+        ),
+        DocumentBlock(
+            id="p4_b0",
+            page_num=4,
+            block_type=BlockType.IMAGE,
+            content="",
+            bbox=(0, 0, 100, 100),
+        ),
+        DocumentBlock(
+            id="p2_b0",
+            page_num=2,
+            block_type=BlockType.FORMULA,
+            content=r"x=\frac{a}{b}",
+            bbox=(0, 0, 100, 20),
+        ),
+    ]
+
+    assert detector._rank_candidate_pages(blocks, [0, 2, 4]) == [2, 4]
+
+
+def test_mfd_apply_limits_candidate_pages(monkeypatch) -> None:
+    detector = Pix2TextMFDDetector(max_mfd_pages=1)
+    doc = type("FakeDoc", (), {"page_count": 3})()
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.IMAGE,
+            content="",
+            bbox=(0, 0, 100, 100),
+        ),
+        DocumentBlock(
+            id="p1_b0",
+            page_num=1,
+            block_type=BlockType.IMAGE,
+            content="",
+            bbox=(0, 0, 100, 100),
+        ),
+    ]
+    seen_pages: list[list[int]] = []
+
+    def fake_detect(doc: object, pages: list[int]) -> list[dict[str, object]]:
+        seen_pages.append(pages)
+        return []
+
+    monkeypatch.setattr(detector, "detect_specific_pages", fake_detect)
+
+    detector.apply_to_blocks(blocks, doc=doc)
+
+    assert seen_pages == [[0]]
+
+
 def test_mfd_apply_adds_unmatched_scanned_formula_block(monkeypatch) -> None:
-    detector = Pix2TextMFDDetector()
+    detector = Pix2TextMFDDetector(max_mfd_pages=1)
     doc = type("FakeDoc", (), {"page_count": 1})()
     blocks = [
         DocumentBlock(
@@ -50,7 +111,7 @@ def test_mfd_apply_adds_unmatched_scanned_formula_block(monkeypatch) -> None:
 
 
 def test_mfd_apply_recognizes_scanned_formula_latex(monkeypatch) -> None:
-    detector = Pix2TextMFDDetector()
+    detector = Pix2TextMFDDetector(max_mfd_pages=1)
     doc = type("FakeDoc", (), {"page_count": 1})()
     blocks = [
         DocumentBlock(
@@ -88,7 +149,7 @@ def test_mfd_apply_recognizes_scanned_formula_latex(monkeypatch) -> None:
 
 
 def test_mfd_apply_recognizes_existing_non_latex_formula_block(monkeypatch) -> None:
-    detector = Pix2TextMFDDetector(max_existing_ocr_blocks=2)
+    detector = Pix2TextMFDDetector(max_existing_ocr_blocks=2, max_mfd_pages=1)
     doc = type("FakeDoc", (), {"page_count": 1})()
     blocks = [
         DocumentBlock(
@@ -212,6 +273,7 @@ def test_scanned_formula_ocr_budget_keeps_placeholders(monkeypatch) -> None:
     detector = Pix2TextMFDDetector(
         max_scanned_ocr_blocks=1,
         max_scanned_uncached_ocr_blocks=1,
+        max_mfd_pages=2,
     )
     doc = type("FakeDoc", (), {"page_count": 2})()
     blocks = [
@@ -305,6 +367,30 @@ def test_scanned_formula_ocr_defaults_to_cache_only(monkeypatch) -> None:
 
     assert detector._recognize_scanned_formulas(object(), formulas) == {}
     assert calls == [0]
+
+
+def test_mfd_default_skips_page_detection_for_interactive_parse(monkeypatch) -> None:
+    detector = Pix2TextMFDDetector()
+    doc = type("FakeDoc", (), {"page_count": 1})()
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.IMAGE,
+            content="",
+            bbox=(0, 0, 100, 100),
+        )
+    ]
+
+    monkeypatch.setattr(
+        detector,
+        "detect_specific_pages",
+        lambda doc, pages: (_ for _ in ()).throw(AssertionError("MFD should be skipped by default")),
+    )
+
+    detector.apply_to_blocks(blocks, doc)
+
+    assert [block for block in blocks if block.block_type == BlockType.FORMULA] == []
 
 
 def test_existing_formula_ocr_defaults_to_cache_only(monkeypatch) -> None:
