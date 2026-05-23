@@ -121,10 +121,16 @@ def _math_context_clusters(pages: list[BornDigitalPage]) -> list[Any]:
     return [cluster for page in pages for cluster in auditor.contextual_clusters(page)]
 
 
+def _display_formula_regions(pages: list[BornDigitalPage]) -> list[Any]:
+    auditor = BornDigitalMathAuditor()
+    return [region for page in pages for region in auditor.display_formula_regions(page)]
+
+
 def _math_evidence_summary(
     evidence_regions: list[Any],
     evidence_clusters: list[Any],
     context_clusters: list[Any],
+    display_regions: list[Any],
     sample_limit: int,
 ) -> dict[str, Any]:
     evidence_counts: Counter[str] = Counter()
@@ -134,10 +140,12 @@ def _math_evidence_summary(
         "region_count": len(evidence_regions),
         "cluster_count": len(evidence_clusters),
         "context_cluster_count": len(context_clusters),
+        "display_region_count": len(display_regions),
         "evidence_counts": dict(sorted(evidence_counts.items())),
         "samples": [region.to_json() for region in evidence_regions[:sample_limit]],
         "cluster_samples": [cluster.to_json() for cluster in evidence_clusters[:sample_limit]],
         "context_cluster_samples": [cluster.to_json() for cluster in context_clusters[:sample_limit]],
+        "display_region_samples": [region.to_json() for region in display_regions[:sample_limit]],
     }
 
 
@@ -146,6 +154,7 @@ def _latex_source_report(
     evidence_regions: list[Any],
     evidence_clusters: list[Any],
     context_clusters: list[Any],
+    display_regions: list[Any],
     sample_limit: int,
 ) -> dict[str, Any] | None:
     if latex_root is None:
@@ -157,6 +166,7 @@ def _latex_source_report(
     evidence_texts = [region.text for region in evidence_regions if region.text.strip()]
     cluster_texts = [cluster.text for cluster in evidence_clusters if cluster.text.strip()]
     context_texts = [cluster.text for cluster in context_clusters if cluster.text.strip()]
+    display_texts = [region.text for region in display_regions if region.text.strip()]
     matches, low_pdf, metrics = _best_formula_matches(
         source_formulas,
         evidence_texts,
@@ -175,6 +185,18 @@ def _latex_source_report(
         max_sources=5000,
         max_candidates_per_source=80,
     )
+    display_matches, display_low_pdf, display_metrics = _best_formula_matches(
+        source_formulas,
+        display_texts,
+        max_sources=5000,
+        max_candidates_per_source=80,
+    )
+    display_source_matches, display_source_low_pdf, display_source_metrics = _best_formula_matches(
+        source_display,
+        display_texts,
+        max_sources=5000,
+        max_candidates_per_source=80,
+    )
     return {
         "available": True,
         "latex_root": str(latex_root),
@@ -185,6 +207,7 @@ def _latex_source_report(
         "evidence_text_count": len(evidence_texts),
         "cluster_text_count": len(cluster_texts),
         "context_cluster_text_count": len(context_texts),
+        "display_region_text_count": len(display_texts),
         "source_near_match_rate": round(float(metrics["near_rate"]), 4),
         "source_weak_match_rate": round(float(metrics["weak_rate"]), 4),
         "average_best_similarity": round(float(metrics["average"]), 4),
@@ -200,12 +223,26 @@ def _latex_source_report(
         "context_average_best_similarity": round(float(context_metrics["average"]), 4),
         "context_source_near_match_count": int(context_metrics["near"]),
         "context_source_weak_match_count": int(context_metrics["weak"]),
+        "display_source_near_match_rate": round(float(display_metrics["near_rate"]), 4),
+        "display_source_weak_match_rate": round(float(display_metrics["weak_rate"]), 4),
+        "display_average_best_similarity": round(float(display_metrics["average"]), 4),
+        "display_source_near_match_count": int(display_metrics["near"]),
+        "display_source_weak_match_count": int(display_metrics["weak"]),
+        "display_only_near_match_rate": round(float(display_source_metrics["near_rate"]), 4),
+        "display_only_weak_match_rate": round(float(display_source_metrics["weak_rate"]), 4),
+        "display_only_average_best_similarity": round(float(display_source_metrics["average"]), 4),
+        "display_only_near_match_count": int(display_source_metrics["near"]),
+        "display_only_weak_match_count": int(display_source_metrics["weak"]),
         "sample_matches": matches[:sample_limit],
         "sample_cluster_matches": cluster_matches[:sample_limit],
         "sample_context_matches": context_matches[:sample_limit],
+        "sample_display_matches": display_matches[:sample_limit],
+        "sample_display_only_matches": display_source_matches[:sample_limit],
         "sample_low_similarity_evidence": low_pdf[:sample_limit],
         "sample_low_similarity_clusters": cluster_low_pdf[:sample_limit],
         "sample_low_similarity_context_clusters": context_low_pdf[:sample_limit],
+        "sample_low_similarity_display_regions": display_low_pdf[:sample_limit],
+        "sample_low_similarity_display_only_regions": display_source_low_pdf[:sample_limit],
     }
 
 
@@ -229,6 +266,7 @@ def audit_pdf(
     evidence_regions = _math_evidence_regions(pages)
     evidence_clusters = _math_evidence_clusters(pages)
     context_clusters = _math_context_clusters(pages)
+    display_regions = _display_formula_regions(pages)
     report = {
         "pdf": str(pdf_path),
         "elapsed_sec": round(elapsed, 3),
@@ -241,10 +279,23 @@ def audit_pdf(
         "warnings": dict(warnings),
         "top_fonts": _font_counts(pages).most_common(20),
         "font_resources": _font_resources(pages),
-        "math_evidence": _math_evidence_summary(evidence_regions, evidence_clusters, context_clusters, sample_limit),
+        "math_evidence": _math_evidence_summary(
+            evidence_regions,
+            evidence_clusters,
+            context_clusters,
+            display_regions,
+            sample_limit,
+        ),
         "samples": _sample_regions(pages, sample_limit),
     }
-    source_report = _latex_source_report(latex_root, evidence_regions, evidence_clusters, context_clusters, sample_limit)
+    source_report = _latex_source_report(
+        latex_root,
+        evidence_regions,
+        evidence_clusters,
+        context_clusters,
+        display_regions,
+        sample_limit,
+    )
     if source_report is not None:
         report["latex_source_alignment"] = source_report
     return report

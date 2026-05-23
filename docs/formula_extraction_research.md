@@ -251,6 +251,29 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - 仅靠孤立 glyph group 不够，必须做 display formula 的行/region 级空间聚类和二维布局树。
 - 不应继续膨胀 bbox 吸上下文；下一步要做的是基于行、block、vector、数学字体密度和阅读顺序的结构化 formula region，而不是文本正则。
 
+## Display Formula 区域分割结果
+
+已新增 `DisplayFormulaRegion` 和 `DisplayFormulaSegmenter`：
+
+- 输入仍只来自 PDF 结构事实：line/span/glyph/font/bbox/vector/image。
+- 输出只表示显示公式候选区域、bbox、证据、置信度和原始文本顺序，不直接伪造 LaTeX。
+- 分割策略分两步：先找主显示公式行，再吸附相邻根号、分母、上下标、右侧公式编号等结构部件。
+- 策略基于数学字体密度、脚本字号、矢量线、正文栏宽、居中/缩进行，不使用论文专属词表或函数名硬编码。
+- 作者脚注符号、正文宽度内联数学句子已加入回归测试，防止被提升为显示公式。
+
+当前审计：
+
+- Attention 前 6 页：MuPDF 事实层 + display region 审计约 0.593s，17816 glyph，unknown glyph 为 0，display region 7 个。
+- Attention display-only 源码对照：8 个源码 display snippets 中，near match 3 个，weak match 4 个；`Attention`、`FFN`、`MultiHead`、`PE` 样例能整体对齐源码。
+- Napkin 第 60-79 页：约 0.874s，30974 glyph，unknown glyph 为 0，display region 31 个。
+- Napkin 对齐率仍低，主要原因是教材中大量显示数学与例题/定理文本混排，且 PDF glyph 文本不是 LaTeX 语义树；这需要下一步二维布局树和环境级对齐，不能靠继续扩大 bbox 或写词表解决。
+
+当前边界：
+
+- 这一步证明 born-digital PDF 结构路径足够快，也能把部分关键显示公式完整合成区域。
+- 这一步还不是 99.99% LaTeX 还原；它是后续二维结构树和 LaTeX 语义恢复的事实基础。
+- 当前区域文本不能直接作为最终公式写入知识库 truth；进入主链路前必须带 confidence/warnings，并完成结构恢复与质量门禁。
+
 ## 参考资料
 
 - PyMuPDF text extraction appendix: https://pymupdf.readthedocs.io/en/latest/app1.html

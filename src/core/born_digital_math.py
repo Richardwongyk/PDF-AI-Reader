@@ -7,7 +7,7 @@ does not guess LaTeX from prose with regular expressions.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Literal
 
 import fitz
@@ -16,6 +16,17 @@ import fitz
 RegionKind = Literal["text", "image", "vector"]
 WarningCode = Literal["unknown_glyph", "empty_text_block"]
 MathEvidence = Literal["math_font", "math_symbol", "script_size", "near_vector", "unknown_glyph"]
+DisplayFormulaEvidence = Literal[
+    "math_font",
+    "math_symbol",
+    "script_size",
+    "near_vector",
+    "unknown_glyph",
+    "math_density",
+    "centered_line",
+    "short_line",
+    "equation_label",
+]
 
 
 @dataclass(frozen=True)
@@ -138,6 +149,38 @@ class MathEvidenceCluster:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class DisplayFormulaRegion:
+    page_num: int
+    bbox: tuple[float, float, float, float]
+    text: str
+    line_count: int
+    vector_count: int
+    evidence: tuple[DisplayFormulaEvidence, ...]
+    confidence: float
+    source: str = "pdf_structure_display_region"
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FormulaSegmentationConfig:
+    """Page-relative knobs for born-digital display formula segmentation."""
+
+    vector_margin: float = 4.0
+    min_math_density: float = 0.12
+    strong_formula_density: float = 0.32
+    centered_tolerance_ratio: float = 0.13
+    max_seed_width_ratio: float = 0.74
+    max_seed_body_width_ratio: float = 0.72
+    max_full_width_ratio: float = 0.86
+    min_indent_ratio: float = 0.06
+    max_merge_vertical_gap_ratio: float = 0.95
+    max_merge_horizontal_gap_ratio: float = 0.34
+    min_confidence: float = 0.50
+
+
 class MuPDFBornDigitalExtractor:
     """Extract raw born-digital structure with MuPDF/PyMuPDF."""
 
@@ -235,8 +278,13 @@ class MuPDFBornDigitalExtractor:
 class BornDigitalMathAuditor:
     """Find structure-backed math evidence without generating LaTeX."""
 
-    def __init__(self, vector_margin: float = 2.0) -> None:
+    def __init__(
+        self,
+        vector_margin: float = 2.0,
+        segmentation: FormulaSegmentationConfig | None = None,
+    ) -> None:
         self.vector_margin = vector_margin
+        self.segmentation = segmentation or FormulaSegmentationConfig()
 
     def evidence_regions(self, page: BornDigitalPage) -> list[MathEvidenceRegion]:
         vectors = [region for region in page.regions if region.kind == "vector"]
@@ -301,6 +349,529 @@ class BornDigitalMathAuditor:
             return []
         text_lines = [line for region in page.regions if region.kind == "text" for line in region.lines]
         return [_expand_cluster_with_context(cluster, text_lines) for cluster in clusters]
+
+    def display_formula_regions(self, page: BornDigitalPage) -> list[DisplayFormulaRegion]:
+        """Segment display-style formula regions from born-digital PDF facts."""
+
+        segmenter = DisplayFormulaSegmenter(self.segmentation)
+        return segmenter.segment(page)
+
+
+class DisplayFormulaSegmenter:
+    """Group PDF lines and vector marks into display formula regions."""
+
+    def __init__(self, config: FormulaSegmentationConfig | None = None) -> None:
+        self.config = config or FormulaSegmentationConfig()
+
+    def segment(self, page: BornDigitalPage) -> list[DisplayFormulaRegion]:
+        vectors = [region for region in page.regions if region.kind == "vector"]
+        line_infos = _page_line_infos(page, vectors, self.config)
+        if not line_infos:
+            return []
+        layout = _estimate_page_layout(line_infos, page.page_size)
+        line_infos = [_line_info_with_layout_evidence(info, layout, self.config) for info in line_infos]
+        candidates = [info for info in line_infos if _is_display_seed(info, layout, self.config)]
+        if not candidates:
+            return []
+        groups: list[list[_DisplayLineInfo]] = []
+        for info in sorted(candidates, key=lambda item: (item.line.bbox[1], item.line.bbox[0])):
+            target = _best_display_group(info, groups, self.config, layout)
+            if target is None:
+                groups.append([info])
+            else:
+                target.append(info)
+        _attach_display_parts(groups, line_infos, self.config, layout)
+        _attach_display_labels(groups, line_infos, self.config, layout)
+        merged: list[DisplayFormulaRegion] = []
+        for group in groups:
+            region = _display_group_summary(page.page_num, group, vectors, self.config)
+            if region.confidence >= self.config.min_confidence:
+                merged.append(region)
+        return _dedupe_display_regions(merged)
+
+
+@dataclass(frozen=True)
+class _DisplayLineInfo:
+    order: int
+    region: PdfRegion
+    line: PdfLine
+    glyph_count: int
+    math_glyph_count: int
+    math_density: float
+    near_vectors: tuple[PdfRegion, ...]
+    evidence: tuple[DisplayFormulaEvidence, ...]
+    equation_label: bool
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        return self.line.bbox
+
+
+@dataclass(frozen=True)
+class _PageLayout:
+    page_size: tuple[float, float]
+    body_left: float
+    body_right: float
+
+    @property
+    def body_width(self) -> float:
+        return max(self.body_right - self.body_left, 1.0)
+
+    @property
+    def body_center(self) -> float:
+        return (self.body_left + self.body_right) / 2.0
+
+
+def _page_lines(page: BornDigitalPage) -> list[tuple[int, PdfRegion, PdfLine]]:
+    lines: list[tuple[int, PdfRegion, PdfLine]] = []
+    order = 0
+    for region in page.regions:
+        if region.kind != "text":
+            continue
+        for line in region.lines:
+            if not line.text.strip():
+                continue
+            lines.append((order, region, line))
+            order += 1
+    return lines
+
+
+def _page_line_infos(
+    page: BornDigitalPage,
+    vectors: list[PdfRegion],
+    config: FormulaSegmentationConfig,
+) -> list[_DisplayLineInfo]:
+    return [
+        _display_line_info(order, region, line, page.page_size, vectors, config)
+        for order, region, line in _page_lines(page)
+    ]
+
+
+def _display_line_info(
+    order: int,
+    region: PdfRegion,
+    line: PdfLine,
+    page_size: tuple[float, float],
+    vectors: list[PdfRegion],
+    config: FormulaSegmentationConfig,
+) -> _DisplayLineInfo:
+    glyphs = [
+        glyph
+        for span in line.spans
+        for glyph in span.glyphs
+        if glyph.text and not glyph.text.isspace()
+    ]
+    glyph_count = len(glyphs)
+    math_glyph_count = sum(1 for glyph in glyphs if _glyph_has_math_evidence(glyph))
+    math_density = math_glyph_count / glyph_count if glyph_count else 0.0
+    near_vectors = tuple(
+        vector
+        for vector in vectors
+        if _bbox_intersects(_expand_bbox(line.bbox, config.vector_margin), vector.bbox)
+    )
+    evidence: set[DisplayFormulaEvidence] = set()
+    glyph_evidence = _glyph_group_evidence(glyphs)
+    evidence.update(glyph_evidence)
+    if math_density >= config.min_math_density:
+        evidence.add("math_density")
+    if near_vectors:
+        evidence.add("near_vector")
+    equation_label = _line_looks_like_equation_label(line, page_size)
+    if equation_label:
+        evidence.add("equation_label")
+    return _DisplayLineInfo(
+        order=order,
+        region=region,
+        line=line,
+        glyph_count=glyph_count,
+        math_glyph_count=math_glyph_count,
+        math_density=math_density,
+        near_vectors=near_vectors,
+        evidence=tuple(sorted(evidence)),
+        equation_label=equation_label,
+    )
+
+
+def _line_info_with_layout_evidence(
+    info: _DisplayLineInfo,
+    layout: _PageLayout,
+    config: FormulaSegmentationConfig,
+) -> _DisplayLineInfo:
+    evidence = set(info.evidence)
+    if _line_is_centered(info.bbox, layout, config):
+        evidence.add("centered_line")
+    else:
+        evidence.discard("centered_line")
+    if _line_is_short(info.bbox, layout, config):
+        evidence.add("short_line")
+    else:
+        evidence.discard("short_line")
+    return replace(info, evidence=tuple(sorted(evidence)))
+
+
+def _is_display_seed(
+    info: _DisplayLineInfo,
+    layout: _PageLayout,
+    config: FormulaSegmentationConfig,
+) -> bool:
+    if info.glyph_count == 0 or info.equation_label:
+        return False
+    if _line_looks_like_footnote_marker(info):
+        return False
+    evidence = set(info.evidence)
+    width = _bbox_width(info.bbox)
+    page_width = max(layout.page_size[0], 1.0)
+    if width > page_width * config.max_full_width_ratio:
+        return False
+    structure_evidence = evidence.intersection({"math_font", "math_symbol", "script_size", "unknown_glyph", "near_vector"})
+    if not structure_evidence:
+        return False
+    display_position = _line_has_display_position(info.bbox, layout, config)
+    if info.math_density >= config.strong_formula_density and display_position:
+        if _bbox_width(info.bbox) < layout.body_width * 0.08 and not _line_is_centered(info.bbox, layout, config):
+            return False
+        return width <= layout.body_width * config.max_seed_body_width_ratio or bool(info.near_vectors)
+    if "near_vector" in evidence and info.math_density >= config.min_math_density:
+        return display_position and width >= layout.body_width * 0.08
+    if {"centered_line", "short_line"} <= evidence and info.math_density >= config.min_math_density:
+        return (
+            display_position
+            and width >= layout.body_width * 0.10
+            and width <= layout.body_width * config.max_seed_body_width_ratio
+        )
+    return False
+
+
+def _best_display_group(
+    info: _DisplayLineInfo,
+    groups: list[list[_DisplayLineInfo]],
+    config: FormulaSegmentationConfig,
+    layout: _PageLayout,
+) -> list[_DisplayLineInfo] | None:
+    best: list[_DisplayLineInfo] | None = None
+    best_gap = float("inf")
+    for group in groups:
+        if not _same_display_formula_group(info, group, config, layout):
+            continue
+        gap = _bbox_gap(info.bbox, _union_bbox([item.bbox for item in group]))
+        if gap < best_gap:
+            best_gap = gap
+            best = group
+    return best
+
+
+def _same_display_formula_group(
+    info: _DisplayLineInfo,
+    group: list[_DisplayLineInfo],
+    config: FormulaSegmentationConfig,
+    layout: _PageLayout,
+) -> bool:
+    group_box = _union_bbox([item.bbox for item in group])
+    line_height = _median_positive([_bbox_height(item.bbox) for item in group] + [_bbox_height(info.bbox)], 10.0)
+    vertical_gap = max(0.0, max(info.bbox[1], group_box[1]) - min(info.bbox[3], group_box[3]))
+    if vertical_gap > line_height * config.max_merge_vertical_gap_ratio:
+        return False
+    horizontal_gap = max(0.0, max(info.bbox[0], group_box[0]) - min(info.bbox[2], group_box[2]))
+    if horizontal_gap > layout.page_size[0] * config.max_merge_horizontal_gap_ratio:
+        return False
+    if _bbox_intersects(_expand_bbox(info.bbox, config.vector_margin), _expand_bbox(group_box, config.vector_margin)):
+        return True
+    if any(vector == other for vector in info.near_vectors for item in group for other in item.near_vectors):
+        return True
+    if _horizontal_centers_close(info.bbox, group_box, layout, config):
+        return True
+    horizontal_overlap = min(info.bbox[2], group_box[2]) - max(info.bbox[0], group_box[0])
+    return horizontal_overlap >= -layout.page_size[0] * 0.04
+
+
+def _attach_display_parts(
+    groups: list[list[_DisplayLineInfo]],
+    line_infos: list[_DisplayLineInfo],
+    config: FormulaSegmentationConfig,
+    layout: _PageLayout,
+) -> None:
+    grouped_orders = {item.order for group in groups for item in group}
+    candidates = [
+        info
+        for info in line_infos
+        if info.order not in grouped_orders
+        and not info.equation_label
+        and not _line_looks_like_footnote_marker(info)
+        and _line_can_attach_as_formula_part(info)
+    ]
+    for group in groups:
+        changed = True
+        while changed:
+            changed = False
+            group_box = _union_bbox([item.bbox for item in group])
+            for info in candidates:
+                if info in group:
+                    continue
+                if not _formula_part_belongs_to_group(info, group_box, config, layout):
+                    continue
+                group.append(info)
+                changed = True
+
+
+def _line_can_attach_as_formula_part(info: _DisplayLineInfo) -> bool:
+    evidence = set(info.evidence)
+    if info.math_density >= 0.80:
+        return True
+    return bool(evidence.intersection({"near_vector", "script_size", "math_symbol", "unknown_glyph"})) and info.math_density >= 0.20
+
+
+def _formula_part_belongs_to_group(
+    info: _DisplayLineInfo,
+    group_box: tuple[float, float, float, float],
+    config: FormulaSegmentationConfig,
+    layout: _PageLayout,
+) -> bool:
+    line_height = max(_bbox_height(info.bbox), 1.0)
+    vertical_overlap = min(info.bbox[3], group_box[3]) - max(info.bbox[1], group_box[1])
+    vertical_gap = max(0.0, max(info.bbox[1], group_box[1]) - min(info.bbox[3], group_box[3]))
+    horizontal_gap = max(0.0, max(info.bbox[0], group_box[0]) - min(info.bbox[2], group_box[2]))
+    if vertical_overlap < -line_height * config.max_merge_vertical_gap_ratio and vertical_gap > line_height:
+        return False
+    if horizontal_gap > layout.body_width * 0.12 and not _bbox_intersects(
+        _expand_bbox(info.bbox, config.vector_margin),
+        _expand_bbox(group_box, config.vector_margin),
+    ):
+        return False
+    return True
+
+
+def _attach_display_labels(
+    groups: list[list[_DisplayLineInfo]],
+    line_infos: list[_DisplayLineInfo],
+    config: FormulaSegmentationConfig,
+    layout: _PageLayout,
+) -> None:
+    labels = [info for info in line_infos if info.equation_label]
+    if not labels:
+        return
+    for group in groups:
+        group_box = _union_bbox([item.bbox for item in group])
+        for label in labels:
+            if label in group:
+                continue
+            if not _label_belongs_to_group(label, group_box, config, layout):
+                continue
+            group.append(label)
+
+
+def _label_belongs_to_group(
+    label: _DisplayLineInfo,
+    group_box: tuple[float, float, float, float],
+    config: FormulaSegmentationConfig,
+    layout: _PageLayout,
+) -> bool:
+    if label.bbox[0] < layout.body_right - layout.body_width * 0.18:
+        return False
+    vertical_overlap = min(label.bbox[3], group_box[3]) - max(label.bbox[1], group_box[1])
+    line_height = max(_bbox_height(label.bbox), 1.0)
+    group_height = max(_bbox_height(group_box), 1.0)
+    vertical_gap = max(0.0, max(label.bbox[1], group_box[1]) - min(label.bbox[3], group_box[3]))
+    if vertical_overlap >= -max(line_height, group_height) * 0.35:
+        return True
+    return vertical_gap <= line_height * config.max_merge_vertical_gap_ratio
+
+
+def _display_group_summary(
+    page_num: int,
+    group: list[_DisplayLineInfo],
+    vectors: list[PdfRegion],
+    config: FormulaSegmentationConfig,
+) -> DisplayFormulaRegion:
+    ordered = sorted(group, key=lambda item: (item.line.bbox[1], item.line.bbox[0], item.order))
+    bbox = _union_bbox([item.bbox for item in ordered])
+    nearby_vectors = [
+        vector
+        for vector in vectors
+        if _bbox_intersects(_expand_bbox(bbox, config.vector_margin), vector.bbox)
+    ]
+    evidence: set[DisplayFormulaEvidence] = set()
+    for item in ordered:
+        evidence.update(item.evidence)
+    text = " ".join(item.line.text.strip() for item in ordered if item.line.text.strip())
+    return DisplayFormulaRegion(
+        page_num=page_num,
+        bbox=bbox,
+        text=text,
+        line_count=len(ordered),
+        vector_count=len(nearby_vectors),
+        evidence=tuple(sorted(evidence)),
+        confidence=_display_confidence(ordered, nearby_vectors),
+    )
+
+
+def _display_confidence(lines: list[_DisplayLineInfo], vectors: list[PdfRegion]) -> float:
+    evidence: set[DisplayFormulaEvidence] = set()
+    for line in lines:
+        evidence.update(line.evidence)
+    score = 0.0
+    if "math_font" in evidence:
+        score += 0.24
+    if "math_symbol" in evidence:
+        score += 0.16
+    if "script_size" in evidence:
+        score += 0.12
+    if "near_vector" in evidence or vectors:
+        score += 0.18
+    if "math_density" in evidence:
+        score += 0.16
+    if "centered_line" in evidence:
+        score += 0.08
+    if "short_line" in evidence:
+        score += 0.05
+    if any(line.equation_label for line in lines):
+        score += 0.03
+    if len(lines) > 1:
+        score += 0.06
+    return round(min(score, 1.0), 3)
+
+
+def _dedupe_display_regions(regions: list[DisplayFormulaRegion]) -> list[DisplayFormulaRegion]:
+    result: list[DisplayFormulaRegion] = []
+    for region in sorted(regions, key=lambda item: (-item.confidence, item.bbox[1], item.bbox[0])):
+        if any(_bbox_overlap_ratio(region.bbox, kept.bbox) > 0.82 for kept in result):
+            continue
+        result.append(region)
+    return sorted(result, key=lambda item: (item.bbox[1], item.bbox[0]))
+
+
+def _estimate_page_layout(
+    line_infos: list[_DisplayLineInfo],
+    page_size: tuple[float, float],
+) -> _PageLayout:
+    body_candidates = [
+        info.bbox
+        for info in line_infos
+        if info.glyph_count >= 20
+        and not info.equation_label
+        and _bbox_width(info.bbox) >= page_size[0] * 0.35
+    ]
+    if not body_candidates:
+        return _PageLayout(page_size=page_size, body_left=page_size[0] * 0.08, body_right=page_size[0] * 0.92)
+    lefts = sorted(box[0] for box in body_candidates)
+    rights = sorted(box[2] for box in body_candidates)
+    body_left = lefts[len(lefts) // 2]
+    body_right = rights[len(rights) // 2]
+    if body_right <= body_left:
+        return _PageLayout(page_size=page_size, body_left=page_size[0] * 0.08, body_right=page_size[0] * 0.92)
+    return _PageLayout(page_size=page_size, body_left=body_left, body_right=body_right)
+
+
+def _line_is_centered(
+    bbox: tuple[float, float, float, float],
+    layout: _PageLayout,
+    config: FormulaSegmentationConfig,
+) -> bool:
+    center = (bbox[0] + bbox[2]) / 2.0
+    return abs(center - layout.body_center) <= layout.body_width * config.centered_tolerance_ratio
+
+
+def _line_has_display_position(
+    bbox: tuple[float, float, float, float],
+    layout: _PageLayout,
+    config: FormulaSegmentationConfig,
+) -> bool:
+    if _line_is_centered(bbox, layout, config):
+        return True
+    left_margin = max(bbox[0] - layout.body_left, 0.0)
+    right_margin = max(layout.body_right - bbox[2], 0.0)
+    return (
+        _bbox_width(bbox) <= layout.body_width * config.max_seed_body_width_ratio
+        and left_margin >= layout.body_width * config.min_indent_ratio
+        and right_margin >= layout.body_width * config.min_indent_ratio
+    )
+
+
+def _line_is_short(
+    bbox: tuple[float, float, float, float],
+    layout: _PageLayout,
+    config: FormulaSegmentationConfig,
+) -> bool:
+    width = _bbox_width(bbox)
+    if width <= layout.body_width * config.max_seed_body_width_ratio:
+        return True
+    return (
+        bbox[0] >= layout.body_left + layout.body_width * config.min_indent_ratio
+        and bbox[2] <= layout.body_right - layout.body_width * config.min_indent_ratio
+    )
+
+
+def _line_looks_like_equation_label(line: PdfLine, page_size: tuple[float, float]) -> bool:
+    text = "".join(glyph.text for span in line.spans for glyph in span.glyphs if glyph.text and not glyph.text.isspace())
+    if len(text) < 3 or len(text) > 8:
+        return False
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    inner = text[1:-1]
+    if not inner or not all(ch.isdigit() or ch in {".", "-"} for ch in inner):
+        return False
+    return line.bbox[0] >= page_size[0] * 0.68
+
+
+def _line_looks_like_footnote_marker(info: _DisplayLineInfo) -> bool:
+    text = "".join(glyph.text for span in info.line.spans for glyph in span.glyphs if glyph.text and not glyph.text.isspace())
+    if len(text) == 1 and text in {"*", "∗", "†", "‡", "§"}:
+        return True
+    if 2 <= len(text) <= 3 and all(ch in {"*", "∗", "†", "‡", "§"} for ch in text):
+        return True
+    math_glyphs = [
+        glyph
+        for span in info.line.spans
+        for glyph in span.glyphs
+        if glyph.text and not glyph.text.isspace() and _glyph_has_math_evidence(glyph)
+    ]
+    if math_glyphs and all(glyph.text in {"*", "∗", "†", "‡", "§"} for glyph in math_glyphs):
+        alpha_runs = [part for part in text.replace(".", " ").replace(",", " ").split() if any(ch.isalpha() for ch in part)]
+        if any(len(part) >= 2 for part in alpha_runs):
+            return True
+    return False
+
+
+def _horizontal_centers_close(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+    layout: _PageLayout,
+    config: FormulaSegmentationConfig,
+) -> bool:
+    left_center = (left[0] + left[2]) / 2.0
+    right_center = (right[0] + right[2]) / 2.0
+    return abs(left_center - right_center) <= layout.body_width * config.centered_tolerance_ratio
+
+
+def _bbox_width(bbox: tuple[float, float, float, float]) -> float:
+    return max(bbox[2] - bbox[0], 0.0)
+
+
+def _bbox_height(bbox: tuple[float, float, float, float]) -> float:
+    return max(bbox[3] - bbox[1], 0.0)
+
+
+def _median_positive(values: list[float], default: float) -> float:
+    positives = sorted(value for value in values if value > 0)
+    if not positives:
+        return default
+    return positives[len(positives) // 2]
+
+
+def _bbox_overlap_ratio(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    ix0 = max(left[0], right[0])
+    iy0 = max(left[1], right[1])
+    ix1 = min(left[2], right[2])
+    iy1 = min(left[3], right[3])
+    intersection = max(ix1 - ix0, 0.0) * max(iy1 - iy0, 0.0)
+    if intersection <= 0:
+        return 0.0
+    left_area = max(_bbox_width(left) * _bbox_height(left), 1.0)
+    right_area = max(_bbox_width(right) * _bbox_height(right), 1.0)
+    return intersection / min(left_area, right_area)
+
 
 def _rawdict_flags() -> int:
     flags = int(getattr(fitz, "TEXTFLAGS_RAWDICT", 0) or 0)

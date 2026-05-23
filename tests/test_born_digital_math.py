@@ -3,6 +3,7 @@ import fitz
 from src.core.born_digital_math import (
     BornDigitalMathAuditor,
     BornDigitalPage,
+    FormulaSegmentationConfig,
     MuPDFBornDigitalExtractor,
     PdfGlyph,
     PdfLine,
@@ -220,6 +221,147 @@ def test_math_auditor_contextual_clusters_include_adjacent_roman_glyphs() -> Non
     assert len(clusters) == 1
     assert clusters[0].source == "pdf_structure_context_cluster"
     assert clusters[0].text == "A(Q,K)"
+
+
+def test_display_formula_regions_merge_split_fraction_and_equation_label() -> None:
+    extracted = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([PdfGlyph(ch, "NimbusRomNo9L-Regu", 10, (108 + i * 5, 450, 112 + i * 5, 460)) for i, ch in enumerate("before prose")]),
+            _text_region([
+                PdfGlyph("A", "CMR10", 10, (220, 473, 228, 483)),
+                PdfGlyph("(", "CMR10", 10, (228, 473, 232, 483)),
+                PdfGlyph("Q", "CMMI10", 10, (232, 473, 240, 483)),
+                PdfGlyph(",", "CMR10", 10, (240, 473, 244, 483)),
+                PdfGlyph("K", "CMMI10", 10, (246, 473, 254, 483)),
+                PdfGlyph(")", "CMR10", 10, (254, 473, 258, 483)),
+                PdfGlyph("=", "CMR10", 10, (262, 473, 270, 483)),
+                PdfGlyph("s", "CMR10", 10, (274, 473, 280, 483)),
+                PdfGlyph("(", "CMR10", 10, (280, 473, 284, 483)),
+                PdfGlyph("Q", "CMMI10", 10, (286, 466, 294, 476)),
+                PdfGlyph("K", "CMMI10", 10, (294, 466, 302, 476)),
+                PdfGlyph("T", "CMMI7", 7, (303, 465, 308, 472)),
+            ]),
+            _text_region([PdfGlyph("√", "CMSY10", 10, (290, 473, 298, 483))]),
+            _text_region([
+                PdfGlyph("d", "CMMI10", 10, (298, 480, 306, 490)),
+                PdfGlyph("k", "CMMI7", 7, (306, 484, 311, 491)),
+                PdfGlyph(")", "CMR10", 10, (314, 473, 318, 483)),
+                PdfGlyph("V", "CMMI10", 10, (318, 473, 326, 483)),
+            ]),
+            _text_region([PdfGlyph(ch, "NimbusRomNo9L-Regu", 10, (493 + i * 4, 473, 497 + i * 4, 483)) for i, ch in enumerate("(1)")]),
+            _text_region([PdfGlyph(ch, "NimbusRomNo9L-Regu", 10, (108 + i * 5, 501, 112 + i * 5, 511)) for i, ch in enumerate("after prose with words")]),
+            PdfRegion(page_num=0, kind="vector", bbox=(286, 478, 310, 479)),
+            PdfRegion(page_num=0, kind="vector", bbox=(298, 480, 310, 481)),
+        ),
+    )
+
+    regions = BornDigitalMathAuditor(
+        segmentation=FormulaSegmentationConfig(min_confidence=0.45),
+    ).display_formula_regions(extracted)
+
+    assert len(regions) == 1
+    region = regions[0]
+    assert region.source == "pdf_structure_display_region"
+    assert "A(Q,K)=s(QKT" in region.text
+    assert "√" in region.text
+    assert "dk)V" in region.text
+    assert "(1)" in region.text
+    assert "before" not in region.text
+    assert "after" not in region.text
+    assert region.line_count == 4
+    assert region.vector_count == 2
+    assert region.confidence >= 0.45
+
+
+def test_display_formula_regions_reject_inline_math_prose() -> None:
+    extracted = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("W", "NimbusRomNo9L-Regu", 10, (108, 500, 116, 510)),
+                PdfGlyph("e", "NimbusRomNo9L-Regu", 10, (116, 500, 124, 510)),
+                PdfGlyph(" ", "NimbusRomNo9L-Regu", 10, (124, 500, 128, 510)),
+                PdfGlyph("h", "NimbusRomNo9L-Regu", 10, (128, 500, 136, 510)),
+                PdfGlyph("a", "NimbusRomNo9L-Regu", 10, (136, 500, 144, 510)),
+                PdfGlyph("v", "NimbusRomNo9L-Regu", 10, (144, 500, 152, 510)),
+                PdfGlyph("e", "NimbusRomNo9L-Regu", 10, (152, 500, 160, 510)),
+                PdfGlyph(" ", "NimbusRomNo9L-Regu", 10, (160, 500, 164, 510)),
+                PdfGlyph("x", "CMMI10", 10, (164, 500, 172, 510)),
+                PdfGlyph("n", "CMMI7", 7, (172, 504, 177, 511)),
+                PdfGlyph("→", "CMSY10", 10, (181, 500, 191, 510)),
+                PdfGlyph("x", "CMMI10", 10, (194, 500, 202, 510)),
+                PdfGlyph(" ", "NimbusRomNo9L-Regu", 10, (202, 500, 206, 510)),
+                PdfGlyph("a", "NimbusRomNo9L-Regu", 10, (206, 500, 214, 510)),
+                PdfGlyph("n", "NimbusRomNo9L-Regu", 10, (214, 500, 222, 510)),
+                PdfGlyph("d", "NimbusRomNo9L-Regu", 10, (222, 500, 230, 510)),
+                PdfGlyph(" ", "NimbusRomNo9L-Regu", 10, (230, 500, 234, 510)),
+                PdfGlyph("continue", "NimbusRomNo9L-Regu", 10, (234, 500, 290, 510)),
+            ]),
+        ),
+    )
+
+    regions = BornDigitalMathAuditor().display_formula_regions(extracted)
+
+    assert regions == []
+
+
+def test_display_formula_regions_reject_math_footnote_author_line() -> None:
+    extracted = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("A", "NimbusRomNo9L-Medi", 10, (248, 284, 256, 295)),
+                PdfGlyph("i", "NimbusRomNo9L-Medi", 10, (256, 284, 260, 295)),
+                PdfGlyph("d", "NimbusRomNo9L-Medi", 10, (260, 284, 268, 295)),
+                PdfGlyph("a", "NimbusRomNo9L-Medi", 10, (268, 284, 276, 295)),
+                PdfGlyph("n", "NimbusRomNo9L-Medi", 10, (276, 284, 284, 295)),
+                PdfGlyph(" ", "NimbusRomNo9L-Medi", 10, (284, 284, 288, 295)),
+                PdfGlyph("G", "NimbusRomNo9L-Medi", 10, (288, 284, 296, 295)),
+                PdfGlyph("o", "NimbusRomNo9L-Medi", 10, (296, 284, 304, 295)),
+                PdfGlyph("m", "NimbusRomNo9L-Medi", 10, (304, 284, 312, 295)),
+                PdfGlyph("e", "NimbusRomNo9L-Medi", 10, (312, 284, 320, 295)),
+                PdfGlyph("z", "NimbusRomNo9L-Medi", 10, (320, 284, 328, 295)),
+                PdfGlyph("∗", "CMSY7", 7, (328, 284, 332, 291)),
+                PdfGlyph("†", "CMSY7", 7, (333, 284, 337, 291)),
+            ]),
+        ),
+    )
+
+    regions = BornDigitalMathAuditor().display_formula_regions(extracted)
+
+    assert regions == []
+
+
+def test_display_formula_regions_reject_body_width_math_sentence() -> None:
+    glyphs: list[PdfGlyph] = []
+    text = "(x1, ..., xn) to another sequence of equal length (z1, ..., zn), with xi, zi ∈Rd"
+    x = 108.0
+    for ch in text:
+        font = "CMMI10" if ch in {"x", "z", "i", "n", "R", "d"} else "NimbusRomNo9L-Regu"
+        if ch == "∈":
+            font = "CMSY10"
+        glyphs.append(PdfGlyph(ch, font, 10, (x, 540, x + 4.6, 551)))
+        x += 4.8
+    extracted = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([PdfGlyph(ch, "NimbusRomNo9L-Regu", 10, (108 + i * 5, 510, 112 + i * 5, 521)) for i, ch in enumerate("ordinary body line with enough length")]),
+            _text_region(glyphs),
+        ),
+    )
+
+    regions = BornDigitalMathAuditor().display_formula_regions(extracted)
+
+    assert regions == []
 
 
 def _text_region(glyphs: list[PdfGlyph]) -> PdfRegion:

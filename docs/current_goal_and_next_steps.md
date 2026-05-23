@@ -162,17 +162,21 @@
 
 - 新增 `MuPDFBornDigitalExtractor`，只抽取 PDF 结构事实：glyph、font、bbox、line、span、image、vector、unknown glyph。
 - 新增 `tools/born_digital_math_audit.py`，支持 MuPDF rawdict 审计和 Poppler `pdftotext -bbox-layout` 对照。
+- 新增 `DisplayFormulaRegion` / `DisplayFormulaSegmenter`，在不 OCR、不猜 LaTeX 的前提下，把显示公式的多行/多块 PDF 结构合成候选区域。
+- 审计工具新增 display region 和 display-only LaTeX 源码对齐指标。
 - 不生成 LaTeX、不猜公式、不接入主解析热路径，避免硬编码实验污染生产链路。
 
 当前验证：
 
-- `tests/test_born_digital_math.py` 通过。
-- `tests/test_born_digital_math.py tests/test_formula_detector.py` 共 37 项通过。
+- `tests/test_born_digital_math.py` 13 项通过，覆盖 glyph/vector 抽取、数学证据、显示公式分割、脚注误报、正文宽度内联数学误报。
+- 全量 `pytest -q`：105 passed，2 skipped。
 - Attention 第 3-4 页 MuPDF rawdict 审计：约 0.206s，5602 glyph，9 vector，2 image，unknown glyph 为 0。
 - Attention 第 3 页 Poppler 对照：MuPDF 约 0.161s，Poppler `-bbox-layout` 约 0.282s。
 - 后续新增结构证据审计：evidence region、cluster、context cluster，并接入 LaTeX 源码匹配指标。
 - Attention 第 3-4 页 cluster 能出现少量源码弱匹配；context cluster 能匹配部分 FFN/MultiHead 片段，但会误吸正文，因此只保留为审计上限，不进入主链路。
-- 下一步必须做行/region 级 display formula 聚类和二维布局树，不能继续扩大 bbox 或堆规则。
+- Attention 前 6 页 display region 审计：约 0.593s，17816 glyph，display region 7 个，unknown glyph 为 0；`Attention`、`FFN`、`MultiHead`、`PE` 样例可整体对齐源码。
+- Napkin 第 60-79 页 display region 审计：约 0.874s，30974 glyph，display region 31 个，unknown glyph 为 0。
+- 下一步必须做二维布局树与 LaTeX 语义恢复，不能把 display region 原始文本直接当最终公式 truth。
 
 ### 全文问答与证据
 
