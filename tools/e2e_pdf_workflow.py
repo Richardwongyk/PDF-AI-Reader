@@ -382,15 +382,43 @@ def _drive_case(case: PdfCase) -> CaseResult:
         _action(actions, "ask_question", t, block_id=block_id)
         screenshots.append(_screenshot(case_dir, "07_qa"))
 
+        t = time.perf_counter()
+        event_index = len(_read_events())
+        _send_command({
+            "cmd": "ask_dock_question",
+            "question": "Across the full document, what evidence supports the main technical idea?",
+        })
+        _wait_for_event("dock_qa_requested", event_index, timeout=20)
+        _wait_for_log(r"问答完成 split=__dock_qa__", timeout=60)
+        event_index = len(_read_events())
+        _send_command({"cmd": "snapshot_state"})
+        state = _wait_for_event("state", event_index, timeout=10)
+        _action(
+            actions,
+            "ask_dock_question",
+            t,
+            dock_evidence_count=state.get("dock", {}).get("dock_evidence_count", 0),
+            dock_answer_chars=state.get("dock", {}).get("dock_answer_chars", 0),
+        )
+        screenshots.append(_screenshot(case_dir, "08_dock_qa"))
+
         pyautogui.scroll(-8, x=x, y=y)
         time.sleep(0.8)
-        screenshots.append(_screenshot(case_dir, "08_final_scroll"))
+        screenshots.append(_screenshot(case_dir, "09_final_scroll"))
 
         log_summary = _summarize_log()
+        dock_action = next(
+            (item for item in actions if item.get("name") == "ask_dock_question"),
+            {},
+        )
         ok = (
             log_summary["levels"]["CRITICAL"] == 0
+            and log_summary["levels"]["ERROR"] == 0
+            and log_summary["levels"]["WARNING"] == 0
             and log_summary["counts"]["document_loaded"] >= 1
             and len(screenshots) >= 6
+            and int(dock_action.get("dock_evidence_count", 0)) > 0
+            and int(dock_action.get("dock_answer_chars", 0)) > 0
         )
         if case.expected_min_pages > 0:
             title = window.window_text()

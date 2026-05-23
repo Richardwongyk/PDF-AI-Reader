@@ -110,7 +110,7 @@ def test_main_window_smoke() -> None:
         """
         import sys
         from PySide6.QtCore import QTimer
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QWidget
         from PySide6.QtWebEngineCore import QWebEngineProfile
 
         from src.main import setup_logging, build_services
@@ -126,6 +126,9 @@ def test_main_window_smoke() -> None:
         services = build_services()
         window = main_window_module.MainWindow(services)
         window.show()
+        assert window.findChild(QWidget, "ai_question_input") is not None
+        assert window.findChild(QWidget, "ai_evidence_tree") is not None
+        assert window.findChild(QWidget, "ai_answer_view") is not None
         QTimer.singleShot(500, window.close)
         QTimer.singleShot(1500, app.quit)
         code = app.exec()

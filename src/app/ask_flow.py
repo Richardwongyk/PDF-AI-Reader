@@ -30,6 +30,7 @@ class AskQuestionFlow(QObject):
     """
 
     answer_unavailable = Signal(str, str)  # (message, block_id)
+    retrieval_ready = Signal(str, list)  # (block_id, evidence list[dict])
 
     def __init__(
         self,
@@ -75,14 +76,26 @@ class AskQuestionFlow(QObject):
 
         if self._current_doc_hash:
             try:
+                top_k = 8 if block is None else 3
                 retrieved_raw = self._knowledge_engine.retrieve(
-                    question, self._current_doc_hash, top_k=3,
+                    question, self._current_doc_hash, top_k=top_k,
                     exclude_ids=[block_id] if block else None,
                 )
-                retrieved = [
-                    find_block_cb(r["id"]) for r in retrieved_raw
-                    if find_block_cb(r["id"])
-                ]
+                retrieved = []
+                evidence = []
+                for result in retrieved_raw:
+                    found = find_block_cb(result["id"])
+                    if not found:
+                        continue
+                    retrieved.append(found)
+                    evidence.append({
+                        "id": found.id,
+                        "page": found.page_num + 1,
+                        "type": found.block_type.value,
+                        "distance": float(result.get("distance", 0.0)),
+                        "content": found.content,
+                    })
+                self.retrieval_ready.emit(block_id, evidence)
                 _logger.info("AskQuestionFlow: 检索到 %d 个相关块", len(retrieved))
             except Exception:
                 _logger.warning("AskQuestionFlow: 检索失败", exc_info=True)

@@ -14,17 +14,24 @@ from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QDockWidget,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenuBar,
     QMessageBox,
+    QPushButton,
     QProgressBar,
     QStatusBar,
+    QTextBrowser,
     QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -110,6 +117,9 @@ class MainWindow(QMainWindow):
         self._active_translation_blocks: set[str] = set()
         self._last_user_translation_at: float = 0.0
         self._pymupdf4llm_pending_result: object | None = None
+        self._dock_answer_text: str = ""
+        self._dock_answer_split_id: str = "__dock_qa__"
+        self._dock_last_question: str = ""
 
         self._init_ui()
         self._connect_signals()
@@ -194,7 +204,6 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         # 搜索框（简化版，仅占位）
-        from PySide6.QtWidgets import QLineEdit
         self._search_box = QLineEdit()
         self._search_box.setPlaceholderText("搜索文档...")
         self._search_box.setMaximumWidth(200)
@@ -243,18 +252,60 @@ class MainWindow(QMainWindow):
         self._left_dock.setWidget(self._toc_tree)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._left_dock)
 
-        # 右侧：AI 工具集（占位，后续完整实现）
+        # 右侧：全文问答与证据面板
         self._right_dock = QDockWidget("AI 工具集", self)
         self._right_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         right_widget = QWidget()
-        right_label = QLabel("AI 工具集\n\n打开文档后：\n- 显示章节摘要\n- 专业术语列表\n- AI 推荐问题")
-        right_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_label.setStyleSheet("color: #888; padding: 16px;")
-        from PySide6.QtWidgets import QVBoxLayout
         right_layout = QVBoxLayout(right_widget)
-        right_layout.addWidget(right_label)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(8)
+
+        self._ai_doc_status = QLabel("未打开文档")
+        self._ai_doc_status.setObjectName("ai_doc_status")
+        self._ai_doc_status.setWordWrap(True)
+        self._ai_doc_status.setStyleSheet("color: #444; font-weight: 600;")
+        right_layout.addWidget(self._ai_doc_status)
+
+        action_row = QHBoxLayout()
+        self._ai_question_input = QLineEdit()
+        self._ai_question_input.setObjectName("ai_question_input")
+        self._ai_question_input.setPlaceholderText("基于全文提问...")
+        self._ai_question_input.returnPressed.connect(self._on_dock_question_submitted)
+        action_row.addWidget(self._ai_question_input, 1)
+        self._ai_ask_button = QPushButton("提问")
+        self._ai_ask_button.setObjectName("ai_ask_button")
+        self._ai_ask_button.clicked.connect(self._on_dock_question_submitted)
+        action_row.addWidget(self._ai_ask_button)
+        right_layout.addLayout(action_row)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        right_layout.addWidget(separator)
+
+        evidence_label = QLabel("检索依据")
+        evidence_label.setStyleSheet("font-weight: 600;")
+        right_layout.addWidget(evidence_label)
+        self._ai_evidence_tree = QTreeWidget()
+        self._ai_evidence_tree.setObjectName("ai_evidence_tree")
+        self._ai_evidence_tree.setHeaderLabels(["页码", "片段"])
+        self._ai_evidence_tree.setRootIsDecorated(False)
+        self._ai_evidence_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._ai_evidence_tree.itemDoubleClicked.connect(self._on_evidence_item_activated)
+        self._ai_evidence_tree.setMinimumHeight(170)
+        right_layout.addWidget(self._ai_evidence_tree, 1)
+
+        answer_label = QLabel("回答")
+        answer_label.setStyleSheet("font-weight: 600;")
+        right_layout.addWidget(answer_label)
+        self._ai_answer_view = QTextBrowser()
+        self._ai_answer_view.setObjectName("ai_answer_view")
+        self._ai_answer_view.setOpenExternalLinks(False)
+        self._ai_answer_view.setMinimumHeight(220)
+        right_layout.addWidget(self._ai_answer_view, 2)
+
         self._right_dock.setWidget(right_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._right_dock)
 
@@ -306,6 +357,7 @@ class MainWindow(QMainWindow):
             lambda q, bid: self._on_split_ask(q, bid)
         )
         self._ask_flow.answer_unavailable.connect(self._on_answer_unavailable)
+        self._ask_flow.retrieval_ready.connect(self._on_retrieval_ready)
         self._ai_engine.answer_token.connect(self._on_answer_token)
         self._ai_engine.answer_finished.connect(self._on_answer_finished)
         self._ai_engine.answer_error.connect(self._on_answer_error)
@@ -386,6 +438,12 @@ class MainWindow(QMainWindow):
         self._status_page_label.setText(
             f"{result.title or Path(result.filepath).name} — {result.page_count} 页"
         )
+        self._ai_doc_status.setText(
+            f"{result.title or Path(result.filepath).name}\n{result.page_count} 页，正在检查知识库"
+        )
+        self._ai_answer_view.clear()
+        self._ai_evidence_tree.clear()
+        self._dock_answer_text = ""
         self.setWindowTitle(f"{result.title or Path(result.filepath).name} — PDF AI Reader")
 
         # 加载到 PdfViewer。不要在这里 processEvents；长文档后台页块信号可能插队拖慢首屏。
@@ -432,8 +490,10 @@ class MainWindow(QMainWindow):
             count = status.embedded_blocks or status.total_blocks
             suffix = f"{count} 块" if count else "就绪"
             self._status_model_label.setText(f"知识库就绪({suffix}) | {model_state} | {render_engine}")
+            self._ai_doc_status.setText(f"知识库就绪\n{suffix}")
         else:
             self._status_model_label.setText(f"知识库构建中... | {model_state} | {render_engine}")
+            self._ai_doc_status.setText("知识库构建中")
 
     def _on_page_blocks_ready(self, page_num: int, blocks: list[DocumentBlock]) -> None:
         """长文档后台补齐某页 blocks。"""
@@ -539,17 +599,25 @@ class MainWindow(QMainWindow):
         self._status_progress.setVisible(True)
         self._status_progress.setMaximum(total)
         self._status_progress.setValue(current)
+        self._ai_doc_status.setText(f"知识库构建中\n{current}/{total} 块")
 
     def _on_kb_finished(self, doc_hash: str) -> None:
         """知识库构建完成。"""
         self._status_progress.setVisible(False)
         render_engine = "QtPdf" if self._doc_engine.using_qtpdf else "PyMuPDF"
         self._status_model_label.setText(f"📚 知识库就绪 | {self._model_status_text()} | 🖥️ {render_engine}")
+        try:
+            status = self._knowledge_engine.get_status(doc_hash)
+            count = status.embedded_blocks or status.total_blocks
+        except Exception:
+            count = 0
+        self._ai_doc_status.setText(f"知识库就绪\n{count or '未知'} 块")
 
     def _on_kb_error(self, message: str) -> None:
         """知识库构建失败。"""
         self._status_progress.setVisible(False)
         self._status_model_label.setText("⚠️ 知识库构建失败")
+        self._ai_doc_status.setText("知识库构建失败")
         self.logger.warning("知识库构建失败: %s", message)
 
     def _on_build_knowledge_base(self) -> None:
@@ -629,6 +697,50 @@ class MainWindow(QMainWindow):
             find_block_cb=self._find_block,
         )
 
+    def _on_dock_question_submitted(self) -> None:
+        """右侧全文问答提交。"""
+        question = self._ai_question_input.text().strip()
+        if not question:
+            return
+        if not self._current_doc_hash:
+            self._ai_answer_view.setPlainText("请先打开 PDF。")
+            return
+        self._dock_last_question = question
+        self._dock_answer_text = ""
+        self._ai_answer_view.setPlainText("正在检索全文知识库...")
+        self._ai_evidence_tree.clear()
+        self._ask_flow.request_answer(
+            question=question,
+            block=None,
+            block_id=self._dock_answer_split_id,
+            chat_history=None,
+            find_block_cb=self._find_block,
+        )
+
+    def _on_retrieval_ready(self, block_id: str, evidence: list[dict[str, Any]]) -> None:
+        """展示问答检索到的全文依据。"""
+        if block_id != self._dock_answer_split_id:
+            return
+        self._ai_evidence_tree.clear()
+        for item in evidence:
+            page = int(item.get("page", 0))
+            content = str(item.get("content", "")).strip().replace("\n", " ")
+            distance = float(item.get("distance", 0.0))
+            tree_item = QTreeWidgetItem(self._ai_evidence_tree)
+            tree_item.setText(0, str(page))
+            tree_item.setText(1, content[:160])
+            tree_item.setToolTip(1, content)
+            tree_item.setData(0, Qt.ItemDataRole.UserRole, page - 1)
+            tree_item.setData(1, Qt.ItemDataRole.UserRole, item.get("id", ""))
+            tree_item.setText(0, f"{page} · {distance:.3f}")
+        self._ai_doc_status.setText(f"检索到 {len(evidence)} 条依据")
+
+    def _on_evidence_item_activated(self, item: QTreeWidgetItem, column: int) -> None:
+        """双击右侧证据片段跳转到来源页。"""
+        page = item.data(0, Qt.ItemDataRole.UserRole)
+        if page is not None:
+            self._pdf_viewer.scroll_to_page(int(page))
+
     # =========================================================================
     # AI 翻译回调
     # =========================================================================
@@ -656,6 +768,11 @@ class MainWindow(QMainWindow):
     def _on_answer_finished(self, full_answer: str, split_id: str) -> None:
         """问答完成——渲染 Markdown/LaTeX。"""
         self.logger.info("问答完成 split=%s", split_id)
+        if split_id == self._dock_answer_split_id:
+            self._dock_answer_text = full_answer or self._dock_answer_text
+            self._ai_answer_view.setMarkdown(self._dock_answer_text)
+            self._ai_doc_status.setText("全文问答完成")
+            return
         split = self._pdf_viewer.find_split_widget(split_id)
         if split:
             split.display_full_answer(full_answer)
@@ -665,6 +782,9 @@ class MainWindow(QMainWindow):
         split = self._pdf_viewer.find_split_widget(split_id)
         if split:
             split.display_full_answer(message)
+        if split_id == self._dock_answer_split_id:
+            self._ai_answer_view.setPlainText(message)
+            self._ai_doc_status.setText("全文问答不可用")
 
     def _on_translation_error(self, message: str, block_id: str) -> None:
         """翻译出错。"""
@@ -680,6 +800,10 @@ class MainWindow(QMainWindow):
 
     def _on_answer_token(self, token: str, split_id: str) -> None:
         """问答流式 token。"""
+        if split_id == self._dock_answer_split_id:
+            self._dock_answer_text += token
+            self._ai_answer_view.setPlainText(self._dock_answer_text)
+            return
         split = self._pdf_viewer.find_split_widget(split_id)
         if split:
             split.display_answer_stream(token)
@@ -687,6 +811,10 @@ class MainWindow(QMainWindow):
     def _on_answer_error(self, message: str, split_id: str) -> None:
         """问答出错。"""
         self.logger.error("问答失败 split=%s: %s", split_id, message)
+        if split_id == self._dock_answer_split_id:
+            self._ai_answer_view.setPlainText(f"回答失败: {message}")
+            self._ai_doc_status.setText("全文问答失败")
+            return
         split = self._pdf_viewer.find_split_widget(split_id)
         if split:
             split.show_error(f"回答失败: {message}")

@@ -99,6 +99,12 @@ class TestCommandBridge(QObject):
             self._window._on_split_ask(question, block_id)
             self._emit("qa_requested", {"block_id": block_id, "question": question})
             return
+        if cmd == "ask_dock_question":
+            question = str(command.get("question") or "What is this document about?")
+            self._window._ai_question_input.setText(question)
+            self._window._on_dock_question_submitted()
+            self._emit("dock_qa_requested", {"question": question, **self._dock_state()})
+            return
         if cmd == "snapshot_state":
             self._emit("state", self._state())
             return
@@ -147,6 +153,17 @@ class TestCommandBridge(QObject):
             "splits": list(splits.keys()),
             "split_count": len(splits),
             "pages": self._window._doc_engine.page_count,
+            "dock": self._dock_state(),
+        }
+
+    def _dock_state(self) -> dict[str, Any]:
+        evidence = getattr(self._window, "_ai_evidence_tree", None)
+        answer = getattr(self._window, "_ai_answer_view", None)
+        status = getattr(self._window, "_ai_doc_status", None)
+        return {
+            "dock_evidence_count": evidence.topLevelItemCount() if evidence else 0,
+            "dock_answer_chars": len(answer.toPlainText()) if answer else 0,
+            "dock_status": status.text() if status else "",
         }
 
     def _read_events(self) -> list[dict[str, Any]]:
