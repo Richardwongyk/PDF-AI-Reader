@@ -124,3 +124,27 @@ def test_normalize_latex_collapses_spaced_text_commands() -> None:
         detector._normalize_latex(r"\mathrm{A t t e n t i o n} (Q)=\cfrac{a}{b}")
         == r"\mathrm{Attention} (Q)=\frac{a}{b}"
     )
+
+
+def test_math_ocr_uses_cache_before_loading_model(monkeypatch, tmp_path) -> None:
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    image = b"fake-png-bytes"
+    cache.put(cache.hash_image(image), r"\frac{a}{b}", "test")
+
+    ocr = MathOCR()
+    ocr._cache = cache
+
+    def fail_load() -> None:
+        raise AssertionError("model should not be loaded on cache hit")
+
+    monkeypatch.setattr(ocr, "_ensure_model", fail_load)
+    monkeypatch.setattr(
+        type(ocr),
+        "is_available",
+        property(lambda self: (_ for _ in ()).throw(AssertionError("availability should not be checked"))),
+    )
+
+    assert ocr.recognize(image) == r"\frac{a}{b}"

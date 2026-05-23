@@ -12,12 +12,60 @@ CPU 加速策略：
 """
 
 import io
+import hashlib
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
 
+from datetime import datetime, timezone
+from pathlib import Path
+
 _logger = logging.getLogger(__name__)
+
+
+class _FormulaOcrCache:
+    """Persistent image-hash cache for formula OCR results."""
+
+    def __init__(self, db_path: str = "data/formula_ocr_cache.db") -> None:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS formula_ocr_cache (
+                image_hash TEXT PRIMARY KEY,
+                latex      TEXT NOT NULL,
+                model      TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+        self._conn.commit()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def hash_image(image_bytes: bytes) -> str:
+        return hashlib.sha256(image_bytes).hexdigest()
+
+    def get(self, image_hash: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT latex FROM formula_ocr_cache WHERE image_hash=?",
+                (image_hash,),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def put(self, image_hash: str, latex: str, model: str) -> None:
+        if not latex.strip():
+            return
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO formula_ocr_cache
+                   (image_hash, latex, model, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (image_hash, latex, model, datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
 
 
 class MathOCR:
@@ -46,6 +94,7 @@ class MathOCR:
         self._p2t = None
         self._available: bool | None = None
         self._num_threads: int = os.cpu_count() or 4
+        self._cache = _FormulaOcrCache()
         self._setup_env()
         self._initialized = True
 
@@ -79,8 +128,6 @@ class MathOCR:
             标准 LaTeX 源码字符串（如 "\\frac{1}{2}"）。
             识别失败或服务不可用时返回空字符串。
         """
-        if not self.is_available:
-            return ""
         results = self.recognize_batch([image_bytes])
         return results[0] if results else ""
 
@@ -96,15 +143,29 @@ class MathOCR:
         Returns:
             与输入顺序对应的 LaTeX 字符串列表。
         """
-        if not self.is_available or not images:
+        if not images:
             return [""] * len(images)
+
+        cached_results, misses = self._read_cache(images)
+        if not misses:
+            return cached_results
+
+        if not self.is_available:
+            return cached_results
 
         try:
             self._ensure_model()
-            return self._recognize_batch_impl(images)
+            miss_images = [images[i] for i, _ in misses]
+            miss_results = self._recognize_batch_impl(miss_images)
+            for (original_index, image_hash), latex in zip(misses, miss_results, strict=False):
+                cleaned = str(latex or "").strip()
+                cached_results[original_index] = cleaned
+                if cleaned:
+                    self._cache.put(image_hash, cleaned, "pix2text-mfr")
+            return cached_results
         except Exception as e:
             _logger.warning("MFR 批量识别失败: %s", e)
-            return [""] * len(images)
+            return cached_results
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -116,6 +177,25 @@ class MathOCR:
                      "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             if var not in os.environ:
                 os.environ[var] = str(self._num_threads)
+
+    def _read_cache(self, images: list[bytes]) -> tuple[list[str], list[tuple[int, str]]]:
+        """Return cached OCR results and the images still needing MFR."""
+        results: list[str] = [""] * len(images)
+        misses: list[tuple[int, str]] = []
+        hits = 0
+        for index, image in enumerate(images):
+            if not image:
+                continue
+            image_hash = self._cache.hash_image(image)
+            cached = self._cache.get(image_hash)
+            if cached is not None:
+                results[index] = cached
+                hits += 1
+            else:
+                misses.append((index, image_hash))
+        if hits:
+            _logger.info("MFR OCR 缓存命中: %d/%d", hits, len(images))
+        return results, misses
 
     def _ensure_model(self) -> None:
         """懒加载 Pix2Text 模型（仅公式模块，跳过表格）。
