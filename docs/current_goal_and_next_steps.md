@@ -213,6 +213,7 @@
 - 允许后台公式 OCR 增量块存在于 collection 中，不因 collection 总块数大于基础块数而误判失配。
 - 新增 `sqlite_fts` 轻量全文索引后端，不引入新环境或新模型，作为长文档快速召回基线。
 - 运行时如果实际 embedding 只是 `HashingEmbeddingClient` 兜底，会自动把知识库后端从 `legacy_chroma` 切到 `sqlite_fts`；真实 embedding 可用时仍保留配置后端。
+- `sqlite_fts` fallback 不再初始化 `ChromaRepo`，减少没有真实 embedding 时的知识库启动开销。
 
 关键性能结论：
 

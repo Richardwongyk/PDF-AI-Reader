@@ -143,7 +143,7 @@ class KnowledgeEngine(BaseService):
     def __init__(
         self,
         embed_service: EmbeddingService,
-        chroma_repo: ChromaRepo,
+        chroma_repo: ChromaRepo | None,
         config: AppConfig | None = None,
         sqlite_fts_dir: str | None = None,
         parent: QObject | None = None,
@@ -175,7 +175,7 @@ class KnowledgeEngine(BaseService):
         return self._embed
 
     @property
-    def chroma_repo(self) -> ChromaRepo:
+    def chroma_repo(self) -> ChromaRepo | None:
         """获取 ChromaDB 仓库实例。"""
         return self._repo
 

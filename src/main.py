@@ -160,9 +160,12 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         ):
             logging.info("使用哈希嵌入兜底，知识库后端自动切换为 sqlite_fts")
             effective_config.rag.backend = "sqlite_fts"
+        chroma_repo = None
+        if effective_config.rag.backend in {"legacy_chroma", "llamaindex_chroma"}:
+            chroma_repo = cast(ChromaRepo, container.get("chroma_repo"))
         return KnowledgeEngine(
             cast(EmbeddingService, container.get("embedding_service")),
-            cast(ChromaRepo, container.get("chroma_repo")),
+            chroma_repo,
             effective_config,
             sqlite_fts_dir=str(data_dir / "knowledge_bases_fts"),
         )

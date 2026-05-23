@@ -75,6 +75,23 @@ def test_build_services_uses_fts_for_hash_embedding() -> None:
     assert "fts fallback smoke ok" in result.stdout
 
 
+def test_fts_fallback_does_not_initialize_chroma_repo() -> None:
+    result = _run_python(
+        """
+        from src.main import setup_logging, build_services
+
+        setup_logging()
+        services = build_services(test_mode=True)
+        engine = services.get("knowledge_engine")
+        assert engine.backend_name == "sqlite_fts"
+        assert "chroma_repo" not in services._singletons
+        services.shutdown()
+        print("fts avoids chroma smoke ok")
+        """
+    )
+    assert "fts avoids chroma smoke ok" in result.stdout
+
+
 def test_sample_pdf_parse_smoke() -> None:
     if not SAMPLE_PDF.exists():
         pytest.skip("sample PDF is not available in this checkout")

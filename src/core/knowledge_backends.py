@@ -744,18 +744,20 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
 
 def create_knowledge_backend(
     backend_name: str,
-    repo: ChromaRepo,
+    repo: ChromaRepo | None,
     embed_texts: Callable[[list[str]], list[list[float]]],
     sqlite_dir: str | Path | None = None,
 ) -> KnowledgeIndexBackend:
     """Create a configured knowledge backend."""
     normalized = backend_name.strip().lower()
+    if normalized == "sqlite_fts":
+        return SQLiteFtsBackend(sqlite_dir or Path("data") / "knowledge_bases_fts")
+    if repo is None:
+        raise ValueError(f"知识库后端 {backend_name} 需要 ChromaRepo")
     if normalized == "legacy_chroma":
         return LegacyChromaBackend(repo, embed_texts)
     if normalized == "llamaindex_chroma":
         return LlamaIndexChromaBackend(repo, embed_texts)
-    if normalized == "sqlite_fts":
-        return SQLiteFtsBackend(sqlite_dir or Path("data") / "knowledge_bases_fts")
     raise ValueError(f"未知知识库后端: {backend_name}")
 
 

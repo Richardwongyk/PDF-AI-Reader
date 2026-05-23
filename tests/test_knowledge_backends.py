@@ -274,6 +274,15 @@ def test_backend_factory_creates_llamaindex_backend() -> None:
     assert backend.name == "llamaindex_chroma"
 
 
+def test_backend_factory_requires_repo_for_chroma_backends() -> None:
+    with pytest.raises(ValueError):
+        create_knowledge_backend(
+            "legacy_chroma",
+            None,
+            lambda texts: [],
+        )
+
+
 def test_sqlite_fts_backend_builds_and_retrieves(tmp_path) -> None:
     backend = SQLiteFtsBackend(tmp_path)
     blocks = [
@@ -317,10 +326,9 @@ def test_sqlite_fts_backend_skips_matching_rebuild(tmp_path) -> None:
 
 
 def test_backend_factory_creates_sqlite_fts_backend(tmp_path) -> None:
-    repo = _Repo()
     backend = create_knowledge_backend(
         "sqlite_fts",
-        repo,  # type: ignore[arg-type]
+        None,
         lambda texts: [],
         sqlite_dir=tmp_path,
     )
