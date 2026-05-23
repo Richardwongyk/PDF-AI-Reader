@@ -326,7 +326,10 @@ def _summarize_image_metrics(screenshots: list[str]) -> dict[str, Any]:
             with Image.open(path) as img:
                 gray = img.convert("L")
                 gray.thumbnail((640, 640))
-                pixels = list(gray.getdata())
+                if hasattr(gray, "get_flattened_data"):
+                    pixels = list(gray.get_flattened_data())
+                else:
+                    pixels = list(gray.getdata())
                 total = max(1, len(pixels))
                 nonwhite_ratio = sum(1 for pixel in pixels if pixel < 245) / total
                 stat = ImageStat.Stat(gray)
