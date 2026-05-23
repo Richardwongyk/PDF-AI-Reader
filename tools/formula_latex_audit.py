@@ -79,6 +79,8 @@ class FormulaReport:
     pdf_needs_ocr_blocks: int
     pdf_top_commands: list[tuple[str, int]]
     missing_common_source_commands: list[str]
+    recovered_common_source_commands: list[str]
+    common_source_command_recall: float
     sample_source_formulas: list[str]
     sample_pdf_formulas: list[str]
     sample_needs_ocr_blocks: list[dict[str, Any]]
@@ -203,7 +205,9 @@ def _audit_case(case: CasePaths, run_mfd: bool, mfd_pages: list[int] | None) -> 
         cmd for cmd, count in source_commands.items()
         if count >= 2 and cmd not in {r"\label", r"\ref", r"\cite", r"\begin", r"\end"}
     }
+    recovered = sorted(cmd for cmd in source_common if cmd in pdf_commands)
     missing = sorted(cmd for cmd in source_common if cmd not in pdf_commands)[:40]
+    recall = len(recovered) / len(source_common) if source_common else 1.0
 
     return FormulaReport(
         name=case.name,
@@ -224,6 +228,8 @@ def _audit_case(case: CasePaths, run_mfd: bool, mfd_pages: list[int] | None) -> 
         pdf_needs_ocr_blocks=len(needs_ocr),
         pdf_top_commands=pdf_commands.most_common(25),
         missing_common_source_commands=missing,
+        recovered_common_source_commands=recovered,
+        common_source_command_recall=round(recall, 3),
         sample_source_formulas=_sample(source_formulas),
         sample_pdf_formulas=_sample([b.content for b in formula_blocks]),
         sample_needs_ocr_blocks=[

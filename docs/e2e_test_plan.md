@@ -57,6 +57,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py 
 后续加强门槛：
 
 - Attention：抽样公式与 LaTeX 源中的 `\frac`、`\sqrt`、`\mathrm`、`\operatorname` 等结构对齐。
+- 公式审计报告需记录 `recovered_common_source_commands` 和 `common_source_command_recall`，用于量化源码常见命令在 PDF 抽取/MFR 后的恢复情况。
 - Napkin：大文档打开首屏、滚动、缩放、知识库状态达到明确时间预算。
 - 缩放后不能长期停留在模糊缩放图，应在异步精确渲染完成后替换。
 - 跳转应使用真实页码/目录 UI，而不是快捷键尝试。

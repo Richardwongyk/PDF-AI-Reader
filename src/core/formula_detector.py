@@ -44,8 +44,9 @@ class Pix2TextMFDDetector(FormulaDetector):
     先做 bbox 检测，再对 PDF 图片/扫描公式裁剪并尝试识别 LaTeX。
     """
 
-    def __init__(self, dpi: int = 200) -> None:
+    def __init__(self, dpi: int = 200, max_existing_ocr_blocks: int = 6) -> None:
         self._dpi = dpi
+        self._max_existing_ocr_blocks = max_existing_ocr_blocks
         self._mfd = None
 
     def name(self) -> str:
@@ -136,9 +137,19 @@ class Pix2TextMFDDetector(FormulaDetector):
     def _crop_formula_image(self, doc: fitz.Document, formula: dict[str, Any]) -> bytes:
         """按 MFD bbox 从 PDF 页面裁剪公式图片，供 MFR 识别。"""
         page_num = int(formula["page"])
+        return self._crop_bbox_image(doc, page_num, formula["bbox"], dpi=self._dpi, pad=3.0)
+
+    @staticmethod
+    def _crop_bbox_image(
+        doc: fitz.Document,
+        page_num: int,
+        bbox: tuple[float, float, float, float] | list[float],
+        dpi: int,
+        pad: float,
+    ) -> bytes:
+        """按 bbox 裁剪 PDF 页面图片。"""
         page = doc[page_num]
-        x0, y0, x1, y1 = [float(v) for v in formula["bbox"]]
-        pad = 3.0
+        x0, y0, x1, y1 = [float(v) for v in bbox]
         clip = fitz.Rect(
             max(page.rect.x0, x0 - pad),
             max(page.rect.y0, y0 - pad),
@@ -147,7 +158,7 @@ class Pix2TextMFDDetector(FormulaDetector):
         )
         if clip.is_empty or clip.width < 2 or clip.height < 2:
             return b""
-        scale = self._dpi / 72.0
+        scale = dpi / 72.0
         pix = page.get_pixmap(
             matrix=fitz.Matrix(scale, scale),
             clip=clip,
@@ -155,6 +166,135 @@ class Pix2TextMFDDetector(FormulaDetector):
             alpha=False,
         )
         return pix.tobytes("png")
+
+    @staticmethod
+    def _normalize_latex(latex: str) -> str:
+        """清理 MFR 常见的逐字母空格输出。"""
+        import re
+
+        text = str(latex or "").strip().strip("$")
+
+        def collapse_command(match: re.Match[str]) -> str:
+            command = match.group(1)
+            body = match.group(2)
+            parts = body.split()
+            if len(parts) >= 3 and all(len(part) == 1 and part.isalpha() for part in parts):
+                body = "".join(parts)
+            return f"\\{command}{{{body}}}"
+
+        text = re.sub(r"\\(mathrm|operatorname\*?|text)\s*\{([^{}]+)\}", collapse_command, text)
+        text = text.replace(r"\cfrac", r"\frac")
+        return text.strip()
+
+    @staticmethod
+    def _has_latex_command(text: str) -> bool:
+        """文本是否已经包含可用 LaTeX 命令。"""
+        import re
+        return bool(re.search(r"\\[A-Za-z]+", text or ""))
+
+    def _should_ocr_existing_formula_block(self, block: DocumentBlock) -> bool:
+        """判断现有公式块是否需要用 MFR 从页面图像重识别。"""
+        import re
+
+        if block.block_type != BlockType.FORMULA:
+            return False
+        if block.metadata.get("mfr_recognized") or block.metadata.get("formula_ocr"):
+            return False
+        text = (block.content or "").strip()
+        if not text or text.startswith("[图片公式"):
+            return False
+        if self._has_latex_command(text):
+            return False
+        if len(text) < 8 or len(text) > 260:
+            return False
+        if re.search(r"\b(?:Layer Type|BLEU|params|steps|EN-DE|EN-FR|dev)\b", text):
+            return False
+
+        words = re.findall(r"[A-Za-z]{3,}", text)
+        math_markers = sum(text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫")
+        has_math_word = bool(re.search(r"\b(?:softmax|Attention|FFN|sin|cos|log|exp|max|min)\b", text))
+        if "=" not in text:
+            return False
+        if len(words) > 12:
+            return False
+        return math_markers >= 2 or has_math_word
+
+    @staticmethod
+    def _existing_formula_ocr_priority(block: DocumentBlock) -> tuple[int, int, int]:
+        """越像短公式，越靠前进入有限 OCR 预算。"""
+        import re
+
+        text = (block.content or "").strip()
+        words = re.findall(r"[A-Za-z]{3,}", text)
+        math_markers = sum(text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫")
+        starts_formula = bool(
+            re.match(r"^(?:[A-Z]{1,4}|[A-Za-z]+\(.*|lrate|PE\s*\()", text)
+        )
+        has_function = bool(re.search(r"\b(?:softmax|Attention|FFN|sin|cos|log|exp|max|min)\b", text))
+        score = 0
+        score += 6 if "=" in text else 0
+        score += 4 if starts_formula else 0
+        score += 3 if has_function else 0
+        score += min(math_markers, 8)
+        score -= max(len(words) - 8, 0) * 2
+        return (score, -len(words), -len(text))
+
+    def _recognize_existing_formula_blocks(
+        self, doc: fitz.Document, blocks: list[DocumentBlock]
+    ) -> dict[str, str]:
+        """对已有但非 LaTeX 的公式块做受控 MFR 重识别。"""
+        if self._max_existing_ocr_blocks <= 0:
+            return {}
+
+        targets = [
+            block for block in blocks
+            if self._should_ocr_existing_formula_block(block)
+        ]
+        targets.sort(key=self._existing_formula_ocr_priority, reverse=True)
+        targets = targets[:self._max_existing_ocr_blocks]
+        if not targets:
+            return {}
+
+        import logging
+        logger = logging.getLogger("Pix2TextMFD")
+        images: list[bytes] = []
+        image_blocks: list[DocumentBlock] = []
+        for block in targets:
+            try:
+                image = self._crop_bbox_image(
+                    doc,
+                    block.page_num,
+                    block.bbox,
+                    dpi=max(self._dpi, 300),
+                    pad=6.0,
+                )
+            except Exception as exc:
+                logger.debug("现有公式块裁剪失败 block=%s: %s", block.id, exc)
+                image = b""
+            if image:
+                images.append(image)
+                image_blocks.append(block)
+
+        if not images:
+            return {}
+        try:
+            from src.core.math_ocr import MathOCR
+            latex_results = MathOCR().recognize_batch(images)
+        except Exception as exc:
+            logger.warning("现有公式块 MFR OCR 不可用，保留原文本: %s", exc)
+            return {}
+
+        recognized: dict[str, str] = {}
+        for block, latex in zip(image_blocks, latex_results, strict=False):
+            cleaned = self._normalize_latex(latex)
+            if cleaned and self._has_latex_command(cleaned):
+                recognized[block.id] = cleaned
+        logger.info(
+            "现有公式块 MFR OCR 完成: %d/%d 个公式块重识别为 LaTeX",
+            len(recognized),
+            len(targets),
+        )
+        return recognized
 
     def _recognize_scanned_formulas(
         self, doc: fitz.Document, formulas: list[dict[str, Any]]
@@ -202,7 +342,29 @@ class Pix2TextMFDDetector(FormulaDetector):
         # 只对有公式特征的页面跑 MFD
         candidate_pages = [pn for pn in range(doc.page_count)
                            if self._page_has_formulas(blocks, pn)]
+        existing_ocr_results = self._recognize_existing_formula_blocks(doc, blocks)
+        existing_ocr_count = 0
+        for block in blocks:
+            latex = self._normalize_latex(existing_ocr_results.get(block.id, ""))
+            if not latex:
+                continue
+            block.content = latex
+            block.block_type = BlockType.FORMULA
+            block.metadata.update({
+                "formula_detector": "pix2text-mfd",
+                "formula_ocr": "pix2text-mfr",
+                "mfr_recognized": True,
+                "latex_source": "existing_block_ocr",
+                "needs_ocr": False,
+            })
+            existing_ocr_count += 1
         if not candidate_pages:
+            if existing_ocr_count:
+                import logging
+                logging.getLogger("Pix2TextMFD").info(
+                    "重识别 %d 个现有公式块，无需额外 MFD 页面检测",
+                    existing_ocr_count,
+                )
             return blocks
         import logging
         logger = logging.getLogger("Pix2TextMFD")
@@ -262,7 +424,7 @@ class Pix2TextMFDDetector(FormulaDetector):
             while new_id in existing_ids:
                 next_index += 1
                 new_id = f"p{page_num}_b{next_index}"
-            latex = ocr_results.get(idx, "").strip()
+            latex = self._normalize_latex(ocr_results.get(idx, ""))
             metadata = {
                 "formula_detector": "pix2text-mfd",
                 "formula_score": f["score"],
@@ -287,5 +449,10 @@ class Pix2TextMFDDetector(FormulaDetector):
             by_page.setdefault(page_num, []).append(new_block)
             existing_ids.add(new_id)
             added += 1
-        logger.info("共标注 %d 个文本公式块，新增 %d 个图片/扫描公式块", matched, added)
+        logger.info(
+            "共标注 %d 个文本公式块，重识别 %d 个现有公式块，新增 %d 个图片/扫描公式块",
+            matched,
+            existing_ocr_count,
+            added,
+        )
         return blocks
