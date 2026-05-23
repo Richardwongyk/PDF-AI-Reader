@@ -2,7 +2,9 @@ import pytest
 
 from src.core.ai_engine import HashingEmbeddingClient, HybridModelRouter, MockLLMClient, QAService
 from src.core.knowledge_engine import KnowledgeEngine
+from src.core.model_providers import normalize_litellm_model
 from src.core.models import AppConfig, DocumentBlock, BlockType, TaskType
+from src.data.config_manager import ConfigManager
 
 
 class _UnavailableClient(MockLLMClient):
@@ -82,9 +84,31 @@ def test_app_config_exposes_rag_and_reasoning_models() -> None:
     cfg = AppConfig()
 
     assert cfg.model.cloud_translation == "deepseek/deepseek-chat"
-    assert cfg.model.cloud_reasoning == "deepseek-v4-pro"
+    assert cfg.model.cloud_reasoning == "deepseek/deepseek-v4-pro"
     assert cfg.rag.backend == "legacy_chroma"
     assert cfg.rag.candidate_pool == 48
+
+
+def test_deepseek_reasoning_model_name_is_litellm_compatible() -> None:
+    assert normalize_litellm_model("deepseek-v4-pro") == "deepseek/deepseek-v4-pro"
+    assert normalize_litellm_model("deepseek/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
+
+
+def test_config_api_key_reuses_same_deepseek_provider_family(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+model:
+  cloud: deepseek/deepseek-v4-flash
+api_keys:
+  deepseek/deepseek-v4-flash: sk-test
+""",
+        encoding="utf-8",
+    )
+    manager = ConfigManager(str(config_path))
+
+    assert manager.get_api_key("deepseek/deepseek-v4-pro") == "sk-test"
+    assert manager.get_api_key("deepseek-v4-pro") == "sk-test"
 
 
 def test_router_keeps_local_and_cloud_roles_separate() -> None:

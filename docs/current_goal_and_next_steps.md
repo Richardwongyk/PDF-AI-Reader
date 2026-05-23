@@ -63,6 +63,12 @@
 
 - 新增 `rag` 配置段。
 - 拆分 `cloud_translation` 和 `cloud_reasoning`。
+- 修复 DeepSeek reasoning 模型名：配置层使用 LiteLLM 兼容的 `deepseek/deepseek-v4-pro`，
+  旧的 `deepseek-v4-pro` 会在启动时自动规范化。
+- 云端 key 查找支持同一 DeepSeek provider family 复用，`config.yaml` 里已有的
+  `deepseek/deepseek-v4-flash` key 可用于 reasoning 模型。
+- 新增可选真实云端 smoke test，设置 `PDF_AI_READER_RUN_CLOUD_TESTS=1` 时会使用当前
+  `config.yaml` 调用 DeepSeek reasoning 模型验证问答链路。
 - 写入迁移方案文档：[rag_graphrag_migration_plan.md](rag_graphrag_migration_plan.md)。
 - 抽出 `KnowledgeIndexBackend`。
 - 保留 `legacy_chroma` 默认后端。

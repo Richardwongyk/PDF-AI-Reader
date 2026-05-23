@@ -7,6 +7,7 @@
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import yaml
 from PySide6.QtCore import QObject, Signal
 
 from src.core.models import AppConfig, ModelConfig, RAGConfig, RoutingConfig, UIConfig
+from src.core.model_providers import normalize_litellm_model, provider_family
 
 _logger = logging.getLogger(__name__)
 
@@ -172,13 +174,24 @@ class ConfigManager(QObject):
         Returns:
             API Key 字符串或 None。
         """
-        # 先从配置中的 api_keys 查找
-        if provider in self._config.api_keys:
-            return self._config.api_keys[provider]
+        requested = str(provider or "").strip()
+        normalized = normalize_litellm_model(requested)
+        family = provider_family(normalized)
 
-        # 再从环境变量查找
-        env_key = f"{provider.upper()}_API_KEY"
-        return os.environ.get(env_key)
+        for key in (requested, normalized, family):
+            if key and key in self._config.api_keys:
+                return self._config.api_keys[key]
+
+        if family:
+            for key, value in self._config.api_keys.items():
+                if provider_family(key) == family:
+                    return value
+
+        for key in _api_key_env_names(requested, normalized, family):
+            value = os.environ.get(key)
+            if value:
+                return value
+        return None
 
     def _load_env(self) -> None:
         """从 .env 文件加载环境变量。
@@ -194,3 +207,18 @@ class ConfigManager(QObject):
                 _logger.info(".env 文件已加载")
         except ImportError:
             pass  # python-dotenv 未安装时静默跳过
+
+
+def _api_key_env_names(provider: str, normalized: str, family: str) -> list[str]:
+    names: list[str] = []
+    for raw in (provider, normalized, family):
+        if not raw:
+            continue
+        token = re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_").upper()
+        if token:
+            names.append(f"{token}_API_KEY")
+    deduped: list[str] = []
+    for name in names:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped

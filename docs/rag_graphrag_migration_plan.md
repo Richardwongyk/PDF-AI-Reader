@@ -158,7 +158,13 @@ PDF / OCR / MFR
 - `cloud_translation`: 翻译、轻量解释、低延迟任务。
 - `cloud_reasoning`: 全文问答、结构化摘要、图谱抽取、多跳推理。
 - 无 API Key 时仍使用 Mock，不影响本地索引和 E2E。
-- 高质量模式可以配置为 DeepSeek v4 pro 类模型；具体模型名由 LiteLLM/provider 支持情况决定。
+- 高质量模式默认配置为 `deepseek/deepseek-v4-pro`。DeepSeek 官方 API 文档中的模型名是
+  `deepseek-v4-pro` / `deepseek-v4-flash`，但本项目通过 LiteLLM 调用，配置里必须保留
+  `deepseek/` provider 前缀。
+- DeepSeek reasoning 模型会先产生 `reasoning_content`，再产生最终 `content`。真实问答、图谱抽取、
+  追问生成等任务不能给过小 `max_tokens`，否则 token 预算可能被思考过程耗尽而没有最终答案。
+- `ConfigManager.get_api_key()` 允许同一 provider family 复用 key，例如 `deepseek/deepseek-v4-flash`
+  配置的 key 可供 `deepseek/deepseek-v4-pro` 使用。
 
 ## 第一阶段落地任务
 

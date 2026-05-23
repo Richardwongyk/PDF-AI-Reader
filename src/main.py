@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
 from src.core.models import AppConfig
+from src.core.model_providers import normalize_litellm_model
 from src.core.service_container import ServiceContainer
 from src.data.config_manager import ConfigManager
 
@@ -179,10 +180,24 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
 
         cloud_client: BaseLLMClient | None = None
         reasoning_client: BaseLLMClient | None = None
-        cloud_provider = config.model.cloud_translation or config.model.cloud
-        reasoning_provider = config.model.cloud_reasoning or cloud_provider
-        cloud_api_key = config_manager.get_api_key(cloud_provider) or config_manager.get_api_key(config.model.cloud)
-        reasoning_api_key = config_manager.get_api_key(reasoning_provider) or cloud_api_key
+        cloud_provider_raw = config.model.cloud_translation or config.model.cloud
+        reasoning_provider_raw = config.model.cloud_reasoning or cloud_provider_raw
+        cloud_provider = normalize_litellm_model(cloud_provider_raw)
+        reasoning_provider = normalize_litellm_model(reasoning_provider_raw)
+        if cloud_provider != cloud_provider_raw:
+            logging.info("云端翻译模型已规范化: %s → %s", cloud_provider_raw, cloud_provider)
+        if reasoning_provider != reasoning_provider_raw:
+            logging.info("云端全文理解模型已规范化: %s → %s", reasoning_provider_raw, reasoning_provider)
+        cloud_api_key = (
+            config_manager.get_api_key(cloud_provider)
+            or config_manager.get_api_key(cloud_provider_raw)
+            or config_manager.get_api_key(config.model.cloud)
+        )
+        reasoning_api_key = (
+            config_manager.get_api_key(reasoning_provider)
+            or config_manager.get_api_key(reasoning_provider_raw)
+            or cloud_api_key
+        )
         if test_mode:
             logging.info("测试模式：生成模型强制使用 Mock 客户端，不调用云端 API")
         elif _is_configured_api_key(cloud_api_key):

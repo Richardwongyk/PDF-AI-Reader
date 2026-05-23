@@ -774,7 +774,7 @@ class QAService:
         ]
         try:
             import json
-            raw = client.generate(messages, temperature=0.7, max_tokens=300)
+            raw = client.generate(messages, temperature=0.7, max_tokens=1024)
             # 尝试提取 JSON 数组
             start = raw.find("[")
             end = raw.rfind("]") + 1

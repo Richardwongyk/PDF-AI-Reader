@@ -2,7 +2,7 @@ model:
   local: qwen3.5:4b
   cloud: deepseek/deepseek-chat
   cloud_translation: deepseek/deepseek-chat
-  cloud_reasoning: deepseek-v4-pro
+  cloud_reasoning: deepseek/deepseek-v4-pro
   embed_local: bge-m3
   ollama_host: http://localhost:11434
 rag:
@@ -27,3 +27,4 @@ ui:
   show_word_translation: false
 api_keys:
   deepseek/deepseek-chat: "在此填入你的 API Key"
+  deepseek/deepseek-v4-pro: "可选；未填写时会复用同一 DeepSeek provider 的 key"

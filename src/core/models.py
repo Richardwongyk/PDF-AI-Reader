@@ -127,7 +127,7 @@ class ModelConfig(BaseModel):
     local: str = "qwen3.5:4b"            # 可选本地生成模型（Ollama）
     cloud: str = "deepseek/deepseek-chat" # 云端默认模型
     cloud_translation: str = "deepseek/deepseek-chat" # 翻译与轻量任务模型
-    cloud_reasoning: str = "deepseek-v4-pro" # 全文问答、结构抽取与图谱模型
+    cloud_reasoning: str = "deepseek/deepseek-v4-pro" # 全文问答、结构抽取与图谱模型
     embed_local: str = "bge-m3"          # 可选本地嵌入模型；不可用时使用轻量哈希嵌入
     ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
 
