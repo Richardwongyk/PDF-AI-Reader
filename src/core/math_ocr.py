@@ -1,8 +1,8 @@
 """
 MathOCR —— 数学公式图片 → LaTeX 识别服务。
 
-使用 Pix2Text MFR v1.5 模型（TrOCR 架构）将公式截图转为 LaTeX 源码。
-针对 CPU 推理优化：多线程、批量处理、仅加载公式模块、ONNX 后端。
+默认使用 Pix2Text MFR v1.5 模型将公式截图转为 LaTeX 源码。
+具体识别模型通过 FormulaRecognizer 后端接入；缓存、限流和调用方保持不变。
 
 CPU 加速策略：
 - OMP/OpenBLAS 线程数 = CPU 核心数
@@ -11,16 +11,16 @@ CPU 加速策略：
 - 适中的图片尺寸平衡速度与精度
 """
 
-import io
 import hashlib
 import logging
 import os
 import sqlite3
-import tempfile
 import threading
 
 from datetime import datetime, timezone
 from pathlib import Path
+
+from src.core.formula_recognizers import FormulaRecognizer, FormulaRecognizerRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -32,38 +32,93 @@ class _FormulaOcrCache:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._ensure_schema()
+        self._lock = threading.Lock()
+
+    def _ensure_schema(self) -> None:
+        """Create or migrate the OCR cache to a model-scoped key."""
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS formula_ocr_cache (
-                image_hash TEXT PRIMARY KEY,
+                cache_key  TEXT PRIMARY KEY,
+                image_hash TEXT DEFAULT '',
                 latex      TEXT NOT NULL,
                 model      TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             )
         """)
+        columns = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(formula_ocr_cache)").fetchall()
+        }
+        pk_columns = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(formula_ocr_cache)").fetchall()
+            if int(row[5] or 0) > 0
+        }
+        if "cache_key" not in columns or "image_hash" in pk_columns:
+            self._conn.execute("ALTER TABLE formula_ocr_cache RENAME TO formula_ocr_cache_legacy")
+            self._conn.execute("""
+                CREATE TABLE formula_ocr_cache (
+                    cache_key  TEXT PRIMARY KEY,
+                    image_hash TEXT DEFAULT '',
+                    latex      TEXT NOT NULL,
+                    model      TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            """)
+            legacy_columns = {
+                str(row[1])
+                for row in self._conn.execute("PRAGMA table_info(formula_ocr_cache_legacy)").fetchall()
+            }
+            if {"image_hash", "latex", "model", "created_at"}.issubset(legacy_columns):
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO formula_ocr_cache
+                    (cache_key, image_hash, latex, model, created_at)
+                    SELECT
+                        CASE
+                            WHEN model IS NOT NULL AND model != '' THEN model || ':' || image_hash
+                            ELSE image_hash
+                        END,
+                        image_hash,
+                        latex,
+                        COALESCE(model, ''),
+                        created_at
+                    FROM formula_ocr_cache_legacy
+                    WHERE image_hash IS NOT NULL AND latex IS NOT NULL
+                """)
+            self._conn.execute("DROP TABLE formula_ocr_cache_legacy")
         self._conn.commit()
-        self._lock = threading.Lock()
 
     @staticmethod
     def hash_image(image_bytes: bytes) -> str:
         return hashlib.sha256(image_bytes).hexdigest()
 
-    def get(self, image_hash: str) -> str | None:
+    @staticmethod
+    def cache_key(image_hash: str, model: str) -> str:
+        return f"{model}:{image_hash}"
+
+    def get(self, image_hash: str, model: str = "") -> str | None:
+        cache_key = self.cache_key(image_hash, model) if model else image_hash
         with self._lock:
             row = self._conn.execute(
-                "SELECT latex FROM formula_ocr_cache WHERE image_hash=?",
-                (image_hash,),
+                """SELECT latex FROM formula_ocr_cache
+                   WHERE cache_key=? OR (image_hash=? AND (?='' OR model=?))
+                   ORDER BY CASE WHEN cache_key=? THEN 0 ELSE 1 END
+                   LIMIT 1""",
+                (cache_key, image_hash, model, model, cache_key),
             ).fetchone()
         return str(row[0]) if row else None
 
     def put(self, image_hash: str, latex: str, model: str) -> None:
         if not latex.strip():
             return
+        cache_key = self.cache_key(image_hash, model)
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO formula_ocr_cache
-                   (image_hash, latex, model, created_at)
-                   VALUES (?, ?, ?, ?)""",
-                (image_hash, latex, model, datetime.now(timezone.utc).isoformat()),
+                   (cache_key, image_hash, latex, model, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (cache_key, image_hash, latex, model, datetime.now(timezone.utc).isoformat()),
             )
             self._conn.commit()
 
@@ -80,6 +135,7 @@ class MathOCR:
     # 【修复】单例模式：确保全局只加载一次模型，彻底解决每次点击卡顿 30 秒的问题
     _instance = None
     _lock = threading.Lock()
+    _default_backend: str = "pix2text-mfr"
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -88,15 +144,30 @@ class MathOCR:
                 cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self) -> None:
+    def __init__(self, backend: str | None = None) -> None:
         if self._initialized:
             return
-        self._p2t = None
-        self._available: bool | None = None
+        self._backend_name = str(backend or self.__class__._default_backend or "pix2text-mfr")
+        self._recognizer: FormulaRecognizer | None = None
         self._num_threads: int = os.cpu_count() or 4
         self._cache = _FormulaOcrCache()
         self._setup_env()
         self._initialized = True
+
+    @classmethod
+    def set_default_backend(cls, backend: str) -> None:
+        """Set process-wide backend before the singleton is first constructed."""
+        backend_name = str(backend or "pix2text-mfr").strip() or "pix2text-mfr"
+        if cls._instance is not None and getattr(cls._instance, "_initialized", False):
+            current = getattr(cls._instance, "_backend_name", "")
+            if current != backend_name:
+                _logger.warning(
+                    "公式 OCR 后端已初始化为 %s，忽略后续切换到 %s",
+                    current,
+                    backend_name,
+                )
+                return
+        cls._default_backend = backend_name
 
     # ------------------------------------------------------------------
     # 公开属性
@@ -104,15 +175,16 @@ class MathOCR:
 
     @property
     def is_available(self) -> bool:
-        """MFR 服务是否可用（Pix2Text 是否已安装）。"""
-        if self._available is None:
-            try:
-                import pix2text  # noqa: F401
-                self._available = True
-            except ImportError:
-                _logger.info("Pix2Text 未安装，MFR 不可用。安装: pip install pix2text")
-                self._available = False
-        return self._available
+        """MFR 服务是否可用。"""
+        try:
+            return self._get_recognizer().is_available
+        except Exception as exc:
+            _logger.info("公式识别后端不可用: %s", exc)
+            return False
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend_name
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -176,7 +248,7 @@ class MathOCR:
                 cleaned = str(latex or "").strip()
                 cached_results[original_index] = cleaned
                 if cleaned:
-                    self._cache.put(image_hash, cleaned, "pix2text-mfr")
+                    self._cache.put(image_hash, cleaned, self._backend_name)
             return cached_results
         except Exception as e:
             _logger.warning("MFR 批量识别失败: %s", e)
@@ -202,7 +274,7 @@ class MathOCR:
             if not image:
                 continue
             image_hash = self._cache.hash_image(image)
-            cached = self._cache.get(image_hash)
+            cached = self._cache.get(image_hash, self._backend_name)
             if cached is not None:
                 results[index] = cached
                 hits += 1
@@ -212,73 +284,21 @@ class MathOCR:
             _logger.info("MFR OCR 缓存命中: %d/%d", hits, len(images))
         return results, misses
 
+    def _get_recognizer(self) -> FormulaRecognizer:
+        if self._recognizer is None:
+            self._recognizer = FormulaRecognizerRegistry.create(
+                self._backend_name,
+                batch_size=self._BATCH_SIZE,
+                num_threads=self._num_threads,
+            )
+        return self._recognizer
+
     def _ensure_model(self) -> None:
-        """懒加载 Pix2Text 模型（仅公式模块，跳过表格）。
-
-        首次调用时触发，显式禁用无关模块，加载时间从 ~40s 降至 ~2s。
-        """
-        if self._p2t is not None:
-            return
-        if not self.is_available:
-            raise RuntimeError("Pix2Text 未安装，无法进行公式识别")
-
-        _logger.info(
-            "加载 Pix2Text MFR (CPU, %d threads, batch=%d)...",
-            self._num_threads, self._BATCH_SIZE,
-        )
-        from pix2text import Pix2Text
-        # 仅启用公式识别，跳过表格 OCR 模型
-        # enable_table=False 避免加载 TableOCR（~2s），layout 仍加载但轻量（~0.5s）
-        self._p2t = Pix2Text(
-            enable_formula=True,
-            enable_table=False,
-            device="cpu",
-        )
-        _logger.info("Pix2Text MFR 模型就绪")
+        """Lazily initialize the selected formula recognizer backend."""
+        recognizer = self._get_recognizer()
+        if not recognizer.is_available:
+            raise RuntimeError(f"公式识别后端不可用: {recognizer.name}")
 
     def _recognize_batch_impl(self, images: list[bytes]) -> list[str]:
         """批量识别的实际实现。"""
-        from PIL import Image
-
-        results: list[str] = [""] * len(images)
-        tmp_paths: list[str] = []
-
-        # Step 1: 将所有图片保存为临时文件
-        for img_bytes in images:
-            if not img_bytes:
-                tmp_paths.append("")
-                continue
-            try:
-                img = Image.open(io.BytesIO(img_bytes))
-                f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                img.save(f, format="PNG")
-                f.close()
-                tmp_paths.append(f.name)
-            except Exception as e:
-                _logger.warning("图片处理失败: %s", e)
-                tmp_paths.append("")
-
-        # Step 2: 分批调用 MFR
-        try:
-            valid = [(i, p) for i, p in enumerate(tmp_paths) if p]
-            for batch_start in range(0, len(valid), self._BATCH_SIZE):
-                batch = valid[batch_start:batch_start + self._BATCH_SIZE]
-                indices = [b[0] for b in batch]
-                paths = [b[1] for b in batch]
-                try:
-                    batch_results = self._p2t.recognize_formula(paths)
-                    for j, idx in enumerate(indices):
-                        if j < len(batch_results) and batch_results[j]:
-                            results[idx] = str(batch_results[j]).strip()
-                except Exception as e:
-                    _logger.warning("MFR 批次识别失败: %s", e)
-        finally:
-            # Step 3: 清理临时文件
-            for p in tmp_paths:
-                if p:
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
-
-        return results
+        return self._get_recognizer().recognize_batch(images)

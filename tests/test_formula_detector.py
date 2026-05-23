@@ -367,7 +367,7 @@ def test_math_ocr_uses_cache_before_loading_model(monkeypatch, tmp_path) -> None
     MathOCR._instance = None
     cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
     image = b"fake-png-bytes"
-    cache.put(cache.hash_image(image), r"\frac{a}{b}", "test")
+    cache.put(cache.hash_image(image), r"\frac{a}{b}", "pix2text-mfr")
 
     ocr = MathOCR()
     ocr._cache = cache
@@ -385,13 +385,79 @@ def test_math_ocr_uses_cache_before_loading_model(monkeypatch, tmp_path) -> None
     assert ocr.recognize(image) == r"\frac{a}{b}"
 
 
+def test_formula_recognizer_registry_exposes_default_backend() -> None:
+    from src.core.formula_recognizers import FormulaRecognizerRegistry
+
+    recognizer = FormulaRecognizerRegistry.create("pix2text-mfr", batch_size=2, num_threads=1)
+
+    assert recognizer.name == "pix2text-mfr"
+    assert "pix2text-mfr" in FormulaRecognizerRegistry.available_names()
+
+
+def test_formula_ocr_cache_is_model_scoped(tmp_path) -> None:
+    from src.core.math_ocr import _FormulaOcrCache
+
+    cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    image_hash = cache.hash_image(b"same-image")
+    cache.put(image_hash, r"\alpha", "pix2text-mfr")
+    cache.put(image_hash, r"\beta", "future-backend")
+
+    assert cache.get(image_hash, "pix2text-mfr") == r"\alpha"
+    assert cache.get(image_hash, "future-backend") == r"\beta"
+
+
+def test_formula_ocr_cache_migrates_legacy_image_hash_primary_key(tmp_path) -> None:
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from src.core.math_ocr import _FormulaOcrCache
+
+    db_path = tmp_path / "legacy_cache.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE formula_ocr_cache (
+            image_hash TEXT PRIMARY KEY,
+            latex TEXT NOT NULL,
+            model TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO formula_ocr_cache (image_hash, latex, model, created_at) VALUES (?, ?, ?, ?)",
+        ("abc", r"\gamma", "pix2text-mfr", datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    cache = _FormulaOcrCache(str(db_path))
+
+    assert cache.get("abc", "pix2text-mfr") == r"\gamma"
+    cache.put("abc", r"\delta", "future-backend")
+    assert cache.get("abc", "pix2text-mfr") == r"\gamma"
+    assert cache.get("abc", "future-backend") == r"\delta"
+
+
+def test_math_ocr_uses_process_default_backend(monkeypatch, tmp_path) -> None:
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    MathOCR.set_default_backend("pix2text")
+    ocr = MathOCR()
+    ocr._cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+
+    assert ocr.backend_name == "pix2text"
+
+    MathOCR._instance = None
+    MathOCR.set_default_backend("pix2text-mfr")
+
+
 def test_math_ocr_limits_uncached_model_calls(monkeypatch, tmp_path) -> None:
     from src.core.math_ocr import MathOCR, _FormulaOcrCache
 
     MathOCR._instance = None
     cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
     cached_image = b"cached-png"
-    cache.put(cache.hash_image(cached_image), r"\sqrt{x}", "test")
+    cache.put(cache.hash_image(cached_image), r"\sqrt{x}", "pix2text-mfr")
 
     ocr = MathOCR()
     ocr._cache = cache
@@ -421,7 +487,7 @@ def test_math_ocr_zero_uncached_budget_uses_cache_only(monkeypatch, tmp_path) ->
     MathOCR._instance = None
     cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
     cached_image = b"cached-png"
-    cache.put(cache.hash_image(cached_image), r"\int f(x)\,dx", "test")
+    cache.put(cache.hash_image(cached_image), r"\int f(x)\,dx", "pix2text-mfr")
 
     ocr = MathOCR()
     ocr._cache = cache

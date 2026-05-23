@@ -278,6 +278,7 @@ PDF 打开/滚动/缩放
 迁移原则：
 
 - 新后端必须实现同一个 `FormulaRecognizer` 接口，不能把 Paddle/UniMERNet 直接写死在 UI 或知识库流程里。
+- `MathOCR` 已改为通过 `FormulaRecognizerRegistry` 创建后端，默认 `formula_ocr_backend=pix2text-mfr`；Paddle/UniMERNet 后续只需新增后端实现并复用现有缓存、限流和任务队列。
 - 每个后端独立缓存 key 必须包含 `image_hash/model/model_version/preprocess_version`，避免新旧模型结果冲突。
 - 默认模式必须保证 Attention/Napkin 打开、滚动、缩放性能不回退。
 - 高精度模式允许更慢，但必须可暂停、可恢复、有进度、有低置信度修正队列。

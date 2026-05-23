@@ -4,6 +4,7 @@ model:
   cloud_translation: deepseek/deepseek-chat
   cloud_reasoning: deepseek/deepseek-v4-pro
   embed_local: bge-m3
+  formula_ocr_backend: pix2text-mfr
   ollama_host: http://localhost:11434
 rag:
   backend: legacy_chroma
