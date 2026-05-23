@@ -198,6 +198,23 @@ def test_legacy_backend_force_rebuilds_when_fingerprint_changes() -> None:
     assert repo.upserts[-1]["documents"] == ["Updated attention content"]
 
 
+def test_legacy_backend_skips_nonforced_rebuild_when_index_exists() -> None:
+    repo = _Repo()
+    backend = LegacyChromaBackend(
+        repo,  # type: ignore[arg-type]
+        embed_texts=lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+    blocks = [_block(), _block("p0_b1")]
+    progress: list[tuple[int, int]] = []
+
+    backend.build(blocks, "doc-1", True, lambda c, t: progress.append((c, t)))
+    backend.build(blocks, "doc-1", False, lambda c, t: progress.append((c, t)))
+
+    assert repo.deleted == ["doc-1"]
+    assert len(repo.upserts) == 1
+    assert progress[-1] == (2, 2)
+
+
 def test_legacy_backend_upserts_formula_ocr_metadata() -> None:
     repo = _Repo()
     embedded_texts: list[list[str]] = []

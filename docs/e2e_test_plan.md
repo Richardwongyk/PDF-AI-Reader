@@ -98,3 +98,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 - 手动“重建知识库”不应无条件删除并重写未变化的 Napkin 索引；应先用指纹快跳过，真正清空重建另设高级入口。
 - 在没有真实 embedding 时，优先评估 SQLite FTS5 / Qdrant hybrid 等更合适的全文检索后端，避免 Chroma + 哈希向量成为长文档默认瓶颈。
 - 公式质量继续走 born-digital PDF 结构解析和源码对照，不用 OCR 处理可解析文本层公式。
+
+2026-05-24 性能修复验证：
+
+- 手动“构建/重建知识库”已改为先检查现有索引，不再默认强制删除重建。
+- Napkin 二次闭环中知识库检查耗时从约 108.5s 降到约 0.273s，等待来源为测试事件 `kb_rebuilt`。
+- 本轮 Napkin 日志仍无 `ERROR/WARNING/CRITICAL`；公式质量门禁继续失败，属于预期未完成项。

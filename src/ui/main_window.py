@@ -927,9 +927,9 @@ class MainWindow(QMainWindow):
         if not self._current_blocks:
             QMessageBox.information(self, "提示", "请先打开一个 PDF 文件。")
             return
-        self._status_model_label.setText("🔨 正在重建知识库...")
+        self._status_model_label.setText("🔨 正在检查知识库...")
         self._knowledge_engine.build_knowledge_base(
-            self._current_blocks, self._current_doc_hash, force_rebuild=True
+            self._current_blocks, self._current_doc_hash, force_rebuild=False
         )
 
     # =========================================================================
