@@ -362,10 +362,19 @@ def _match_tokens(normalized_formula: str) -> set[str]:
     return tokens
 
 
-def _parse_pdf_blocks(pdf: Path, run_mfd: bool, mfd_pages: list[int] | None) -> tuple[int, list[Any]]:
+def _parse_pdf_blocks(
+    pdf: Path,
+    run_mfd: bool,
+    mfd_pages: list[int] | None,
+    born_digital_math: bool = False,
+    legacy_formula_heuristic: bool = True,
+) -> tuple[int, list[Any]]:
     doc = fitz.open(pdf)
     try:
-        chunker = DocumentChunker()
+        chunker = DocumentChunker(
+            enable_born_digital_math=born_digital_math,
+            enable_legacy_formula_heuristic=legacy_formula_heuristic,
+        )
         blocks = chunker.chunk(doc)
         if run_mfd:
             detector = Pix2TextMFDDetector(dpi=200, max_mfd_pages=-1)
@@ -389,12 +398,23 @@ def _parse_pdf_blocks_limited(
     run_mfd: bool,
     mfd_pages: list[int] | None,
     max_pages: int = 0,
+    born_digital_math: bool = False,
+    legacy_formula_heuristic: bool = True,
 ) -> tuple[int, list[Any]]:
     if max_pages <= 0:
-        return _parse_pdf_blocks(pdf, run_mfd=run_mfd, mfd_pages=mfd_pages)
+        return _parse_pdf_blocks(
+            pdf,
+            run_mfd=run_mfd,
+            mfd_pages=mfd_pages,
+            born_digital_math=born_digital_math,
+            legacy_formula_heuristic=legacy_formula_heuristic,
+        )
     doc = fitz.open(pdf)
     try:
-        chunker = DocumentChunker()
+        chunker = DocumentChunker(
+            enable_born_digital_math=born_digital_math,
+            enable_legacy_formula_heuristic=legacy_formula_heuristic,
+        )
         page_limit = min(doc.page_count, max_pages)
         blocks = []
         for page_num in range(page_limit):
@@ -429,6 +449,8 @@ def _audit_case(
     min_command_recall: float = 0.0,
     min_weak_match_rate: float = 0.0,
     max_low_similarity_pdf_rate: float = 1.0,
+    born_digital_math: bool = False,
+    legacy_formula_heuristic: bool = True,
 ) -> FormulaReport:
     start = time.perf_counter()
     if not case.pdf.exists():
@@ -445,6 +467,8 @@ def _audit_case(
         run_mfd=run_mfd,
         mfd_pages=mfd_pages,
         max_pages=max_pages,
+        born_digital_math=born_digital_math,
+        legacy_formula_heuristic=legacy_formula_heuristic,
     )
     formula_blocks = [b for b in blocks if b.block_type == BlockType.FORMULA]
     image_blocks = [b for b in blocks if b.block_type == BlockType.IMAGE]
@@ -601,6 +625,16 @@ def main() -> int:
         action="store_true",
         help="Fail with exit code 1 if formula/LaTeX quality thresholds are not met.",
     )
+    parser.add_argument(
+        "--born-digital-math",
+        action="store_true",
+        help="Also add display formula blocks from MuPDF rawdict structure facts. No OCR is used.",
+    )
+    parser.add_argument(
+        "--no-legacy-formula-heuristic",
+        action="store_true",
+        help="Disable the old span-level formula classifier for comparison.",
+    )
     parser.add_argument("--min-command-recall", type=float, default=0.35)
     parser.add_argument("--min-weak-match-rate", type=float, default=0.35)
     parser.add_argument("--max-low-similarity-pdf-rate", type=float, default=0.60)
@@ -618,12 +652,16 @@ def main() -> int:
             min_command_recall=args.min_command_recall if args.quality_gate else 0.0,
             min_weak_match_rate=args.min_weak_match_rate if args.quality_gate else 0.0,
             max_low_similarity_pdf_rate=args.max_low_similarity_pdf_rate if args.quality_gate else 1.0,
+            born_digital_math=args.born_digital_math,
+            legacy_formula_heuristic=not args.no_legacy_formula_heuristic,
         )
         for case in selected
     ]
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "mfd_enabled": args.mfd,
+        "born_digital_math_enabled": args.born_digital_math,
+        "legacy_formula_heuristic_enabled": not args.no_legacy_formula_heuristic,
         "mfd_pages": [p + 1 for p in mfd_pages] if mfd_pages is not None else None,
         "max_pages": max(0, args.max_pages),
         "max_match_candidates": max(1, args.max_match_candidates),

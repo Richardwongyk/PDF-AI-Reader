@@ -165,15 +165,25 @@ class DocumentChunker:
         "STIX", "XITS", "TeX", "Latin Modern Math",
     ]
 
-    def __init__(self, median_font_size: float = 10.0, line_spacing_factor: float = 1.5) -> None:
+    def __init__(
+        self,
+        median_font_size: float = 10.0,
+        line_spacing_factor: float = 1.5,
+        enable_born_digital_math: bool = False,
+        enable_legacy_formula_heuristic: bool = True,
+    ) -> None:
         """初始化分块器。
 
         Args:
             median_font_size: 默认正文中位数字号（pt），用于标题检测。
             line_spacing_factor: 行间距阈值因子（相对于行高中位数）。
+            enable_born_digital_math: 启用 MuPDF rawdict 数学事实层补充显示公式块。
+            enable_legacy_formula_heuristic: 保留旧 span 级公式分类逻辑。
         """
         self._median_font_size = median_font_size
         self._line_spacing_factor = line_spacing_factor
+        self._enable_born_digital_math = enable_born_digital_math
+        self._enable_legacy_formula_heuristic = enable_legacy_formula_heuristic
 
     def chunk(self, doc: fitz.Document) -> list[DocumentBlock]:
         """分块：PyMuPDF 文本块 = 段落单位 + 标题检测 + 双栏处理。
@@ -259,7 +269,7 @@ class DocumentChunker:
                 continue
 
             # 类型判定：公式 > 标题 > 段落
-            if self._is_formula_from_spans(spans):
+            if self._enable_legacy_formula_heuristic and self._is_formula_from_spans(spans):
                 block_type = BlockType.FORMULA
             elif self._is_heading(spans[0], median_size):
                 block_type = BlockType.HEADING
@@ -284,7 +294,90 @@ class DocumentChunker:
                 metadata=metadata,
             ))
 
+        if self._enable_born_digital_math:
+            blocks = self._append_born_digital_display_formulas(page, page_num, blocks)
+
         return blocks
+
+    def _append_born_digital_display_formulas(
+        self,
+        page: fitz.Page,
+        page_num: int,
+        blocks: list[DocumentBlock],
+    ) -> list[DocumentBlock]:
+        """Append high-confidence display formula regions from PDF structure facts."""
+        try:
+            from src.core.born_digital_math import BornDigitalMathAuditor, MuPDFBornDigitalExtractor
+
+            page_facts = MuPDFBornDigitalExtractor().extract_page(page, page_num)
+            regions = BornDigitalMathAuditor().display_formula_regions(page_facts)
+        except Exception as exc:
+            import logging
+
+            logging.getLogger("DocumentChunker").warning(
+                "born-digital 公式结构抽取失败 page=%s: %s", page_num, exc
+            )
+            return blocks
+
+        merged = list(blocks)
+        existing_formulas = [block for block in merged if block.block_type == BlockType.FORMULA]
+        for region in regions:
+            if self._overlaps_existing_formula(region.bbox, existing_formulas):
+                continue
+            self._mark_shadowed_blocks(region.bbox, merged)
+            merged.append(DocumentBlock(
+                id=f"p{page_num}_b{len(merged)}",
+                page_num=page_num,
+                block_type=BlockType.FORMULA,
+                content=wrap_math_text(region.text, display=True),
+                bbox=region.bbox,
+                metadata={
+                    "source": region.source,
+                    "math_wrapped": "display",
+                    "needs_ocr": False,
+                    "confidence": region.confidence,
+                    "evidence": list(region.evidence),
+                    "line_count": region.line_count,
+                    "vector_count": region.vector_count,
+                    "semantic_recovery": "pending",
+                },
+            ))
+        return sorted(merged, key=lambda block: (block.bbox[1], block.bbox[0]))
+
+    @staticmethod
+    def _overlaps_existing_formula(
+        bbox: tuple[float, float, float, float],
+        formulas: list[DocumentBlock],
+    ) -> bool:
+        return any(DocumentChunker._bbox_overlap_ratio(bbox, block.bbox) >= 0.70 for block in formulas)
+
+    @staticmethod
+    def _mark_shadowed_blocks(
+        bbox: tuple[float, float, float, float],
+        blocks: list[DocumentBlock],
+    ) -> None:
+        for block in blocks:
+            if block.block_type != BlockType.PARAGRAPH:
+                continue
+            if DocumentChunker._bbox_overlap_ratio(bbox, block.bbox) < 0.80:
+                continue
+            block.metadata["shadowed_by"] = "born_digital_display_formula"
+
+    @staticmethod
+    def _bbox_overlap_ratio(
+        left: tuple[float, float, float, float],
+        right: tuple[float, float, float, float],
+    ) -> float:
+        ix0 = max(left[0], right[0])
+        iy0 = max(left[1], right[1])
+        ix1 = min(left[2], right[2])
+        iy1 = min(left[3], right[3])
+        intersection = max(ix1 - ix0, 0.0) * max(iy1 - iy0, 0.0)
+        if intersection <= 0:
+            return 0.0
+        left_area = max((left[2] - left[0]) * (left[3] - left[1]), 1.0)
+        right_area = max((right[2] - right[0]) * (right[3] - right[1]), 1.0)
+        return intersection / min(left_area, right_area)
 
     @classmethod
     def _contains_math_font_spans(cls, spans: list[dict[str, Any]]) -> bool:

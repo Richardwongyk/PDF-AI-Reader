@@ -121,6 +121,8 @@ def wrap_math_text(text: str, display: bool = True) -> str:
 
 def document_block_index_text(block: DocumentBlock) -> str:
     """Text form used by translation/RAG indexes for a document block."""
+    if block.metadata.get("shadowed_by"):
+        return ""
     if block.block_type == BlockType.FORMULA:
         return wrap_math_text(block.content, display=True)
     return str(block.content or "")

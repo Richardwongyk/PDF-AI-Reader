@@ -345,6 +345,16 @@ def test_math_text_wrapping_helpers_use_latex_delimiters() -> None:
     )
     assert document_block_index_text(block) == "$$\n\\alpha+\\beta\n$$"
 
+    shadowed = DocumentBlock(
+        id="p0_b1",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="duplicate formula text",
+        bbox=(0, 0, 10, 10),
+        metadata={"shadowed_by": "born_digital_display_formula"},
+    )
+    assert document_block_index_text(shadowed) == ""
+
 
 def test_document_chunker_wraps_math_font_spans_inline() -> None:
     from src.core.pdf_engine import DocumentChunker
@@ -419,8 +429,19 @@ def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> 
             pass
 
     seen_pages: list[int] = []
+    init_args: list[dict[str, bool]] = []
 
     class FakeChunker:
+        def __init__(
+            self,
+            enable_born_digital_math: bool = False,
+            enable_legacy_formula_heuristic: bool = True,
+        ) -> None:
+            init_args.append({
+                "born_digital_math": enable_born_digital_math,
+                "legacy_formula_heuristic": enable_legacy_formula_heuristic,
+            })
+
         def chunk_page(self, doc: object, page_num: int) -> list[DocumentBlock]:
             seen_pages.append(page_num)
             return []
@@ -433,11 +454,17 @@ def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> 
         run_mfd=False,
         mfd_pages=None,
         max_pages=2,
+        born_digital_math=True,
+        legacy_formula_heuristic=False,
     )
 
     assert page_count == 5
     assert blocks == []
     assert seen_pages == [0, 1]
+    assert init_args == [{
+        "born_digital_math": True,
+        "legacy_formula_heuristic": False,
+    }]
 
 
 def test_formula_audit_quality_gate_flags_low_recall(monkeypatch, tmp_path) -> None:
@@ -476,6 +503,82 @@ def test_formula_audit_quality_gate_flags_low_recall(monkeypatch, tmp_path) -> N
 
     assert report.quality_gate["passed"] is False
     assert report.quality_gate["violations"]
+
+
+def test_document_chunker_can_append_born_digital_display_formula(monkeypatch) -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    class Region:
+        bbox = (40.0, 60.0, 140.0, 78.0)
+        text = "x+y=1"
+        source = "pdf_structure_display_region"
+        confidence = 0.88
+        evidence = ("math_font", "centered_line")
+        line_count = 1
+        vector_count = 0
+
+    class FakeAuditor:
+        def display_formula_regions(self, page: object) -> list[Region]:
+            return [Region()]
+
+    class FakeExtractor:
+        def extract_page(self, page: object, page_num: int) -> object:
+            return object()
+
+    monkeypatch.setattr("src.core.born_digital_math.BornDigitalMathAuditor", lambda: FakeAuditor())
+    monkeypatch.setattr("src.core.born_digital_math.MuPDFBornDigitalExtractor", lambda: FakeExtractor())
+
+    chunker = DocumentChunker(enable_born_digital_math=True)
+    blocks = chunker._append_born_digital_display_formulas(object(), 0, [])
+
+    assert len(blocks) == 1
+    block = blocks[0]
+    assert block.block_type == BlockType.FORMULA
+    assert block.content == "$$\nx+y=1\n$$"
+    assert block.metadata["source"] == "pdf_structure_display_region"
+    assert block.metadata["needs_ocr"] is False
+    assert block.metadata["semantic_recovery"] == "pending"
+
+
+def test_document_chunker_marks_shadowed_paragraph_for_born_digital_formula(monkeypatch) -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    class Region:
+        bbox = (40.0, 60.0, 140.0, 78.0)
+        text = "x+y=1"
+        source = "pdf_structure_display_region"
+        confidence = 0.88
+        evidence = ("math_font",)
+        line_count = 1
+        vector_count = 0
+
+    class FakeAuditor:
+        def display_formula_regions(self, page: object) -> list[Region]:
+            return [Region()]
+
+    class FakeExtractor:
+        def extract_page(self, page: object, page_num: int) -> object:
+            return object()
+
+    monkeypatch.setattr("src.core.born_digital_math.BornDigitalMathAuditor", lambda: FakeAuditor())
+    monkeypatch.setattr("src.core.born_digital_math.MuPDFBornDigitalExtractor", lambda: FakeExtractor())
+
+    paragraph = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="x+y=1",
+        bbox=(40.0, 60.0, 140.0, 78.0),
+    )
+
+    blocks = DocumentChunker(enable_born_digital_math=True)._append_born_digital_display_formulas(
+        object(),
+        0,
+        [paragraph],
+    )
+
+    assert paragraph.metadata["shadowed_by"] == "born_digital_display_formula"
+    assert [block.block_type for block in blocks].count(BlockType.FORMULA) == 1
 
 
 def test_math_ocr_uses_cache_before_loading_model(monkeypatch, tmp_path) -> None:

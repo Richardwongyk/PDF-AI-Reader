@@ -176,7 +176,10 @@
 - Attention 第 3-4 页 cluster 能出现少量源码弱匹配；context cluster 能匹配部分 FFN/MultiHead 片段，但会误吸正文，因此只保留为审计上限，不进入主链路。
 - Attention 前 6 页 display region 审计：约 0.593s，17816 glyph，display region 7 个，unknown glyph 为 0；`Attention`、`FFN`、`MultiHead`、`PE` 样例可整体对齐源码。
 - Napkin 第 60-79 页 display region 审计：约 0.874s，30974 glyph，display region 31 个，unknown glyph 为 0。
-- 下一步必须做二维布局树与 LaTeX 语义恢复，不能把 display region 原始文本直接当最终公式 truth。
+- `DocumentChunker(enable_born_digital_math=True)` 已可选追加 display formula 块，并把重叠原段落标记为 `shadowed_by=born_digital_display_formula`；知识库索引跳过 shadowed 段落，避免重复证据。
+- Attention 全量纯 born-digital display 审计：约 2.189s，公式块 11 个，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。
+- Napkin 前 120 页纯 born-digital display 审计：约 17.823s，公式块 116 个，`source_weak_match_rate=0.037`，`low_similarity_pdf_rate=0.250`。
+- 下一步必须做二维布局树、表格/列表过滤与 LaTeX 语义恢复；当前可选入口不能默认进入阅读热路径。
 
 ### 全文问答与证据
 

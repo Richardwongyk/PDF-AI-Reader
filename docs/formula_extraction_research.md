@@ -267,12 +267,17 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - Attention display-only 源码对照：8 个源码 display snippets 中，near match 3 个，weak match 4 个；`Attention`、`FFN`、`MultiHead`、`PE` 样例能整体对齐源码。
 - Napkin 第 60-79 页：约 0.874s，30974 glyph，unknown glyph 为 0，display region 31 个。
 - Napkin 对齐率仍低，主要原因是教材中大量显示数学与例题/定理文本混排，且 PDF glyph 文本不是 LaTeX 语义树；这需要下一步二维布局树和环境级对齐，不能靠继续扩大 bbox 或写词表解决。
+- 新增 `DocumentChunker(enable_born_digital_math=True)` 可选入口，把 display region 追加为 `BlockType.FORMULA`，并保留 `source/confidence/evidence/semantic_recovery=pending` 元数据；默认仍关闭，不影响阅读热路径。
+- 追加结构公式块时会把完全重叠的普通段落标记为 `shadowed_by=born_digital_display_formula`，知识库索引会跳过该 shadowed 段落，避免同一公式重复进入 RAG。
+- Attention 全量、关闭旧 span 启发式、只启用 born-digital display：耗时约 2.189s，公式块 11 个，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。相比旧 no-MFD baseline 更干净，但远未达质量门禁。
+- Napkin 前 120 页、关闭旧 span 启发式、只启用 born-digital display：耗时约 17.823s，公式块 116 个，`source_weak_match_rate=0.037`，`low_similarity_pdf_rate=0.250`。性能不能进入默认热路径，只能作为后台/审计/后续增量索引候选。
 
 当前边界：
 
 - 这一步证明 born-digital PDF 结构路径足够快，也能把部分关键显示公式完整合成区域。
 - 这一步还不是 99.99% LaTeX 还原；它是后续二维结构树和 LaTeX 语义恢复的事实基础。
-- 当前区域文本不能直接作为最终公式写入知识库 truth；进入主链路前必须带 confidence/warnings，并完成结构恢复与质量门禁。
+- 当前区域文本不能直接作为最终公式 truth；进入主链路前必须带 confidence/warnings，并完成二维结构恢复、表格/列表过滤和质量门禁。
+- 旧 span 级公式启发式会把表格数值、复杂证明句、列表项误判为公式；后续应逐步降级为 fallback，默认公式入口转向结构事实层。
 
 ## 参考资料
 
