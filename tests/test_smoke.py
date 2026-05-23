@@ -110,6 +110,7 @@ def test_main_window_smoke() -> None:
         """
         import sys
         from PySide6.QtCore import QTimer
+        from PySide6.QtGui import QAction
         from PySide6.QtWidgets import QApplication, QWidget
         from PySide6.QtWebEngineCore import QWebEngineProfile
 
@@ -129,6 +130,8 @@ def test_main_window_smoke() -> None:
         assert window.findChild(QWidget, "ai_question_input") is not None
         assert window.findChild(QWidget, "ai_evidence_tree") is not None
         assert window.findChild(QWidget, "ai_answer_view") is not None
+        assert window.findChild(QAction, "high_precision_formula_action") is not None
+        assert window.findChild(QAction, "high_precision_formula_toolbar_action") is not None
         QTimer.singleShot(500, window.close)
         QTimer.singleShot(1500, app.quit)
         code = app.exec()

@@ -6,6 +6,7 @@
 """
 
 from abc import ABC, abstractmethod
+import threading
 from typing import Any
 
 import fitz
@@ -44,6 +45,9 @@ class Pix2TextMFDDetector(FormulaDetector):
     先做 bbox 检测，再对 PDF 图片/扫描公式裁剪并尝试识别 LaTeX。
     """
 
+    _shared_mfd = None
+    _shared_mfd_lock = threading.Lock()
+
     def __init__(
         self,
         dpi: int = 200,
@@ -66,8 +70,11 @@ class Pix2TextMFDDetector(FormulaDetector):
 
     def _get_mfd(self):
         if self._mfd is None:
-            from pix2text.formula_detector import MathFormulaDetector
-            self._mfd = MathFormulaDetector()
+            with self._shared_mfd_lock:
+                if self.__class__._shared_mfd is None:
+                    from pix2text.formula_detector import MathFormulaDetector
+                    self.__class__._shared_mfd = MathFormulaDetector()
+                self._mfd = self.__class__._shared_mfd
         return self._mfd
 
     def detect(self, doc: fitz.Document) -> list[dict[str, Any]]:
@@ -127,7 +134,58 @@ class Pix2TextMFDDetector(FormulaDetector):
                 logger.info("Page %d/%d: %d formulas", page_num + 1, doc.page_count, len(results))
             except Exception as e:
                 logger.warning("Page %d failed: %s", page_num, e)
-        return formulas
+        deduped = self._dedupe_detected_formulas(formulas)
+        if len(deduped) != len(formulas):
+            logger.info("MFD 检测结果去重: %d -> %d", len(formulas), len(deduped))
+        return deduped
+
+    @staticmethod
+    def _bbox_overlap_over_min_area(
+        a: tuple[float, float, float, float],
+        b: tuple[float, float, float, float],
+    ) -> float:
+        ox, oy = max(a[0], b[0]), max(a[1], b[1])
+        ox2, oy2 = min(a[2], b[2]), min(a[3], b[3])
+        if ox >= ox2 or oy >= oy2:
+            return 0.0
+        overlap = (ox2 - ox) * (oy2 - oy)
+        area_a = max((a[2] - a[0]) * (a[3] - a[1]), 1.0)
+        area_b = max((b[2] - b[0]) * (b[3] - b[1]), 1.0)
+        return overlap / min(area_a, area_b)
+
+    @classmethod
+    def _dedupe_detected_formulas(
+        cls,
+        formulas: list[dict[str, Any]],
+        overlap_threshold: float = 0.85,
+    ) -> list[dict[str, Any]]:
+        """Remove duplicate MFD boxes on the same page, keeping the best score."""
+        deduped: list[dict[str, Any]] = []
+        for formula in formulas:
+            try:
+                page = int(formula.get("page", 0) or 0)
+                bbox = tuple(float(v) for v in formula.get("bbox", (0, 0, 0, 0)))
+                score = float(formula.get("score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if len(bbox) != 4:
+                continue
+            normalized = {**formula, "page": page, "bbox": bbox, "score": score}
+            duplicate_index: int | None = None
+            for idx, existing in enumerate(deduped):
+                if int(existing.get("page", -1)) != page:
+                    continue
+                existing_bbox = existing.get("bbox", (0, 0, 0, 0))
+                if cls._bbox_overlap_over_min_area(bbox, existing_bbox) >= overlap_threshold:
+                    duplicate_index = idx
+                    break
+            if duplicate_index is None:
+                deduped.append(normalized)
+                continue
+            existing_score = float(deduped[duplicate_index].get("score", 0.0) or 0.0)
+            if score > existing_score:
+                deduped[duplicate_index] = normalized
+        return deduped
 
     def _page_has_formulas(self, blocks: list[DocumentBlock], page_num: int) -> bool:
         """粗略判断页面是否可能包含公式。"""
@@ -442,7 +500,9 @@ class Pix2TextMFDDetector(FormulaDetector):
             candidate_total,
             ','.join(str(p+1) for p in candidate_pages),
         )
-        formulas = self.detect_specific_pages(doc, candidate_pages)
+        formulas = self._dedupe_detected_formulas(
+            self.detect_specific_pages(doc, candidate_pages)
+        )
         matched = 0
         added = 0
         existing_ids = {b.id for b in blocks}
@@ -491,6 +551,7 @@ class Pix2TextMFDDetector(FormulaDetector):
         for idx, f in enumerate(new_formulas):
             page_blocks = by_page.get(f["page"], [])
             page_num = int(f["page"])
+            fb = f["bbox"]
             next_index = len(page_blocks)
             new_id = f"p{page_num}_b{next_index}"
             while new_id in existing_ids:

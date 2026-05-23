@@ -71,7 +71,7 @@ class FormulaScanPolicy:
             blocks=pending,
             priority_pages=priority_pages,
             batch_budget=batch_budget,
-            drain_queue=trigger in {FormulaScanTrigger.BACKGROUND, FormulaScanTrigger.HIGH_PRECISION},
+            drain_queue=trigger is FormulaScanTrigger.HIGH_PRECISION,
             cache_only=trigger is not FormulaScanTrigger.HIGH_PRECISION,
         )
 
@@ -123,10 +123,7 @@ class FormulaIndexScheduler:
         if pages:
             scoped = [
                 block for block in blocks
-                if block.page_num in pages or trigger in {
-                    FormulaScanTrigger.BACKGROUND,
-                    FormulaScanTrigger.HIGH_PRECISION,
-                }
+                if block.page_num in pages
             ]
         else:
             scoped = list(blocks)

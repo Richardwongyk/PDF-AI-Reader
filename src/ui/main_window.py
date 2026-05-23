@@ -134,6 +134,10 @@ class MainWindow(QMainWindow):
         self._formula_viewport_timer.setSingleShot(True)
         self._formula_viewport_timer.setInterval(250)
         self._formula_viewport_timer.timeout.connect(self._schedule_viewport_formula_scan)
+        self._formula_idle_timer = QTimer(self)
+        self._formula_idle_timer.setSingleShot(True)
+        self._formula_idle_timer.setInterval(30000)
+        self._formula_idle_timer.timeout.connect(self._schedule_idle_formula_scan)
 
         self._init_ui()
         self._connect_signals()
@@ -191,6 +195,10 @@ class MainWindow(QMainWindow):
         build_kb_action = QAction("构建/重建知识库(&B)", self)
         build_kb_action.triggered.connect(self._on_build_knowledge_base)
         tools_menu.addAction(build_kb_action)
+        high_precision_formula_action = QAction("高精度扫描当前公式(&F)", self)
+        high_precision_formula_action.setObjectName("high_precision_formula_action")
+        high_precision_formula_action.triggered.connect(self._on_high_precision_formula_scan)
+        tools_menu.addAction(high_precision_formula_action)
         tools_menu.addSeparator()
         glossary_action = QAction("术语表管理器(&G)", self)
         glossary_action.triggered.connect(self._on_open_glossary_editor)
@@ -231,6 +239,13 @@ class MainWindow(QMainWindow):
         self._page_jump_box.setMaximumWidth(80)
         self._page_jump_box.returnPressed.connect(self._on_page_jump_requested)
         toolbar.addWidget(self._page_jump_box)
+
+        toolbar.addSeparator()
+        formula_scan_action = QAction("公式精扫", self)
+        formula_scan_action.setObjectName("high_precision_formula_toolbar_action")
+        formula_scan_action.setToolTip("高精度扫描当前视口公式")
+        formula_scan_action.triggered.connect(self._on_high_precision_formula_scan)
+        toolbar.addAction(formula_scan_action)
 
     def _create_status_bar(self) -> None:
         """创建状态栏。"""
@@ -362,6 +377,7 @@ class MainWindow(QMainWindow):
         self._knowledge_engine.build_error.connect(self._on_kb_error)
         self._knowledge_engine.blocks_upserted.connect(self._on_kb_blocks_upserted)
         self._formula_index_flow.formulas_updated.connect(self._on_background_formula_blocks_updated)
+        self._formula_index_flow.formula_blocks_detected.connect(self._on_formula_blocks_updated)
         self._formula_index_flow.scan_finished.connect(self._on_formula_index_scan_finished)
 
         # PdfViewer → 内部处理
@@ -439,6 +455,9 @@ class MainWindow(QMainWindow):
         self._pymupdf4llm_pending_result = None
         self._pending_kb_upserts.clear()
         self._formula_index_flow.stop()
+        self._formula_viewport_timer.stop()
+        self._formula_idle_timer.stop()
+        self._last_formula_viewport_pages.clear()
         self._viewer_document_loaded = False
         self._has_native_toc = False
         self._status_page_label.setText("就绪")
@@ -492,6 +511,8 @@ class MainWindow(QMainWindow):
         self._pending_page_blocks.clear()
         self._viewer_document_loaded = True
         self._last_formula_viewport_pages.clear()
+        self._formula_idle_timer.stop()
+        self._persist_import_formula_scan_plan(result.filepath)
 
         # 加载目录
         if result.toc:
@@ -510,6 +531,7 @@ class MainWindow(QMainWindow):
         self._pymupdf4llm_pending_result = result
         QTimer.singleShot(15000, self._maybe_run_pymupdf4llm_enhance)
         self._formula_viewport_timer.start(1200)
+        self._formula_idle_timer.start()
 
     def _refresh_knowledge_status(self) -> None:
         """延后检查知识库状态，避免卡住长文档首屏加载。"""
@@ -587,6 +609,8 @@ class MainWindow(QMainWindow):
                 info = update_map[block.id]
                 block.block_type = BlockType(info["block_type"])
                 block.metadata.update(info.get("metadata", {}))
+                if "bbox" in info:
+                    block.bbox = tuple(float(value) for value in info["bbox"])
                 touched_pages.add(block.page_num)
                 # MFR 阶段：用识别到的 LaTeX 替换公式块内容
                 if "content" in info:
@@ -683,6 +707,42 @@ class MainWindow(QMainWindow):
         self._last_formula_viewport_pages = set(pages)
         self._schedule_formula_scan(pages=pages, trigger=FormulaScanTrigger.VIEWPORT)
 
+    def _schedule_idle_formula_scan(self) -> None:
+        """Run one low-priority background formula/index batch."""
+        if not self._viewer_document_loaded or not self._current_doc_hash:
+            return
+        if self._formula_index_flow.is_running:
+            self._formula_idle_timer.start(15000)
+            return
+        before_pending = self._pending_formula_work_count()
+        if before_pending <= 0:
+            return
+        if not self._start_import_page_scan_batch():
+            self._schedule_formula_scan(pages=set(), trigger=FormulaScanTrigger.BACKGROUND)
+        if self._pending_formula_work_count() > 0:
+            self._formula_idle_timer.start(45000)
+
+    def _on_high_precision_formula_scan(self) -> None:
+        """User-triggered high-precision formula scan for current viewport first."""
+        if not self._viewer_document_loaded or not self._current_doc_hash:
+            QMessageBox.information(self, "公式精扫", "请先打开一个 PDF 文件。")
+            return
+        pages = self._pdf_viewer.visible_pages(margin_pages=True)
+        plan = self._formula_index_scheduler.plan_for_pages(
+            self._current_blocks,
+            pages,
+            FormulaScanTrigger.HIGH_PRECISION,
+            self._doc_engine.page_count,
+        )
+        if not plan.blocks:
+            self._ai_doc_status.setText("公式索引\n当前没有待精扫公式")
+            return
+        filepath = getattr(self._doc_engine, "_filepath", "")
+        self._enqueue_formula_plan(filepath, plan, "high_precision")
+        self._ai_doc_status.setText(
+            f"公式精扫已启动\n本批 {min(len(plan.blocks), plan.batch_budget)} / 待扫 {len(plan.blocks)}"
+        )
+
     def _schedule_evidence_formula_scan(self, evidence: list[dict[str, Any]]) -> None:
         if not evidence or not self._current_doc_hash:
             return
@@ -725,6 +785,83 @@ class MainWindow(QMainWindow):
             sorted(plan.priority_pages)[:8],
         )
         self._formula_index_flow.enqueue_plan(filepath, self._current_doc_hash, plan)
+
+    def _persist_import_formula_scan_plan(self, filepath: str) -> None:
+        """Queue full-document formula work at import without blocking first render."""
+        if not filepath or not self._current_doc_hash or self._doc_engine.page_count <= 0:
+            return
+        plan = self._formula_index_scheduler.plan_for_pages(
+            self._current_blocks,
+            pages=set(),
+            trigger=FormulaScanTrigger.BACKGROUND,
+            page_count=self._doc_engine.page_count,
+        )
+        queued_blocks = self._formula_index_flow.persist_plan(
+            filepath,
+            self._current_doc_hash,
+            plan,
+        )
+        queued_pages = self._formula_index_flow.enqueue_page_scans(
+            filepath=filepath,
+            pages=range(self._doc_engine.page_count),
+            blocks=self._current_blocks,
+            doc_hash=self._current_doc_hash,
+            batch_budget=0,
+        )
+        if queued_blocks or queued_pages:
+            self.logger.info(
+                "导入后全篇公式任务入队: block_ocr=%d page_mfd=%d",
+                queued_blocks,
+                queued_pages,
+            )
+            self._ai_doc_status.setText(
+                f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}"
+            )
+
+    def _start_import_page_scan_batch(self) -> bool:
+        filepath = getattr(self._doc_engine, "_filepath", "")
+        if not filepath or not self._current_doc_hash:
+            return False
+        if self._formula_index_flow.page_pending_count(self._current_doc_hash) <= 0:
+            return False
+        pages = self._pdf_viewer.visible_pages(margin_pages=True)
+        started = self._formula_index_flow.start_page_scan_batch(
+            filepath=filepath,
+            doc_hash=self._current_doc_hash,
+            blocks=self._current_blocks,
+            allowed_pages=pages,
+            priority_pages=pages,
+            batch_budget=1,
+        )
+        if started:
+            self.logger.info("页面级公式检测启动: pages=%s batch=%d", sorted(pages), started)
+            return True
+        started = self._formula_index_flow.start_page_scan_batch(
+            filepath=filepath,
+            doc_hash=self._current_doc_hash,
+            blocks=self._current_blocks,
+            batch_budget=1,
+        )
+        if started:
+            self.logger.info("页面级公式检测启动: batch=%d", started)
+        return bool(started)
+
+    def _pending_formula_block_count(self) -> int:
+        return sum(
+            1 for block in self._current_blocks
+            if block.block_type == BlockType.FORMULA
+            and block.metadata.get("needs_ocr")
+            and not block.metadata.get("mfr_recognized")
+        )
+
+    def _pending_formula_work_count(self) -> int:
+        if not self._current_doc_hash:
+            return self._pending_formula_block_count()
+        return (
+            self._pending_formula_block_count()
+            + self._formula_index_flow.pending_count(self._current_doc_hash)
+            + self._formula_index_flow.page_pending_count(self._current_doc_hash)
+        )
 
     # =========================================================================
     # KnowledgeEngine 回调

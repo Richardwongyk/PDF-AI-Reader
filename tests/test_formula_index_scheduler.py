@@ -55,7 +55,7 @@ def test_high_precision_plan_can_use_model_and_drain_queue() -> None:
         page_count=100,
     )
 
-    assert [block.id for block in plan.blocks] == ["p0", "p20"]
+    assert [block.id for block in plan.blocks] == ["p0"]
     assert plan.batch_budget == 12
     assert plan.cache_only is False
     assert plan.drain_queue is True
@@ -72,4 +72,4 @@ def test_background_budget_is_reduced_for_large_documents() -> None:
 
     assert plan.batch_budget == 4
     assert plan.cache_only is True
-    assert plan.drain_queue is True
+    assert plan.drain_queue is False

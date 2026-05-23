@@ -185,14 +185,19 @@ PDF / OCR / MFR
 - MFD 找到的图片/扫描公式先按优先级进入有限 OCR 预算，其余保留 `needs_ocr=True` 占位，等待后台公式索引补扫。
 - `FormulaIndexFlow` 已接入主窗口，后台补扫 `needs_ocr=True` 的公式块。
 - `FormulaIndexStore` 已用 SQLite 持久化公式扫描任务，记录 `doc_hash/page/bbox/block_id/image_hash/status/priority/latex/model/error/attempts`，支持重启后继续调度。
+- 导入 PDF 时会把全文页码写入页面级 MFD 队列，并把已有待 OCR 公式块写入 MFR 队列；任务持久化不阻塞首屏。
 - `FormulaIndexScheduler` / `FormulaScanPolicy` 已把视口、全文问答 evidence 和用户触发页统一为小批量扫描计划；默认 cache-only，显式高精度模式才允许模型推理。
+- 工具菜单和工具栏已有当前视口“公式精扫”入口；后台空闲补扫已接入小批次页面 MFD 和 cache-only OCR。
+- background 队列默认不连续 drain，避免长文档持续占用 CPU；显式高精度当前视口扫描才允许连续处理当前范围。
+- Pix2Text MFD 检测器已进程内复用，减少后台小批次重复初始化成本。
 - 识别完成的公式通过 `KnowledgeEngine.upsert_blocks()` 增量写入当前知识库后端，不重建整个文档索引。
 - 知识库未就绪时，公式增量块会先暂存，等基础索引构建完成后 flush。
 
 待落地的异步索引层：
 
-- 后台空闲扫描入口：把未访问页面按文档结构、标题、定理/证明附近公式继续排入已持久化任务表。
-- 显式高精度扫描 UI：允许用户主动开启更激进的 `max_mfd_pages/max_uncached`，但仍可暂停和恢复。
+- 全篇高精度确认流：允许用户主动开启更激进的 `max_mfd_pages/max_uncached`，但必须可暂停和恢复。
+- 公式精度审计：把 Attention / Napkin 的 PDF 抽取结果与 LaTeX 源公式做 recall/precision 对照。
+- 可插拔公式识别后端：评估 PaddleOCR PP-FormulaNet / PP-FormulaNet_plus 与 UniMERNet，默认保持 Pix2Text，候选后端必须通过 Attention/Napkin 性能和精度审计。
 - `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
 
 验收门槛：
@@ -200,6 +205,13 @@ PDF / OCR / MFR
 - 打开 Attention/Napkin 的首屏时间不因公式精扫增加。
 - 同一公式二次打开必须命中缓存，不重复 MFR。
 - E2E 日志不得出现 OCR 线程阻塞 UI 或渲染队列积压。
+
+公式 OCR 工具迁移原则：
+
+- 不直接在 UI 或知识库层绑定某个 OCR 库，新增 `FormulaRecognizer` 抽象后再接入 Paddle/UniMERNet。
+- 缓存 key 必须包含 `image_hash/model/model_version/preprocess_version`，防止不同模型结果互相污染。
+- 默认后端以速度稳定为先，高精度后端只进入用户确认的精扫或低置信度修正轮。
+- PP-FormulaNet_plus-S 优先作为“快且准”的候选，PP-FormulaNet_plus-M/L 和 UniMERNet 作为更高精度候选。
 
 ## 官方资料
 
@@ -210,3 +222,7 @@ PDF / OCR / MFR
 - Qdrant Hybrid Search: https://qdrant.tech/documentation/beginner-tutorials/hybrid-search-fastembed/
 - Microsoft GraphRAG: https://microsoft.github.io/graphrag/get_started/
 - Neo4j GraphRAG Python: https://neo4j.com/docs/neo4j-graphrag-python/current/
+- PaddleOCR Formula Recognition Module: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/module_usage/formula_recognition.html
+- PaddleOCR Formula Recognition Pipeline: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/pipeline_usage/formula_recognition.html
+- UniMERNet: https://github.com/opendatalab/UniMERNet
+- Nougat: https://github.com/facebookresearch/nougat

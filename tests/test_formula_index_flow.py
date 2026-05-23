@@ -1,4 +1,5 @@
-from src.app.formula_index_flow import FormulaIndexFlow
+from src.app.formula_index_flow import FormulaIndexFlow, _FormulaPageScanWorker
+from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore
 from src.core.models import BlockType, DocumentBlock
 
@@ -175,6 +176,199 @@ def test_formula_index_flow_explicit_full_scan_can_load_model() -> None:
 
     assert len(workers) == 1
     assert workers[0].cache_only is False
+
+
+def test_formula_index_flow_can_persist_plan_without_starting_worker(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    started: list[tuple[str, int]] = []
+    flow._start_next_batch = lambda filepath, batch_budget: started.append((filepath, batch_budget))  # type: ignore[method-assign]
+    plan = FormulaScanPlan(
+        blocks=[_formula("p0_b1", 0), _formula("done", 0, needs_ocr=False)],
+        priority_pages={0},
+        batch_budget=8,
+        drain_queue=False,
+        cache_only=True,
+    )
+
+    queued = flow.persist_plan("paper.pdf", "doc-1", plan)
+
+    assert queued == 1
+    assert started == []
+    assert flow._queued_blocks == []
+    assert store.counts("doc-1") == {"queued": 1}
+
+
+def test_formula_index_flow_does_not_queue_done_formula_job(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula("p0_b1", 0)
+    store.enqueue_blocks("doc-1", "paper.pdf", [block])
+    store.mark_done("doc-1", "p0_b1", r"\alpha", "hash-1")
+    flow = FormulaIndexFlow(store=store)
+
+    flow.enqueue_blocks(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        batch_budget=0,
+    )
+
+    assert flow._queued_blocks == []
+    assert store.counts("doc-1") == {"done": 1}
+
+
+def test_formula_index_store_persists_page_scan_status(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+
+    inserted = store.enqueue_pages("doc-1", "paper.pdf", [2, 0, 2], priority_pages={2})
+    store.mark_pages_running("doc-1", [2])
+    store.mark_pages_done("doc-1", [2])
+
+    assert inserted == 2
+    assert store.page_counts("doc-1") == {"done": 1, "queued": 1}
+    tasks = store.list_page_tasks("doc-1")
+    assert [task.page_num for task in tasks] == [2, 0]
+    assert tasks[0].attempts == 1
+
+
+def test_formula_index_flow_queues_page_scans_without_start_when_budget_zero(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    started: list[tuple[str, int]] = []
+    flow._start_next_page_scan_batch = lambda filepath, batch_budget: started.append((filepath, batch_budget))  # type: ignore[method-assign]
+
+    queued = flow.enqueue_page_scans(
+        "paper.pdf",
+        range(3),
+        [_formula("p0_b1", 0)],
+        doc_hash="doc-1",
+        batch_budget=0,
+    )
+
+    assert queued == 3
+    assert started == [("paper.pdf", 0)]
+    assert flow._queued_page_nums == [0, 1, 2]
+    assert store.page_counts("doc-1") == {"queued": 3}
+
+
+def test_formula_index_flow_does_not_queue_done_page_scan(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0])
+    store.mark_pages_done("doc-1", [0])
+    flow = FormulaIndexFlow(store=store)
+
+    queued = flow.enqueue_page_scans(
+        "paper.pdf",
+        [0],
+        [_formula("p0_b1", 0)],
+        doc_hash="doc-1",
+        batch_budget=0,
+    )
+    started = flow.start_page_scan_batch(
+        "paper.pdf",
+        "doc-1",
+        [_formula("p0_b1", 0)],
+        batch_budget=1,
+    )
+
+    assert queued == 0
+    assert started == 0
+    assert flow._queued_page_nums == []
+    assert store.page_counts("doc-1") == {"done": 1}
+
+
+def test_formula_index_flow_starts_one_persisted_page_batch(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0, 1, 2])
+    flow = FormulaIndexFlow(store=store)
+    started: list[tuple[str, int, list[int]]] = []
+
+    def fake_start(filepath: str, batch_budget: int) -> None:
+        started.append((filepath, batch_budget, list(flow._queued_page_nums)))
+
+    flow._start_next_page_scan_batch = fake_start  # type: ignore[method-assign]
+
+    count = flow.start_page_scan_batch(
+        "paper.pdf",
+        "doc-1",
+        [_formula("p0_b1", 0)],
+        allowed_pages={1, 2},
+        priority_pages={2},
+        batch_budget=1,
+    )
+
+    assert count == 1
+    assert started == [("paper.pdf", 1, [2, 1])]
+
+
+def test_formula_index_flow_records_page_scan_result(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0, 1])
+    flow = FormulaIndexFlow(store=store)
+    detected: list[list[dict[str, object]]] = []
+    flow.formula_blocks_detected.connect(lambda items: detected.append(items))
+
+    flow._on_page_scan_finished(
+        {
+            "doc_hash": "doc-1",
+            "done_pages": [0],
+            "failed": [{"page_num": 1, "error": "mfd_failed"}],
+            "detected": [{"id": "p0_b2", "page_num": 0, "block_type": "formula"}],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    assert store.page_counts("doc-1") == {"done": 1, "failed": 1}
+    assert store.page_pending_count("doc-1") == 0
+    assert detected == [[{"id": "p0_b2", "page_num": 0, "block_type": "formula"}]]
+
+
+def test_formula_index_flow_does_not_auto_retry_failed_page_scans(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0])
+    store.mark_page_failed("doc-1", 0, "mfd_failed")
+    flow = FormulaIndexFlow(store=store)
+
+    started = flow.start_page_scan_batch(
+        "paper.pdf",
+        "doc-1",
+        [_formula("p0_b1", 0)],
+        batch_budget=1,
+    )
+
+    assert started == 0
+
+
+def test_formula_page_scan_worker_maps_new_and_existing_formula_infos() -> None:
+    formula = _formula("p0_b0", 0)
+    paragraph = DocumentBlock(
+        id="p0_b1",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph",
+        bbox=(200, 200, 300, 240),
+    )
+    worker = _FormulaPageScanWorker("paper.pdf", [0], [formula, paragraph])
+
+    infos = worker._build_formula_infos(
+        0,
+        [
+            {"bbox": (0, 0, 90, 20), "score": 0.9},
+            {"bbox": (205, 205, 295, 235), "score": 0.85},
+            {"bbox": (400, 400, 500, 430), "score": 0.8},
+        ],
+    )
+
+    assert infos[0]["id"] == "p0_b0"
+    assert infos[0]["bbox"] == (0.0, 0.0, 90.0, 20.0)
+    assert infos[0]["metadata"]["needs_ocr"] is True
+    assert infos[1]["id"] == "p0_b1"
+    assert infos[1]["block_type"] == "formula"
+    assert infos[1]["bbox"] == (205.0, 205.0, 295.0, 235.0)
+    assert infos[1]["metadata"]["needs_ocr"] is True
+    assert infos[2]["id"] == "p0_b2"
+    assert infos[2]["is_new"] is True
 
 
 def test_formula_index_store_persists_status_transitions(tmp_path) -> None:

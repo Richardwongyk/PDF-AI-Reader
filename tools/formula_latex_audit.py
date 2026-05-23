@@ -11,6 +11,7 @@ alignment; it gives a reproducible baseline for:
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -81,8 +82,18 @@ class FormulaReport:
     missing_common_source_commands: list[str]
     recovered_common_source_commands: list[str]
     common_source_command_recall: float
+    source_exact_match_count: int
+    source_near_match_count: int
+    source_weak_match_count: int
+    source_unmatched_count: int
+    source_near_match_rate: float
+    source_weak_match_rate: float
+    average_best_similarity: float
+    low_similarity_pdf_formula_count: int
     sample_source_formulas: list[str]
     sample_pdf_formulas: list[str]
+    sample_source_unmatched: list[dict[str, Any]]
+    sample_pdf_low_similarity: list[dict[str, Any]]
     sample_needs_ocr_blocks: list[dict[str, Any]]
 
 
@@ -147,13 +158,216 @@ def _command_counts(snippets: list[str]) -> Counter[str]:
     return counts
 
 
+MACRO_EXPANSIONS = {
+    r"\dmodel": r"d_{\text{model}}",
+    r"\dff": r"d_{\text{ff}}",
+    r"\dffn": r"d_{\text{ffn}}",
+    r"\vec": r"\mathbf",
+    r"\mbf": r"\mathbf",
+    r"\mc": r"\mathcal",
+    r"\RR": r"\mathbb{R}",
+    r"\CC": r"\mathbb{C}",
+    r"\ZZ": r"\mathbb{Z}",
+    r"\QQ": r"\mathbb{Q}",
+    r"\NN": r"\mathbb{N}",
+    r"\kp": r"\mathfrak{p}",
+    r"\kq": r"\mathfrak{q}",
+    r"\km": r"\mathfrak{m}",
+    r"\OO": r"\mathcal{O}",
+    r"\AA": r"\mathcal{A}",
+    r"\BB": r"\mathcal{B}",
+    r"\VV": r"\mathcal{V}",
+}
+
+
+GREEK_WORDS = {
+    "alpha": "a",
+    "beta": "b",
+    "gamma": "g",
+    "delta": "d",
+    "epsilon": "e",
+    "theta": "theta",
+    "lambda": "lambda",
+    "mu": "mu",
+    "pi": "pi",
+    "sigma": "sigma",
+    "phi": "phi",
+    "omega": "omega",
+    "xi": "xi",
+    "tau": "tau",
+}
+
+
+def _normalize_formula_for_match(text: str) -> str:
+    """Normalize LaTeX/PDF formula text for coarse source-vs-OCR matching."""
+    normalized = str(text or "")
+    normalized = normalized.replace("−", "-").replace("·", r"\cdot")
+    normalized = normalized.replace("∈", r"\in").replace("×", r"\times")
+    for macro, expansion in MACRO_EXPANSIONS.items():
+        normalized = normalized.replace(macro, expansion)
+    normalized = re.sub(
+        r"\\(?:mathrm|operatorname\*?|text|mathbf|mathbb|mathcal|mathfrak)\s*\{([^{}]*)\}",
+        r"\1",
+        normalized,
+    )
+    normalized = re.sub(r"\\(?:left|right|big|Big|bigg|Bigg)\b", "", normalized)
+    normalized = re.sub(r"\\(?:tiny|small|qquad|quad)\b", "", normalized)
+    normalized = re.sub(r"\\[,;! ]", "", normalized)
+    for command, value in GREEK_WORDS.items():
+        normalized = normalized.replace(f"\\{command}", value)
+    normalized = re.sub(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}", r"\1/\2", normalized)
+    normalized = re.sub(r"\\sqrt\s*\{([^{}]+)\}", r"sqrt\1", normalized)
+    normalized = re.sub(r"\\[A-Za-z]+", "", normalized)
+    normalized = normalized.lower()
+    normalized = re.sub(r"[^a-z0-9=+\-*/^_(){}\[\].,|<>:]+", "", normalized)
+    normalized = re.sub(r"([a-z])\s+(?=[a-z])", r"\1", normalized)
+    return normalized
+
+
+def _best_formula_matches(
+    source_formulas: list[str],
+    pdf_formulas: list[str],
+    max_sources: int = 5000,
+    max_candidates_per_source: int = 60,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, float]]:
+    source_norms = [
+        _normalize_formula_for_match(item)
+        for item in source_formulas[:max_sources]
+    ]
+    pdf_norms = [_normalize_formula_for_match(item) for item in pdf_formulas]
+    source_tokens = [_match_tokens(source_norm) for source_norm in source_norms]
+    pdf_tokens = [_match_tokens(pdf_norm) for pdf_norm in pdf_norms]
+    pdf_index: dict[str, list[int]] = {}
+    for pdf_index_id, tokens in enumerate(pdf_tokens):
+        for token in tokens:
+            pdf_index.setdefault(token, []).append(pdf_index_id)
+    source_index: dict[str, list[int]] = {}
+    for source_index_id, tokens in enumerate(source_tokens):
+        for token in tokens:
+            source_index.setdefault(token, []).append(source_index_id)
+    matches: list[dict[str, Any]] = []
+    for index, (source, source_norm, tokens) in enumerate(
+        zip(source_formulas[:max_sources], source_norms, source_tokens, strict=False)
+    ):
+        if len(source_norm) < 4:
+            continue
+        candidate_ids = _candidate_ids(
+            source_norm,
+            tokens,
+            pdf_norms,
+            pdf_index,
+            max_candidates_per_source,
+        )
+        best_score = 0.0
+        best_pdf = ""
+        best_pdf_index = -1
+        for pdf_index_id in candidate_ids:
+            pdf = pdf_formulas[pdf_index_id]
+            pdf_norm = pdf_norms[pdf_index_id]
+            if len(pdf_norm) < 4:
+                continue
+            score = _formula_similarity(source_norm, pdf_norm)
+            if score > best_score:
+                best_score = score
+                best_pdf = pdf
+                best_pdf_index = pdf_index_id
+        matches.append({
+            "source_index": index,
+            "source": " ".join(source.split())[:240],
+            "pdf_index": best_pdf_index,
+            "pdf": " ".join(best_pdf.split())[:240],
+            "similarity": round(best_score, 3),
+        })
+    low_pdf: list[dict[str, Any]] = []
+    for pdf_index_id, (pdf, pdf_norm, tokens) in enumerate(
+        zip(pdf_formulas, pdf_norms, pdf_tokens, strict=False)
+    ):
+        if len(pdf_norm) < 4:
+            continue
+        best_score = 0.0
+        source_candidate_ids = _candidate_ids(
+            pdf_norm,
+            tokens,
+            source_norms,
+            source_index,
+            max_candidates_per_source,
+        )
+        for source_id in source_candidate_ids:
+            source_norm = source_norms[source_id]
+            if len(source_norm) < 4:
+                continue
+            best_score = max(best_score, _formula_similarity(source_norm, pdf_norm))
+        if best_score < 0.45:
+            low_pdf.append({
+                "pdf_index": pdf_index_id,
+                "pdf": " ".join(pdf.split())[:240],
+                "best_similarity": round(best_score, 3),
+            })
+    exact = sum(1 for item in matches if item["similarity"] >= 0.98)
+    near = sum(1 for item in matches if item["similarity"] >= 0.80)
+    weak = sum(1 for item in matches if item["similarity"] >= 0.55)
+    total = len(matches)
+    metrics = {
+        "exact": exact,
+        "near": near,
+        "weak": weak,
+        "unmatched": max(total - weak, 0),
+        "near_rate": near / total if total else 1.0,
+        "weak_rate": weak / total if total else 1.0,
+        "average": sum(float(item["similarity"]) for item in matches) / total if total else 1.0,
+    }
+    return matches, low_pdf, metrics
+
+
+def _candidate_ids(
+    query_norm: str,
+    query_tokens: set[str],
+    candidate_norms: list[str],
+    token_index: dict[str, list[int]],
+    limit: int,
+) -> list[int]:
+    """Return the most plausible candidates using token overlap before edit distance."""
+    if not candidate_norms:
+        return []
+    counts: Counter[int] = Counter()
+    for token in query_tokens:
+        counts.update(token_index.get(token, []))
+    if not counts:
+        return list(range(min(len(candidate_norms), limit)))
+    ranked = sorted(
+        counts,
+        key=lambda idx: (
+            -counts[idx],
+            abs(len(candidate_norms[idx]) - len(query_norm)),
+            idx,
+        ),
+    )
+    return ranked[:limit]
+
+
+def _formula_similarity(left: str, right: str) -> float:
+    score = difflib.SequenceMatcher(None, left, right).ratio()
+    if left in right or right in left:
+        score = max(score, min(len(left), len(right)) / max(len(left), len(right)))
+    return score
+
+
+def _match_tokens(normalized_formula: str) -> set[str]:
+    tokens = set(re.findall(r"[a-z]{2,}|[0-9]+", normalized_formula))
+    compact = normalized_formula.replace("_", "").replace("{", "").replace("}", "")
+    for length in (4, 6, 8):
+        if len(compact) >= length:
+            tokens.add(compact[:length])
+    return tokens
+
+
 def _parse_pdf_blocks(pdf: Path, run_mfd: bool, mfd_pages: list[int] | None) -> tuple[int, list[Any]]:
     doc = fitz.open(pdf)
     try:
         chunker = DocumentChunker()
         blocks = chunker.chunk(doc)
         if run_mfd:
-            detector = Pix2TextMFDDetector(dpi=200)
+            detector = Pix2TextMFDDetector(dpi=200, max_mfd_pages=-1)
             if mfd_pages is not None:
                 formulas = detector.detect_specific_pages(doc, mfd_pages)
                 original = detector.detect_specific_pages
@@ -169,12 +383,49 @@ def _parse_pdf_blocks(pdf: Path, run_mfd: bool, mfd_pages: list[int] | None) -> 
         doc.close()
 
 
+def _parse_pdf_blocks_limited(
+    pdf: Path,
+    run_mfd: bool,
+    mfd_pages: list[int] | None,
+    max_pages: int = 0,
+) -> tuple[int, list[Any]]:
+    if max_pages <= 0:
+        return _parse_pdf_blocks(pdf, run_mfd=run_mfd, mfd_pages=mfd_pages)
+    doc = fitz.open(pdf)
+    try:
+        chunker = DocumentChunker()
+        page_limit = min(doc.page_count, max_pages)
+        blocks = []
+        for page_num in range(page_limit):
+            blocks.extend(chunker.chunk_page(doc, page_num))
+        if run_mfd:
+            detector = Pix2TextMFDDetector(dpi=200, max_mfd_pages=-1)
+            pages = mfd_pages if mfd_pages is not None else list(range(page_limit))
+            pages = [page for page in pages if 0 <= page < page_limit]
+            formulas = detector.detect_specific_pages(doc, pages)
+            original = detector.detect_specific_pages
+            detector.detect_specific_pages = lambda _doc, _pages: formulas  # type: ignore[method-assign]
+            try:
+                blocks = detector.apply_to_blocks(blocks, doc)
+            finally:
+                detector.detect_specific_pages = original  # type: ignore[method-assign]
+        return doc.page_count, blocks
+    finally:
+        doc.close()
+
+
 def _sample(items: list[str], limit: int = 8) -> list[str]:
     compact = [" ".join(item.split()) for item in items if item and item.strip()]
     return [item[:240] for item in compact[:limit]]
 
 
-def _audit_case(case: CasePaths, run_mfd: bool, mfd_pages: list[int] | None) -> FormulaReport:
+def _audit_case(
+    case: CasePaths,
+    run_mfd: bool,
+    mfd_pages: list[int] | None,
+    max_pages: int = 0,
+    max_match_candidates: int = 60,
+) -> FormulaReport:
     start = time.perf_counter()
     if not case.pdf.exists():
         raise FileNotFoundError(case.pdf)
@@ -185,7 +436,12 @@ def _audit_case(case: CasePaths, run_mfd: bool, mfd_pages: list[int] | None) -> 
     source_formulas = source_display + source_inline
     source_commands = _command_counts(source_formulas)
 
-    page_count, blocks = _parse_pdf_blocks(case.pdf, run_mfd=run_mfd, mfd_pages=mfd_pages)
+    page_count, blocks = _parse_pdf_blocks_limited(
+        case.pdf,
+        run_mfd=run_mfd,
+        mfd_pages=mfd_pages,
+        max_pages=max_pages,
+    )
     formula_blocks = [b for b in blocks if b.block_type == BlockType.FORMULA]
     image_blocks = [b for b in blocks if b.block_type == BlockType.IMAGE]
     scanned_blocks = [
@@ -201,6 +457,12 @@ def _audit_case(case: CasePaths, run_mfd: bool, mfd_pages: list[int] | None) -> 
         if b.metadata.get("needs_ocr")
     ]
     pdf_commands = _command_counts([b.content for b in formula_blocks])
+    pdf_formula_texts = [b.content for b in formula_blocks]
+    similarity_matches, low_similarity_pdf, similarity_metrics = _best_formula_matches(
+        source_formulas,
+        pdf_formula_texts,
+        max_candidates_per_source=max_match_candidates,
+    )
     source_common = {
         cmd for cmd, count in source_commands.items()
         if count >= 2 and cmd not in {r"\label", r"\ref", r"\cite", r"\begin", r"\end"}
@@ -230,8 +492,21 @@ def _audit_case(case: CasePaths, run_mfd: bool, mfd_pages: list[int] | None) -> 
         missing_common_source_commands=missing,
         recovered_common_source_commands=recovered,
         common_source_command_recall=round(recall, 3),
+        source_exact_match_count=int(similarity_metrics["exact"]),
+        source_near_match_count=int(similarity_metrics["near"]),
+        source_weak_match_count=int(similarity_metrics["weak"]),
+        source_unmatched_count=int(similarity_metrics["unmatched"]),
+        source_near_match_rate=round(float(similarity_metrics["near_rate"]), 3),
+        source_weak_match_rate=round(float(similarity_metrics["weak_rate"]), 3),
+        average_best_similarity=round(float(similarity_metrics["average"]), 3),
+        low_similarity_pdf_formula_count=len(low_similarity_pdf),
         sample_source_formulas=_sample(source_formulas),
         sample_pdf_formulas=_sample([b.content for b in formula_blocks]),
+        sample_source_unmatched=[
+            item for item in similarity_matches
+            if item["similarity"] < 0.55
+        ][:10],
+        sample_pdf_low_similarity=low_similarity_pdf[:10],
         sample_needs_ocr_blocks=[
             {
                 "id": b.id,
@@ -277,15 +552,38 @@ def main() -> int:
         type=Path,
         default=ROOT / "test_artifacts" / "formula_audit.json",
     )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=0,
+        help="Only parse the first N PDF pages for fast large-document audits. 0 means all pages.",
+    )
+    parser.add_argument(
+        "--max-match-candidates",
+        type=int,
+        default=60,
+        help="Similarity candidates per formula after token filtering. Raise for slower, less conservative audits.",
+    )
     args = parser.parse_args()
 
     selected = [case for case in _cases() if args.case in ("all", case.name)]
     mfd_pages = _parse_page_list(args.mfd_pages)
-    reports = [_audit_case(case, run_mfd=args.mfd, mfd_pages=mfd_pages) for case in selected]
+    reports = [
+        _audit_case(
+            case,
+            run_mfd=args.mfd,
+            mfd_pages=mfd_pages,
+            max_pages=max(0, args.max_pages),
+            max_match_candidates=max(1, args.max_match_candidates),
+        )
+        for case in selected
+    ]
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "mfd_enabled": args.mfd,
         "mfd_pages": [p + 1 for p in mfd_pages] if mfd_pages is not None else None,
+        "max_pages": max(0, args.max_pages),
+        "max_match_candidates": max(1, args.max_match_candidates),
         "reports": [asdict(report) for report in reports],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

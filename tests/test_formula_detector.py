@@ -110,6 +110,52 @@ def test_mfd_apply_adds_unmatched_scanned_formula_block(monkeypatch) -> None:
     assert formulas[0].metadata["needs_ocr"] is True
 
 
+def test_mfd_apply_deduplicates_overlapping_scanned_formula_blocks(monkeypatch) -> None:
+    detector = Pix2TextMFDDetector(max_mfd_pages=1)
+    doc = type("FakeDoc", (), {"page_count": 1})()
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.IMAGE,
+            content="",
+            bbox=(0, 0, 300, 300),
+        )
+    ]
+
+    monkeypatch.setattr(
+        detector,
+        "detect_specific_pages",
+        lambda doc, pages: [
+            {
+                "page": 0,
+                "bbox": (50.0, 50.0, 120.0, 90.0),
+                "latex": None,
+                "score": 0.75,
+            },
+            {
+                "page": 0,
+                "bbox": (50.0, 50.0, 120.0, 90.0),
+                "latex": None,
+                "score": 0.95,
+            },
+        ],
+    )
+    seen_batches: list[list[dict[str, object]]] = []
+    monkeypatch.setattr(
+        detector,
+        "_recognize_scanned_formulas",
+        lambda doc, formulas: seen_batches.append(formulas) or {},
+    )
+
+    refined = detector.apply_to_blocks(blocks, doc=doc)
+
+    formulas = [b for b in refined if b.block_type == BlockType.FORMULA]
+    assert len(formulas) == 1
+    assert formulas[0].metadata["formula_score"] == 0.95
+    assert len(seen_batches[0]) == 1
+
+
 def test_mfd_apply_recognizes_scanned_formula_latex(monkeypatch) -> None:
     detector = Pix2TextMFDDetector(max_mfd_pages=1)
     doc = type("FakeDoc", (), {"page_count": 1})()
@@ -146,6 +192,48 @@ def test_mfd_apply_recognizes_scanned_formula_latex(monkeypatch) -> None:
     assert formulas[0].content == r"\frac{a}{b}"
     assert formulas[0].metadata["needs_ocr"] is False
     assert formulas[0].metadata["mfr_recognized"] is True
+
+
+def test_mfd_apply_preserves_each_new_formula_bbox(monkeypatch) -> None:
+    detector = Pix2TextMFDDetector(max_mfd_pages=1)
+    doc = type("FakeDoc", (), {"page_count": 1})()
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.IMAGE,
+            content="",
+            bbox=(0, 0, 300, 300),
+        )
+    ]
+
+    monkeypatch.setattr(
+        detector,
+        "detect_specific_pages",
+        lambda doc, pages: [
+            {
+                "page": 0,
+                "bbox": (10.0, 10.0, 80.0, 30.0),
+                "latex": None,
+                "score": 0.95,
+            },
+            {
+                "page": 0,
+                "bbox": (120.0, 50.0, 180.0, 90.0),
+                "latex": None,
+                "score": 0.90,
+            },
+        ],
+    )
+    monkeypatch.setattr(detector, "_recognize_scanned_formulas", lambda doc, formulas: {})
+
+    refined = detector.apply_to_blocks(blocks, doc=doc)
+
+    formulas = [b for b in refined if b.block_type == BlockType.FORMULA]
+    assert [b.bbox for b in formulas] == [
+        (10.0, 10.0, 80.0, 30.0),
+        (120.0, 50.0, 180.0, 90.0),
+    ]
 
 
 def test_mfd_apply_recognizes_existing_non_latex_formula_block(monkeypatch) -> None:
@@ -185,6 +273,54 @@ def test_normalize_latex_collapses_spaced_text_commands() -> None:
         detector._normalize_latex(r"\mathrm{A t t e n t i o n} (Q)=\cfrac{a}{b}")
         == r"\mathrm{Attention} (Q)=\frac{a}{b}"
     )
+
+
+def test_formula_audit_similarity_matches_latex_variants() -> None:
+    from tools.formula_latex_audit import _best_formula_matches, _normalize_formula_for_match
+
+    source = r"\mathrm{Attention}(Q,K,V)=\mathrm{softmax}(\frac{QK^T}{\sqrt{d_k}})V"
+    extracted = r"\mathrm{Attention} ( Q , K , V )=\mathrm{softmax} ( \frac{Q K^{T}} {\sqrt{d_{k}}} )"
+
+    assert _normalize_formula_for_match(r"\dmodel + \RR") == "d_{model}+r"
+    matches, low_pdf, metrics = _best_formula_matches([source], [extracted])
+
+    assert matches[0]["similarity"] >= 0.65
+    assert metrics["weak"] == 1
+    assert low_pdf == []
+
+
+def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> None:
+    from tools import formula_latex_audit as audit
+
+    class FakeDoc:
+        page_count = 5
+
+        def __getitem__(self, page_num: int) -> object:
+            return object()
+
+        def close(self) -> None:
+            pass
+
+    seen_pages: list[int] = []
+
+    class FakeChunker:
+        def chunk_page(self, doc: object, page_num: int) -> list[DocumentBlock]:
+            seen_pages.append(page_num)
+            return []
+
+    monkeypatch.setattr(audit.fitz, "open", lambda pdf: FakeDoc())
+    monkeypatch.setattr(audit, "DocumentChunker", FakeChunker)
+
+    page_count, blocks = audit._parse_pdf_blocks_limited(
+        tmp_path / "paper.pdf",
+        run_mfd=False,
+        mfd_pages=None,
+        max_pages=2,
+    )
+
+    assert page_count == 5
+    assert blocks == []
+    assert seen_pages == [0, 1]
 
 
 def test_math_ocr_uses_cache_before_loading_model(monkeypatch, tmp_path) -> None:

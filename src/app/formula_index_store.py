@@ -21,6 +21,7 @@ from typing import Literal
 from src.core.models import DocumentBlock
 
 FormulaTaskStatus = Literal["queued", "running", "done", "failed", "skipped"]
+FormulaPageScanStatus = Literal["queued", "running", "done", "failed", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,20 @@ class FormulaIndexTask:
     image_hash: str = ""
     latex: str = ""
     model: str = ""
+    error: str = ""
+    attempts: int = 0
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class FormulaPageScanTask:
+    """SQLite-backed page-level formula detection job."""
+
+    doc_hash: str
+    filepath: str
+    page_num: int
+    priority: float
+    status: FormulaPageScanStatus
     error: str = ""
     attempts: int = 0
     updated_at: str = ""
@@ -73,6 +88,24 @@ class FormulaIndexStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_formula_jobs_status "
             "ON formula_index_jobs(doc_hash, status, priority DESC, page_num ASC)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS formula_page_scan_jobs (
+                doc_hash   TEXT NOT NULL,
+                filepath   TEXT NOT NULL,
+                page_num   INTEGER NOT NULL,
+                priority   REAL NOT NULL DEFAULT 0,
+                status     TEXT NOT NULL,
+                error      TEXT NOT NULL DEFAULT '',
+                attempts   INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (doc_hash, page_num)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_page_scan_status "
+            "ON formula_page_scan_jobs(doc_hash, status, priority DESC, page_num ASC)"
         )
         self._conn.commit()
         self._lock = threading.Lock()
@@ -137,6 +170,59 @@ class FormulaIndexStore:
             self._conn.commit()
         return inserted
 
+    def enqueue_pages(
+        self,
+        doc_hash: str,
+        filepath: str,
+        pages: list[int] | range,
+        priority_pages: set[int] | None = None,
+    ) -> int:
+        """Insert or refresh page-level MFD jobs for a document."""
+        if not doc_hash or not filepath:
+            return 0
+        page_nums: list[int] = []
+        for page in pages:
+            try:
+                page_num = int(page)
+            except (TypeError, ValueError):
+                continue
+            if page_num >= 0:
+                page_nums.append(page_num)
+        page_nums = sorted(set(page_nums))
+        if not page_nums:
+            return 0
+        priority_pages = priority_pages or set()
+        now = _now()
+        inserted = 0
+        with self._lock:
+            for page_num in page_nums:
+                priority = self.priority_for_page(page_num, priority_pages)
+                row = self._conn.execute(
+                    """SELECT status FROM formula_page_scan_jobs
+                       WHERE doc_hash=? AND page_num=?""",
+                    (doc_hash, page_num),
+                ).fetchone()
+                self._conn.execute(
+                    """INSERT INTO formula_page_scan_jobs
+                       (doc_hash, filepath, page_num, priority, status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 'queued', ?, ?)
+                       ON CONFLICT(doc_hash, page_num) DO UPDATE SET
+                         filepath=excluded.filepath,
+                         priority=max(formula_page_scan_jobs.priority, excluded.priority),
+                         status=CASE
+                           WHEN formula_page_scan_jobs.status='done'
+                           THEN 'done'
+                           ELSE 'queued'
+                         END,
+                         error='',
+                         updated_at=excluded.updated_at""",
+                    (doc_hash, filepath, page_num, priority, now, now),
+                )
+                if not row or str(row[0]) != "done":
+                    inserted += 1
+            self._conn.commit()
+        return inserted
+
     def mark_running(self, doc_hash: str, block_ids: list[str]) -> None:
         self._update_status(doc_hash, block_ids, "running", increment_attempts=True)
 
@@ -180,6 +266,23 @@ class FormulaIndexStore:
             )
             self._conn.commit()
 
+    def mark_pages_running(self, doc_hash: str, page_nums: list[int]) -> None:
+        self._update_page_status(doc_hash, page_nums, "running", increment_attempts=True)
+
+    def mark_pages_done(self, doc_hash: str, page_nums: list[int]) -> None:
+        self._update_page_status(doc_hash, page_nums, "done")
+
+    def mark_page_failed(self, doc_hash: str, page_num: int, error: str) -> None:
+        now = _now()
+        with self._lock:
+            self._conn.execute(
+                """UPDATE formula_page_scan_jobs
+                   SET status='failed', error=?, updated_at=?
+                   WHERE doc_hash=? AND page_num=?""",
+                (error[:500], now, doc_hash, page_num),
+            )
+            self._conn.commit()
+
     def counts(self, doc_hash: str) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(
@@ -191,7 +294,20 @@ class FormulaIndexStore:
 
     def pending_count(self, doc_hash: str) -> int:
         counts = self.counts(doc_hash)
-        return counts.get("queued", 0) + counts.get("running", 0) + counts.get("failed", 0)
+        return counts.get("queued", 0) + counts.get("running", 0)
+
+    def page_counts(self, doc_hash: str) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT status, COUNT(*) FROM formula_page_scan_jobs
+                   WHERE doc_hash=? GROUP BY status""",
+                (doc_hash,),
+            ).fetchall()
+        return {str(status): int(count) for status, count in rows}
+
+    def page_pending_count(self, doc_hash: str) -> int:
+        counts = self.page_counts(doc_hash)
+        return counts.get("queued", 0) + counts.get("running", 0)
 
     def list_tasks(
         self,
@@ -219,6 +335,43 @@ class FormulaIndexStore:
             ).fetchall()
         return [self._row_to_task(row) for row in rows]
 
+    def list_page_tasks(
+        self,
+        doc_hash: str,
+        statuses: set[str] | None = None,
+        limit: int = 100,
+    ) -> list[FormulaPageScanTask]:
+        params: list[object] = [doc_hash]
+        where = "doc_hash=?"
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            where += f" AND status IN ({placeholders})"
+            params.extend(sorted(statuses))
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT doc_hash, filepath, page_num, priority, status,
+                           error, attempts, updated_at
+                    FROM formula_page_scan_jobs
+                    WHERE {where}
+                    ORDER BY priority DESC, page_num ASC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+        return [
+            FormulaPageScanTask(
+                doc_hash=str(row[0]),
+                filepath=str(row[1]),
+                page_num=int(row[2]),
+                priority=float(row[3]),
+                status=str(row[4]),  # type: ignore[arg-type]
+                error=str(row[5]),
+                attempts=int(row[6]),
+                updated_at=str(row[7]),
+            )
+            for row in rows
+        ]
+
     def _update_status(
         self,
         doc_hash: str,
@@ -239,6 +392,26 @@ class FormulaIndexStore:
             )
             self._conn.commit()
 
+    def _update_page_status(
+        self,
+        doc_hash: str,
+        page_nums: list[int],
+        status: FormulaPageScanStatus,
+        increment_attempts: bool = False,
+    ) -> None:
+        if not doc_hash or not page_nums:
+            return
+        now = _now()
+        attempts_expr = "attempts + 1" if increment_attempts else "attempts"
+        with self._lock:
+            self._conn.executemany(
+                f"""UPDATE formula_page_scan_jobs
+                    SET status=?, attempts={attempts_expr}, updated_at=?
+                    WHERE doc_hash=? AND page_num=?""",
+                [(status, now, doc_hash, int(page_num)) for page_num in page_nums],
+            )
+            self._conn.commit()
+
     @staticmethod
     def content_hash(block: DocumentBlock) -> str:
         digest = hashlib.sha256()
@@ -254,6 +427,11 @@ class FormulaIndexStore:
         score = float(block.metadata.get("formula_score", 0.0) or 0.0)
         area = max((block.bbox[2] - block.bbox[0]) * (block.bbox[3] - block.bbox[1]), 0.0)
         return page_boost + score * 100.0 + min(area / 1000.0, 100.0) - block.page_num * 0.001
+
+    @staticmethod
+    def priority_for_page(page_num: int, priority_pages: set[int]) -> float:
+        page_boost = 1000.0 if page_num in priority_pages else 0.0
+        return page_boost - int(page_num) * 0.001
 
     @staticmethod
     def _row_to_task(row: tuple[object, ...]) -> FormulaIndexTask:
