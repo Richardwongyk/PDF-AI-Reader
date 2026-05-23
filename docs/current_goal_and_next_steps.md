@@ -255,9 +255,11 @@ PDF 打开/滚动/缩放
 当前公式审计基线：
 
 - Attention no-MFD：源码公式 180 个，PDF 公式块 23 个，源码常见命令恢复率 0，`source_near_match_rate=0.020`，`source_weak_match_rate=0.049`，平均相似度约 0.226。
+- Attention no-MFD 当前会触发公式质量门禁失败，原因是 LaTeX 命令恢复率和弱匹配率都远低于最低阈值。
 - Attention MFD 第 3-5 页：新增 2 个图片/扫描公式候选，均标记 `needs_ocr=True`，当前默认缓存优先路径没有得到 LaTeX；重复 bbox 写入问题已修复。
-- Napkin 前 80 页 no-MFD：源码公式约 30929 个，PDF 公式块 396 个，源码常见命令恢复率 0，`source_near_match_rate≈0.009-0.010`，说明现有抽取把大量数学文本保留为普通排版文本而不是 LaTeX。
+- Napkin 前 120 页 no-MFD：源码公式约 30929 个，PDF 公式块 726 个，源码常见命令恢复率 0，`source_near_match_rate=0.012`，`source_weak_match_rate=0.033`，说明现有抽取把大量数学文本保留为普通排版文本而不是 LaTeX。
 - Napkin 审计瓶颈在源码公式与 PDF 公式相似度匹配，不在 PDF 解析；已用 token 倒排索引和候选数限制把前 80 页匹配从约 73s 降到约 29s。后续如果要全篇反复对比模型，可把这一段下沉到 C++17/pybind11。
+- `tools/formula_latex_audit.py --quality-gate` 已加入硬门禁，默认要求 `common_source_command_recall >= 0.35`、`source_weak_match_rate >= 0.35`、`low_similarity_pdf_rate <= 0.60`。当前 baseline 应失败，后续接入 Paddle/UniMERNet/更好文本公式恢复后必须用该门禁证明提升。
 
 可用 C++17 / Python C API 加速的边界：
 

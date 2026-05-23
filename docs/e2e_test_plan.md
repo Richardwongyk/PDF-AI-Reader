@@ -41,6 +41,9 @@
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case attention
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case napkin
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case all
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --output test_artifacts/formula_audit_attention.json
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case napkin --max-pages 120 --output test_artifacts/formula_audit_napkin_120.json
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --quality-gate --output test_artifacts/formula_audit_gate.json
 ```
 
 ## 判定标准
@@ -53,13 +56,18 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py 
 - 右侧全文问答必须产生至少 1 条检索依据、非空回答和追问建议。
 - 日志中无 `ERROR`、`WARNING`、`CRITICAL`。
 - 输出 `test_artifacts/e2e/report.json`。
+- 公式审计输出 LaTeX 对照报告；使用 `--quality-gate` 时，若公式质量低于阈值必须返回非零退出码。
 
-后续加强门槛：
+公式审计门槛：
 
-- Attention：抽样公式与 LaTeX 源中的 `\frac`、`\sqrt`、`\mathrm`、`\operatorname` 等结构对齐。
 - 公式审计报告需记录 `recovered_common_source_commands`、`common_source_command_recall`、`source_near_match_rate`、`source_weak_match_rate`、`average_best_similarity`、`low_similarity_pdf_formula_count`，用于量化源码常见命令和源码公式在 PDF 抽取/MFR 后的恢复情况。
 - 审计必须同时输出低相似 PDF 公式样本和未匹配源码公式样本，后续用它们对比 Pix2Text、Paddle PP-FormulaNet_plus、UniMERNet 等后端的真实提升。
 - 审计默认使用 token 倒排索引和每公式 60 个候选做快速对比；需要更慢的严格对比时提高 `--max-match-candidates`。
+- 默认 `--quality-gate` 阈值：`common_source_command_recall >= 0.35`、`source_weak_match_rate >= 0.35`、`low_similarity_pdf_rate <= 0.60`。
+- 当前 no-MFD baseline 不满足公式质量门槛，门禁用于防止把低质量公式识别误判为已完成。
+
+后续加强门槛：
+
 - Napkin：大文档打开首屏、滚动、缩放、知识库状态达到明确时间预算。
 - 缩放后不能长期停留在模糊缩放图，应在异步精确渲染完成后替换。
 - 跳转应使用真实页码/目录 UI，而不是快捷键尝试。

@@ -323,6 +323,44 @@ def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> 
     assert seen_pages == [0, 1]
 
 
+def test_formula_audit_quality_gate_flags_low_recall(monkeypatch, tmp_path) -> None:
+    from tools import formula_latex_audit as audit
+
+    case = audit.CasePaths(
+        name="sample",
+        pdf=tmp_path / "paper.pdf",
+        latex_root=tmp_path / "latex",
+    )
+    case.pdf.write_bytes(b"%PDF-placeholder")
+    case.latex_root.mkdir()
+    (case.latex_root / "main.tex").write_text(
+        r"$\frac{x}{y}$ $a \in \RR$",
+        encoding="utf-8",
+    )
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content="plain text without source commands",
+            bbox=(0, 0, 100, 20),
+        )
+    ]
+    monkeypatch.setattr(audit, "_parse_pdf_blocks_limited", lambda *args, **kwargs: (1, blocks))
+
+    report = audit._audit_case(
+        case,
+        run_mfd=False,
+        mfd_pages=None,
+        min_command_recall=0.5,
+        min_weak_match_rate=0.5,
+        max_low_similarity_pdf_rate=0.5,
+    )
+
+    assert report.quality_gate["passed"] is False
+    assert report.quality_gate["violations"]
+
+
 def test_math_ocr_uses_cache_before_loading_model(monkeypatch, tmp_path) -> None:
     from src.core.math_ocr import MathOCR, _FormulaOcrCache
 

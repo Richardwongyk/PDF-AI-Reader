@@ -95,6 +95,7 @@ class FormulaReport:
     sample_source_unmatched: list[dict[str, Any]]
     sample_pdf_low_similarity: list[dict[str, Any]]
     sample_needs_ocr_blocks: list[dict[str, Any]]
+    quality_gate: dict[str, Any]
 
 
 def _cases() -> list[CasePaths]:
@@ -425,6 +426,9 @@ def _audit_case(
     mfd_pages: list[int] | None,
     max_pages: int = 0,
     max_match_candidates: int = 60,
+    min_command_recall: float = 0.0,
+    min_weak_match_rate: float = 0.0,
+    max_low_similarity_pdf_rate: float = 1.0,
 ) -> FormulaReport:
     start = time.perf_counter()
     if not case.pdf.exists():
@@ -470,6 +474,21 @@ def _audit_case(
     recovered = sorted(cmd for cmd in source_common if cmd in pdf_commands)
     missing = sorted(cmd for cmd in source_common if cmd not in pdf_commands)[:40]
     recall = len(recovered) / len(source_common) if source_common else 1.0
+    weak_rate = float(similarity_metrics["weak_rate"])
+    low_similarity_pdf_rate = len(low_similarity_pdf) / len(pdf_formula_texts) if pdf_formula_texts else 0.0
+    violations: list[str] = []
+    if recall < min_command_recall:
+        violations.append(
+            f"common_source_command_recall {recall:.3f} < {min_command_recall:.3f}"
+        )
+    if weak_rate < min_weak_match_rate:
+        violations.append(
+            f"source_weak_match_rate {weak_rate:.3f} < {min_weak_match_rate:.3f}"
+        )
+    if low_similarity_pdf_rate > max_low_similarity_pdf_rate:
+        violations.append(
+            f"low_similarity_pdf_rate {low_similarity_pdf_rate:.3f} > {max_low_similarity_pdf_rate:.3f}"
+        )
 
     return FormulaReport(
         name=case.name,
@@ -517,6 +536,19 @@ def _audit_case(
             }
             for b in needs_ocr[:10]
         ],
+        quality_gate={
+            "enabled": any((
+                min_command_recall > 0,
+                min_weak_match_rate > 0,
+                max_low_similarity_pdf_rate < 1,
+            )),
+            "min_command_recall": min_command_recall,
+            "min_weak_match_rate": min_weak_match_rate,
+            "max_low_similarity_pdf_rate": max_low_similarity_pdf_rate,
+            "low_similarity_pdf_rate": round(low_similarity_pdf_rate, 3),
+            "violations": violations,
+            "passed": not violations,
+        },
     )
 
 
@@ -564,6 +596,14 @@ def main() -> int:
         default=60,
         help="Similarity candidates per formula after token filtering. Raise for slower, less conservative audits.",
     )
+    parser.add_argument(
+        "--quality-gate",
+        action="store_true",
+        help="Fail with exit code 1 if formula/LaTeX quality thresholds are not met.",
+    )
+    parser.add_argument("--min-command-recall", type=float, default=0.35)
+    parser.add_argument("--min-weak-match-rate", type=float, default=0.35)
+    parser.add_argument("--max-low-similarity-pdf-rate", type=float, default=0.60)
     args = parser.parse_args()
 
     selected = [case for case in _cases() if args.case in ("all", case.name)]
@@ -575,6 +615,9 @@ def main() -> int:
             mfd_pages=mfd_pages,
             max_pages=max(0, args.max_pages),
             max_match_candidates=max(1, args.max_match_candidates),
+            min_command_recall=args.min_command_recall if args.quality_gate else 0.0,
+            min_weak_match_rate=args.min_weak_match_rate if args.quality_gate else 0.0,
+            max_low_similarity_pdf_rate=args.max_low_similarity_pdf_rate if args.quality_gate else 1.0,
         )
         for case in selected
     ]
@@ -589,6 +632,8 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if args.quality_gate and any(not report.quality_gate["passed"] for report in reports):
+        return 1
     return 0
 
 
