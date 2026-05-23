@@ -24,6 +24,9 @@ data/knowledge_bases/
 # 日志
 logs/
 
+# 自动化测试产物
+test_artifacts/
+
 # 环境变量（含密钥）
 .env
 config.yaml

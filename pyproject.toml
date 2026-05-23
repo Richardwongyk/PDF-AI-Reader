@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest>=8.0.0",
+    "pytest-qt>=4.5.0",
+    "pywinauto>=0.6.9",
+    "pyautogui>=0.9.54",
 ]
 
 [tool.pytest.ini_options]

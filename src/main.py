@@ -8,6 +8,7 @@ PDF AI Reader — 程序主入口。
 import logging
 import os
 import sys
+import argparse
 from pathlib import Path
 from typing import cast
 
@@ -57,7 +58,7 @@ def setup_logging() -> None:
     )
 
 
-def build_services() -> ServiceContainer:
+def build_services(test_mode: bool = False) -> ServiceContainer:
     """构建所有核心服务并注册到 ServiceContainer。
 
     初始化顺序：
@@ -79,6 +80,10 @@ def build_services() -> ServiceContainer:
     config_manager = ConfigManager(str(config_path))
     container.register_instance("config_manager", config_manager)
     config: AppConfig = config_manager.get()
+    if test_mode:
+        config.routing.translation = "cloud_only"
+        config.routing.qa = "cloud_only"
+        config.routing.summarization = "cloud_only"
 
     # ── 2. 基础设施层 (eager — 轻量) ──
     from src.infra.page_cache import PageCache
@@ -111,6 +116,9 @@ def build_services() -> ServiceContainer:
     def _build_embed_client():
         """延迟创建嵌入模型客户端（Ollama 优先，哈希嵌入兜底）。"""
         from src.core.ai_engine import HashingEmbeddingClient, OllamaClient
+        if test_mode:
+            logging.info("测试模式：嵌入服务使用确定性哈希嵌入，不探测 Ollama")
+            return HashingEmbeddingClient()
         try:
             client = OllamaClient(
                 model=config.model.embed_local,
@@ -152,23 +160,28 @@ def build_services() -> ServiceContainer:
         )
 
         local_client: BaseLLMClient | None = None
-        try:
-            candidate = OllamaClient(
-                model=config.model.local,
-                host=config.model.ollama_host,
-            )
-            if candidate.check_availability():
-                logging.info("本地生成模型可用: %s", config.model.local)
-                local_client = candidate
-            else:
-                logging.info("本地生成模型不可用或未下载: %s", config.model.local)
-        except Exception:
-            logging.info("本地生成模型初始化失败，将按配置使用云端或降级客户端", exc_info=True)
+        if test_mode:
+            logging.info("测试模式：跳过本地生成模型探测，不连接 Ollama")
+        else:
+            try:
+                candidate = OllamaClient(
+                    model=config.model.local,
+                    host=config.model.ollama_host,
+                )
+                if candidate.check_availability():
+                    logging.info("本地生成模型可用: %s", config.model.local)
+                    local_client = candidate
+                else:
+                    logging.info("本地生成模型不可用或未下载: %s", config.model.local)
+            except Exception:
+                logging.info("本地生成模型初始化失败，将按配置使用云端或降级客户端", exc_info=True)
 
         cloud_client: BaseLLMClient | None = None
         cloud_provider = config.model.cloud
         cloud_api_key = config_manager.get_api_key(cloud_provider)
-        if _is_configured_api_key(cloud_api_key):
+        if test_mode:
+            logging.info("测试模式：生成模型强制使用 Mock 客户端，不调用云端 API")
+        elif _is_configured_api_key(cloud_api_key):
             logging.info("使用云端模型: %s", cloud_provider)
             cloud_client = LiteLLMClient(model=cloud_provider, api_key=cloud_api_key or "")
         else:
@@ -204,7 +217,19 @@ def build_services() -> ServiceContainer:
     return container
 
 
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="PDF AI Reader")
+    parser.add_argument("--open", dest="open_pdf", help="启动后自动打开指定 PDF。")
+    parser.add_argument(
+        "--test-mode",
+        action="store_true",
+        help="跳过首次启动弹窗和云端预热，供闭环 UI 自动化测试使用。",
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> int:
+    args = _parse_args(sys.argv[1:])
     setup_logging()
 
     if sys.version_info[:3] != REQUIRED_PYTHON:
@@ -236,22 +261,40 @@ def main() -> int:
 
     try:
         t_build = __import__('time').perf_counter()
-        services = build_services()
+        services = build_services(test_mode=args.test_mode)
 
         # 将全局异常处理的父窗口设为主窗口（用于错误对话框）
         from src.ui.main_window import MainWindow
         t_ui = __import__('time').perf_counter()
         window = MainWindow(services)
+        if args.test_mode:
+            window._check_first_launch = lambda: None
+            window._prewarm_webview_pool = lambda: None
         logging.info("MainWindow 创建完成 (%.2fs)", __import__('time').perf_counter() - t_ui)
         _error_handler.set_parent_widget(window)
 
         window.show()
+        if args.test_mode:
+            from src.app.test_command_bridge import TestCommandBridge
+            command_file = Path("test_artifacts/e2e/commands.jsonl")
+            event_file = Path("test_artifacts/e2e/events.jsonl")
+            if command_file.exists():
+                command_file.unlink()
+            if event_file.exists():
+                event_file.unlink()
+            window._test_command_bridge = TestCommandBridge(window, command_file, event_file)
+        if args.open_pdf:
+            pdf_path = Path(args.open_pdf).resolve()
+            if not pdf_path.exists():
+                raise FileNotFoundError(f"PDF not found: {pdf_path}")
+            QTimer.singleShot(0, lambda path=str(pdf_path): window._open_pdf_file(path))
         total = __import__('time').perf_counter() - t_start
         logging.info("主窗口已显示。总启动时间: %.2fs", total)
 
         # 后台预热云端 LLM 连接（首次调用 ~47s，预热后降至 ~2s）
-        ai_engine = services.get("ai_engine")
-        QTimer.singleShot(1000, ai_engine.warmup_cloud)
+        if not args.test_mode:
+            ai_engine = services.get("ai_engine")
+            QTimer.singleShot(1000, ai_engine.warmup_cloud)
 
         return app.exec()
 

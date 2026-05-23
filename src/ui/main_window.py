@@ -200,6 +200,15 @@ class MainWindow(QMainWindow):
         self._search_box.setMaximumWidth(200)
         toolbar.addWidget(self._search_box)
 
+        toolbar.addSeparator()
+        self._page_jump_box = QLineEdit()
+        self._page_jump_box.setObjectName("page_jump_box")
+        self._page_jump_box.setAccessibleName("page_jump_box")
+        self._page_jump_box.setPlaceholderText("页码")
+        self._page_jump_box.setMaximumWidth(80)
+        self._page_jump_box.returnPressed.connect(self._on_page_jump_requested)
+        toolbar.addWidget(self._page_jump_box)
+
     def _create_status_bar(self) -> None:
         """创建状态栏。"""
         status: QStatusBar = self.statusBar()
@@ -456,6 +465,25 @@ class MainWindow(QMainWindow):
         self._status_progress.setVisible(False)
         self._status_page_label.setText("解析失败")
         QMessageBox.warning(self, "打开失败", message)
+
+    def _on_page_jump_requested(self) -> None:
+        """工具栏页码跳转。输入使用 1-based 页码。"""
+        raw = self._page_jump_box.text().strip()
+        if not raw:
+            return
+        try:
+            page = int(raw)
+        except ValueError:
+            self._status_page_label.setText("页码格式错误")
+            return
+        max_page = self._doc_engine.page_count
+        if max_page <= 0:
+            self._status_page_label.setText("请先打开 PDF")
+            return
+        page = max(1, min(max_page, page))
+        self._page_jump_box.setText(str(page))
+        self._pdf_viewer.scroll_to_page(page - 1)
+        self._status_page_label.setText(f"第 {page}/{max_page} 页")
 
     def _on_formula_blocks_updated(self, updated: list[dict[str, Any]]) -> None:
         """MFD/MFR 精扫完成：更新块类型、LaTeX 内容并刷新 overlay。"""

@@ -391,11 +391,14 @@ class HybridModelRouter:
             if self._available(self._cloud):
                 return self._cloud
             import logging
+            if self._available(self._fallback):
+                logging.getLogger("HybridModelRouter").info(
+                    "云端模型不可用，使用降级客户端: task=%s", task.value
+                )
+                return self._fallback
             logging.getLogger("HybridModelRouter").error(
                 "云端模型不可用 (策略=cloud_only): task=%s", task.value
             )
-            if self._available(self._fallback):
-                return self._fallback
             raise RuntimeError("云端模型不可用。请检查 API Key 配置和网络连接。")
 
         # local_first（默认）：优先本地，回退云端

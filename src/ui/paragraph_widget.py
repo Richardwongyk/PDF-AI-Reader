@@ -41,6 +41,9 @@ class BlockOverlay(QWidget):
         """
         super().__init__()
         self._block = block
+        self.setObjectName(f"block_overlay_{block.id}")
+        self.setAccessibleName(f"block:{block.id}")
+        self.setAccessibleDescription(block.content[:200].replace("\n", " "))
         self._is_hovered = False
         self._is_selected = False
         self._has_translation: bool = False  # 该段落是否已有翻译缓存
