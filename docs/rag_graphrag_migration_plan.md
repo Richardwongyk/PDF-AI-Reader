@@ -132,6 +132,14 @@ PDF / OCR / MFR
 - GraphRAG 失败不会影响 PDF 打开、翻译、基础 QA。
 - 图谱问答必须展示路径证据，不允许无来源回答。
 
+当前已落地：
+
+- 新增 `GraphIndexStore`，使用 SQLite 记录 block-level 图谱抽取任务和抽取结果 artifact。
+- 任务状态支持 queued / running / done / failed / skipped，支持内容 hash，内容未变化时不重复抽取。
+- artifact 保存 extractor、nodes、edges、updated_at，后续可接 LlamaIndex PropertyGraph、Neo4j、DeepSeek V4 Pro 或其他成熟后端。
+- 该层不调用模型、不构建图谱、不接入 UI 热路径，只提供可暂停、可恢复、可回滚的任务边界。
+- 图谱任务数据库写入 `data/graph_index_jobs.db`，已加入 `.gitignore`。
+
 ## 版本与兼容策略
 
 - `legacy_chroma` 数据保持原样，不做迁移写入。
@@ -165,6 +173,8 @@ PDF / OCR / MFR
   追问生成等任务不能给过小 `max_tokens`，否则 token 预算可能被思考过程耗尽而没有最终答案。
 - `ConfigManager.get_api_key()` 允许同一 provider family 复用 key，例如 `deepseek/deepseek-v4-flash`
   配置的 key 可供 `deepseek/deepseek-v4-pro` 使用。
+- 真实云端 smoke test 已可用：设置 `PDF_AI_READER_RUN_CLOUD_TESTS=1` 后运行
+  `tests/test_cloud_models.py`，会使用当前 `config.yaml` 的 DeepSeek reasoning 配置验证生成和 QAService 链路。
 
 ## 第一阶段落地任务
 

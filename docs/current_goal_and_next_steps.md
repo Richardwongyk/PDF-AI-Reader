@@ -219,11 +219,17 @@
   `deepseek/deepseek-v4-flash` key 可用于 reasoning 模型。
 - 新增可选真实云端 smoke test，设置 `PDF_AI_READER_RUN_CLOUD_TESTS=1` 时会使用当前
   `config.yaml` 调用 DeepSeek reasoning 模型验证问答链路。
+- 本轮已真实运行云端 smoke test：`tests/test_cloud_models.py` 在 `PDF_AI_READER_RUN_CLOUD_TESTS=1`
+  下 2 项通过，确认当前配置可调用 DeepSeek reasoning 模型。
 - 写入迁移方案文档：[rag_graphrag_migration_plan.md](rag_graphrag_migration_plan.md)。
 - 抽出 `KnowledgeIndexBackend`。
 - 保留 `legacy_chroma` 默认后端。
 - 新增版本隔离的 `llamaindex_chroma` 后端。
 - 安装并登记 LlamaIndex 依赖。
+- 新增 `GraphIndexStore`，用 SQLite 持久化 GraphRAG block-level 抽取任务和 artifact。
+- GraphRAG 任务层仅记录任务状态与抽取结果，不调用模型、不接 UI 热路径；后续 worker 可接
+  LlamaIndex PropertyGraph / Neo4j / DeepSeek V4 Pro 等成熟后端。
+- 图谱任务数据库写入 `data/graph_index_jobs.db`，已加入 `.gitignore`。
 
 关键性能结论：
 
