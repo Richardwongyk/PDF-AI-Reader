@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(evidence_label)
         self._ai_evidence_tree = QTreeWidget()
         self._ai_evidence_tree.setObjectName("ai_evidence_tree")
-        self._ai_evidence_tree.setHeaderLabels(["页码", "片段"])
+        self._ai_evidence_tree.setHeaderLabels(["来源", "片段"])
         self._ai_evidence_tree.setRootIsDecorated(False)
         self._ai_evidence_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._ai_evidence_tree.itemDoubleClicked.connect(self._on_evidence_item_activated)
@@ -738,14 +738,15 @@ class MainWindow(QMainWindow):
         for item in evidence:
             page = int(item.get("page", 0))
             content = str(item.get("content", "")).strip().replace("\n", " ")
-            distance = float(item.get("distance", 0.0))
+            relevance = float(item.get("retrieval_score", 0.0))
             tree_item = QTreeWidgetItem(self._ai_evidence_tree)
             tree_item.setText(0, str(page))
             tree_item.setText(1, content[:160])
+            tree_item.setToolTip(0, f"相关度 {relevance:.2f}")
             tree_item.setToolTip(1, content)
             tree_item.setData(0, Qt.ItemDataRole.UserRole, page - 1)
             tree_item.setData(1, Qt.ItemDataRole.UserRole, item.get("id", ""))
-            tree_item.setText(0, f"{page} · {distance:.3f}")
+            tree_item.setText(0, f"第{page}页 · {relevance:.2f}")
         self._ai_doc_status.setText(f"检索到 {len(evidence)} 条依据")
 
     def _on_evidence_item_activated(self, item: QTreeWidgetItem, column: int) -> None:

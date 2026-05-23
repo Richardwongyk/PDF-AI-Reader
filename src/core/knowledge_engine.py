@@ -5,6 +5,10 @@ EmbeddingService: 文本向量化（通过 Ollama BGE-M3）
 KnowledgeEngine: 知识库构建与语义检索的协调者
 """
 
+import math
+import re
+from collections import Counter
+
 from PySide6.QtCore import QObject, QReadLocker, QReadWriteLock, QThreadPool, QWriteLocker, Signal
 
 from src.core.base_service import BaseService
@@ -121,6 +125,14 @@ class KnowledgeEngine(BaseService):
     - 知识库生命周期管理（创建、查询、删除）
     """
 
+    _MAX_RETRIEVAL_CANDIDATES = 48
+    _EN_STOPWORDS = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does",
+        "for", "from", "how", "in", "into", "is", "it", "its", "of", "on",
+        "or", "that", "the", "their", "this", "to", "was", "what", "when",
+        "where", "which", "why", "with",
+    }
+
     # === 信号 ===
     build_progress = Signal(int, int)        # (已完成块数, 总块数)
     build_finished = Signal(str)             # (文档哈希)
@@ -191,7 +203,8 @@ class KnowledgeEngine(BaseService):
 
         工作流程：
         1. 调用 EmbeddingService.embed_single(query) 生成查询向量。
-        2. 调用 ChromaRepo.query_relevant() 执行余弦相似度搜索。
+        2. 从 ChromaRepo 多取候选块。
+        3. 结合向量距离、问题词覆盖率、章节/摘要命中进行重排。
 
         Args:
             query: 自然语言查询文本。
@@ -202,11 +215,148 @@ class KnowledgeEngine(BaseService):
         Returns:
             按相似度降序的结果列表。
         """
+        if top_k <= 0:
+            return []
+
         query_vector = self._embed.embed_single(query)
+        fetch_k = self._retrieval_candidate_count(top_k)
         with QReadLocker(self._db_lock):
-            return self._repo.query_relevant(
-                doc_hash, query_vector, top_k=top_k, exclude_ids=exclude_ids
+            candidates = self._repo.query_relevant(
+                doc_hash, query_vector, top_k=fetch_k, exclude_ids=exclude_ids
             )
+        return self._rerank_retrieval_results(query, candidates, top_k=top_k)
+
+    @classmethod
+    def _retrieval_candidate_count(cls, top_k: int) -> int:
+        """为最终 top_k 计算重排候选池大小。"""
+        if top_k <= 0:
+            return 0
+        return min(cls._MAX_RETRIEVAL_CANDIDATES, max(top_k * 4, top_k + 8))
+
+    @classmethod
+    def _rerank_retrieval_results(
+        cls,
+        query: str,
+        results: list[dict[str, Any]],
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        """用轻量混合分数重排向量检索候选。"""
+        if top_k <= 0:
+            return []
+
+        query_tokens = cls._tokenize_for_retrieval(query)
+        query_terms = Counter(query_tokens)
+        if not query_terms:
+            return results[:top_k]
+
+        scored: list[tuple[float, float, float, int, dict[str, Any]]] = []
+        for index, result in enumerate(results):
+            metadata = result.get("metadata") or {}
+            document = str(result.get("document") or result.get("content") or "")
+            context_text = cls._candidate_text(document, metadata)
+            lexical_score = cls._lexical_score(query_tokens, query_terms, context_text)
+            distance = cls._safe_distance(result.get("distance"))
+            vector_score = 1.0 / (1.0 + max(distance, 0.0))
+            combined_score = (0.55 * vector_score) + (0.45 * lexical_score)
+
+            ranked = dict(result)
+            ranked["vector_score"] = vector_score
+            ranked["lexical_score"] = lexical_score
+            ranked["retrieval_score"] = combined_score
+            scored.append((combined_score, lexical_score, -distance, -index, ranked))
+
+        scored.sort(reverse=True)
+        return [item[-1] for item in scored[:top_k]]
+
+    @classmethod
+    def _candidate_text(cls, document: str, metadata: dict[str, Any]) -> str:
+        """拼出用于关键词重排的候选文本。"""
+        fields = [
+            document,
+            str(metadata.get("section") or ""),
+            str(metadata.get("summary") or ""),
+            str(metadata.get("keywords") or ""),
+        ]
+        return "\n".join(field for field in fields if field)
+
+    @classmethod
+    def _lexical_score(
+        cls,
+        query_tokens: list[str],
+        query_terms: Counter[str],
+        candidate_text: str,
+    ) -> float:
+        """计算问题词在候选块中的覆盖程度。"""
+        candidate_tokens = cls._tokenize_for_retrieval(candidate_text)
+        candidate_terms = Counter(candidate_tokens)
+        if not candidate_terms:
+            return 0.0
+
+        total = sum(query_terms.values())
+        matched = sum(min(count, candidate_terms.get(term, 0)) for term, count in query_terms.items())
+        coverage = matched / total if total else 0.0
+
+        unique_total = len(query_terms)
+        unique_matched = sum(1 for term in query_terms if candidate_terms.get(term, 0) > 0)
+        unique_coverage = unique_matched / unique_total if unique_total else 0.0
+
+        query_bigrams = set(cls._bigrams(query_tokens))
+        candidate_bigrams = set(cls._bigrams(candidate_tokens))
+        bigram_score = (
+            len(query_bigrams & candidate_bigrams) / len(query_bigrams)
+            if query_bigrams else 0.0
+        )
+
+        score = (0.55 * coverage) + (0.35 * unique_coverage) + (0.10 * bigram_score)
+        return min(1.0, score)
+
+    @classmethod
+    def _tokenize_for_retrieval(cls, text: str) -> list[str]:
+        """中英文混合检索分词，保留公式变量和术语形态。"""
+        lowered = text.lower()
+        raw_tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]", lowered)
+        tokens: list[str] = []
+        for token in raw_tokens:
+            if token in cls._EN_STOPWORDS:
+                continue
+            tokens.append(token)
+            if re.match(r"^[a-z0-9_]+$", token):
+                tokens.extend(cls._simple_variants(token))
+        return tokens
+
+    @staticmethod
+    def _simple_variants(token: str) -> list[str]:
+        """加入少量英文词形变体，提升问句和论文正文的直接命中率。"""
+        variants: list[str] = []
+        if len(token) > 4 and token.endswith("ies"):
+            variants.append(f"{token[:-3]}y")
+        elif len(token) > 4 and token.endswith("s"):
+            variants.append(token[:-1])
+        if len(token) > 5 and token.endswith("ing"):
+            base = token[:-3]
+            variants.append(base)
+            variants.append(f"{base}e")
+        if len(token) > 4 and token.endswith("ed"):
+            variants.append(token[:-2])
+        return variants
+
+    @staticmethod
+    def _bigrams(tokens: Any) -> list[str]:
+        token_list = list(tokens)
+        return [
+            f"{token_list[i]}_{token_list[i + 1]}"
+            for i in range(len(token_list) - 1)
+        ]
+
+    @staticmethod
+    def _safe_distance(value: Any) -> float:
+        try:
+            distance = float(value)
+        except (TypeError, ValueError):
+            return math.inf
+        if math.isnan(distance):
+            return math.inf
+        return distance
 
     def delete_knowledge_base(self, doc_hash: str) -> None:
         """删除指定文档的知识库。

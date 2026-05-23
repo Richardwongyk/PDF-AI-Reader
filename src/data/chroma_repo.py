@@ -124,12 +124,20 @@ class ChromaRepo:
         """
         collection = self.get_collection(doc_hash)
         where_filter: dict[str, Any] | None = None
+        if top_k <= 0:
+            return []
+
         if exclude_ids:
             # ChromaDB 目前不直接支持 NOT IN 过滤，
             # 采用后处理方式：多取一些结果，再排除。
             fetch_count = top_k + len(exclude_ids)
         else:
             fetch_count = top_k
+
+        collection_count = collection.count()
+        if collection_count <= 0:
+            return []
+        fetch_count = min(fetch_count, collection_count)
 
         results: dict = collection.query(
             query_embeddings=[query_vector],

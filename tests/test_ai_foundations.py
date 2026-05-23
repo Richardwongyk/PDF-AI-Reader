@@ -1,6 +1,7 @@
 import pytest
 
 from src.core.ai_engine import HashingEmbeddingClient, HybridModelRouter, MockLLMClient, QAService
+from src.core.knowledge_engine import KnowledgeEngine
 from src.core.models import AppConfig, DocumentBlock, BlockType, TaskType
 
 
@@ -30,6 +31,37 @@ def test_hashing_embedding_is_deterministic_and_query_sensitive() -> None:
     assert a1 == a2
     assert a1 != b
     assert pytest.approx(sum(v * v for v in a1), rel=1e-6) == 1.0
+
+
+def test_knowledge_retrieval_reranks_candidates_by_query_evidence() -> None:
+    results = [
+        {
+            "id": "near-vector",
+            "document": "This paragraph discusses residual layers and optimization.",
+            "metadata": {"section": "Model"},
+            "distance": 0.02,
+        },
+        {
+            "id": "lexical-match",
+            "document": "Scaled dot-product attention maps queries, keys, and values.",
+            "metadata": {"section": "Attention"},
+            "distance": 0.85,
+        },
+    ]
+
+    ranked = KnowledgeEngine._rerank_retrieval_results(
+        "How does attention use queries and keys?",
+        results,
+        top_k=1,
+    )
+
+    assert ranked[0]["id"] == "lexical-match"
+    assert ranked[0]["lexical_score"] > ranked[0]["vector_score"]
+
+
+def test_knowledge_retrieval_candidate_pool_expands_for_full_document_qa() -> None:
+    assert KnowledgeEngine._retrieval_candidate_count(8) == 32
+    assert KnowledgeEngine._retrieval_candidate_count(100) == 48
 
 
 def test_router_keeps_local_and_cloud_roles_separate() -> None:

@@ -22,7 +22,13 @@ class _KnowledgeEngine:
         assert question == "what is attention?"
         assert doc_hash == "doc-1"
         assert exclude_ids is None
-        return [{"id": "p0_b0", "distance": 0.125}]
+        return [{
+            "id": "p0_b0",
+            "distance": 0.125,
+            "retrieval_score": 0.82,
+            "lexical_score": 0.75,
+            "vector_score": 0.88,
+        }]
 
 
 class _AIEngine:
@@ -67,6 +73,9 @@ def test_full_document_question_emits_retrieval_evidence() -> None:
                     "page": 1,
                     "type": "paragraph",
                     "distance": 0.125,
+                    "retrieval_score": 0.82,
+                    "lexical_score": 0.75,
+                    "vector_score": 0.88,
                     "content": block.content,
                 },
             ],

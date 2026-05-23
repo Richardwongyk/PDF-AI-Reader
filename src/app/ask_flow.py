@@ -93,6 +93,9 @@ class AskQuestionFlow(QObject):
                         "page": found.page_num + 1,
                         "type": found.block_type.value,
                         "distance": float(result.get("distance", 0.0)),
+                        "retrieval_score": float(result.get("retrieval_score", 0.0)),
+                        "lexical_score": float(result.get("lexical_score", 0.0)),
+                        "vector_score": float(result.get("vector_score", 0.0)),
                         "content": found.content,
                     })
                 self.retrieval_ready.emit(block_id, evidence)
