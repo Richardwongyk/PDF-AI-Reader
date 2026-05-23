@@ -124,6 +124,20 @@ class MathEvidenceRegion:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class MathEvidenceCluster:
+    page_num: int
+    bbox: tuple[float, float, float, float]
+    text: str
+    region_count: int
+    vector_count: int
+    evidence: tuple[MathEvidence, ...]
+    source: str = "pdf_structure_cluster"
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class MuPDFBornDigitalExtractor:
     """Extract raw born-digital structure with MuPDF/PyMuPDF."""
 
@@ -233,6 +247,20 @@ class BornDigitalMathAuditor:
             regions.extend(self._line_evidence_regions(page.page_num, region, vectors))
         return regions
 
+    def evidence_clusters(self, page: BornDigitalPage) -> list[MathEvidenceCluster]:
+        regions = self.evidence_regions(page)
+        if not regions:
+            return []
+        vectors = [region for region in page.regions if region.kind == "vector"]
+        clusters: list[list[MathEvidenceRegion]] = []
+        for region in sorted(regions, key=lambda item: (item.bbox[1], item.bbox[0])):
+            target = _best_cluster(region, clusters)
+            if target is None:
+                clusters.append([region])
+            else:
+                target.append(region)
+        return [_cluster_summary(page.page_num, cluster, vectors) for cluster in clusters]
+
     def _line_evidence_regions(
         self,
         page_num: int,
@@ -266,6 +294,13 @@ class BornDigitalMathAuditor:
                     )
                 )
         return regions
+
+    def contextual_clusters(self, page: BornDigitalPage) -> list[MathEvidenceCluster]:
+        clusters = self.evidence_clusters(page)
+        if not clusters:
+            return []
+        text_lines = [line for region in page.regions if region.kind == "text" for line in region.lines]
+        return [_expand_cluster_with_context(cluster, text_lines) for cluster in clusters]
 
 def _rawdict_flags() -> int:
     flags = int(getattr(fitz, "TEXTFLAGS_RAWDICT", 0) or 0)
@@ -473,6 +508,128 @@ def _glyph_has_math_evidence(glyph: PdfGlyph) -> bool:
 
 def _is_short_math_connector(text: str) -> bool:
     return text in {"=", "+", "-", "−", "*", "/", "·", "×", "(", ")", "[", "]", "{", "}", ",", "."}
+
+
+def _best_cluster(
+    region: MathEvidenceRegion,
+    clusters: list[list[MathEvidenceRegion]],
+) -> list[MathEvidenceRegion] | None:
+    best: list[MathEvidenceRegion] | None = None
+    best_gap = float("inf")
+    for cluster in clusters:
+        cluster_box = _union_bbox([item.bbox for item in cluster])
+        if not _same_formula_neighborhood(region.bbox, cluster_box):
+            continue
+        gap = _bbox_gap(region.bbox, cluster_box)
+        if gap < best_gap:
+            best_gap = gap
+            best = cluster
+    return best
+
+
+def _same_formula_neighborhood(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> bool:
+    left_height = max(left[3] - left[1], 1.0)
+    right_height = max(right[3] - right[1], 1.0)
+    vertical_overlap = min(left[3], right[3]) - max(left[1], right[1])
+    if vertical_overlap >= -max(left_height, right_height) * 1.25:
+        horizontal_gap = max(0.0, max(left[0], right[0]) - min(left[2], right[2]))
+        if horizontal_gap <= 36.0:
+            return True
+    horizontal_overlap = min(left[2], right[2]) - max(left[0], right[0])
+    vertical_gap = max(0.0, max(left[1], right[1]) - min(left[3], right[3]))
+    return horizontal_overlap >= -18.0 and vertical_gap <= 16.0
+
+
+def _bbox_gap(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    horizontal = max(0.0, max(left[0], right[0]) - min(left[2], right[2]))
+    vertical = max(0.0, max(left[1], right[1]) - min(left[3], right[3]))
+    return horizontal + vertical
+
+
+def _cluster_summary(
+    page_num: int,
+    cluster: list[MathEvidenceRegion],
+    vectors: list[PdfRegion],
+) -> MathEvidenceCluster:
+    bbox = _union_bbox([region.bbox for region in cluster])
+    nearby_vectors = [
+        vector
+        for vector in vectors
+        if _bbox_intersects(_expand_bbox(bbox, 2.0), vector.bbox)
+    ]
+    evidence: set[MathEvidence] = set()
+    for region in cluster:
+        evidence.update(region.evidence)
+    text = " ".join(region.text.strip() for region in sorted(cluster, key=lambda item: (item.bbox[1], item.bbox[0])) if region.text.strip())
+    return MathEvidenceCluster(
+        page_num=page_num,
+        bbox=bbox,
+        text=text,
+        region_count=len(cluster),
+        vector_count=len(nearby_vectors),
+        evidence=tuple(sorted(evidence)),
+    )
+
+
+def _expand_cluster_with_context(
+    cluster: MathEvidenceCluster,
+    lines: list[PdfLine],
+) -> MathEvidenceCluster:
+    context_glyphs: list[PdfGlyph] = []
+    expanded_box = _expand_bbox(cluster.bbox, 2.0)
+    for line in lines:
+        if not _line_can_contextualize_cluster(line.bbox, expanded_box):
+            continue
+        for span in line.spans:
+            for glyph in span.glyphs:
+                if glyph.text.isspace():
+                    continue
+                if _bbox_intersects(_expand_bbox(glyph.bbox, 8.0), expanded_box):
+                    context_glyphs.append(glyph)
+    if not context_glyphs:
+        return cluster
+    bbox = _union_bbox([cluster.bbox] + [glyph.bbox for glyph in context_glyphs])
+    text = _context_text(lines, bbox)
+    return MathEvidenceCluster(
+        page_num=cluster.page_num,
+        bbox=bbox,
+        text=text or cluster.text,
+        region_count=cluster.region_count,
+        vector_count=cluster.vector_count,
+        evidence=cluster.evidence,
+        source="pdf_structure_context_cluster",
+    )
+
+
+def _line_can_contextualize_cluster(
+    line_box: tuple[float, float, float, float],
+    cluster_box: tuple[float, float, float, float],
+) -> bool:
+    vertical_overlap = min(line_box[3], cluster_box[3]) - max(line_box[1], cluster_box[1])
+    line_height = max(line_box[3] - line_box[1], 1.0)
+    cluster_height = max(cluster_box[3] - cluster_box[1], 1.0)
+    return vertical_overlap >= -max(line_height, cluster_height) * 0.25
+
+
+def _context_text(lines: list[PdfLine], bbox: tuple[float, float, float, float]) -> str:
+    parts: list[str] = []
+    for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
+        glyphs = [
+            glyph
+            for span in line.spans
+            for glyph in span.glyphs
+            if not glyph.text.isspace() and _bbox_intersects(_expand_bbox(glyph.bbox, 1.0), bbox)
+        ]
+        if not glyphs:
+            continue
+        parts.append("".join(glyph.text for glyph in sorted(glyphs, key=lambda item: item.bbox[0])))
+    return " ".join(parts)
 
 
 def _expand_bbox(

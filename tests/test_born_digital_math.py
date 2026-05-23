@@ -149,19 +149,98 @@ def test_math_auditor_does_not_promote_plain_script_size_without_math_evidence()
     assert regions == []
 
 
+def test_born_digital_audit_aligns_evidence_with_latex_source(tmp_path) -> None:
+    from tools import born_digital_math_audit as audit
+
+    pdf = tmp_path / "paper.pdf"
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=240, height=180)
+    page.insert_text((36, 48), "x", fontsize=12, fontname="helv")
+    doc.save(pdf)
+    doc.close()
+    (latex_root / "main.tex").write_text(r"$x$", encoding="utf-8")
+
+    report = audit.audit_pdf(pdf, start_page=0, max_pages=1, sample_limit=2, latex_root=latex_root)
+
+    assert "latex_source_alignment" in report
+    assert report["latex_source_alignment"]["available"] is True
+    assert report["latex_source_alignment"]["tex_file_count"] == 1
+
+
+def test_math_auditor_clusters_adjacent_structure_evidence() -> None:
+    extracted = BornDigitalPage(
+        page_num=0,
+        page_size=(360, 180),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("Q", "CMMI10", 12, (100, 40, 108, 52)),
+                PdfGlyph("K", "CMMI10", 12, (109, 40, 117, 52)),
+            ]),
+            _text_region([
+                PdfGlyph("T", "CMMI7", 8, (118, 34, 124, 42)),
+            ]),
+            _text_region([
+                PdfGlyph("d", "CMMI10", 12, (110, 58, 118, 70)),
+                PdfGlyph("k", "CMMI7", 8, (119, 63, 124, 71)),
+            ]),
+            PdfRegion(page_num=0, kind="vector", bbox=(98, 54, 128, 55)),
+        ),
+    )
+
+    clusters = BornDigitalMathAuditor(vector_margin=4).evidence_clusters(extracted)
+
+    assert len(clusters) == 1
+    assert clusters[0].region_count == 3
+    assert clusters[0].vector_count == 1
+    assert "QK" in clusters[0].text
+
+
+def test_math_auditor_contextual_clusters_include_adjacent_roman_glyphs() -> None:
+    extracted = BornDigitalPage(
+        page_num=0,
+        page_size=(360, 180),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("A", "CMR10", 12, (80, 40, 88, 52)),
+                PdfGlyph("(", "CMR10", 12, (88, 40, 92, 52)),
+                PdfGlyph("Q", "CMMI10", 12, (93, 40, 101, 52)),
+                PdfGlyph(",", "CMR10", 12, (101, 40, 104, 52)),
+                PdfGlyph("K", "CMMI10", 12, (106, 40, 114, 52)),
+                PdfGlyph(")", "CMR10", 12, (114, 40, 118, 52)),
+            ]),
+        ),
+    )
+
+    clusters = BornDigitalMathAuditor(vector_margin=2).contextual_clusters(extracted)
+
+    assert len(clusters) == 1
+    assert clusters[0].source == "pdf_structure_context_cluster"
+    assert clusters[0].text == "A(Q,K)"
+
+
 def _text_region(glyphs: list[PdfGlyph]) -> PdfRegion:
+    bbox = (
+        min(glyph.bbox[0] for glyph in glyphs),
+        min(glyph.bbox[1] for glyph in glyphs),
+        max(glyph.bbox[2] for glyph in glyphs),
+        max(glyph.bbox[3] for glyph in glyphs),
+    ) if glyphs else (0, 0, 0, 0)
     span = PdfSpan(
         text="".join(glyph.text for glyph in glyphs),
         font=glyphs[0].font if glyphs else "",
         size=glyphs[0].size if glyphs else 0,
-        bbox=(0, 0, 0, 0),
+        bbox=bbox,
         glyphs=tuple(glyphs),
     )
     line = PdfLine(
         text=span.text,
-        bbox=(0, 0, 0, 0),
+        bbox=bbox,
         writing_mode=0,
         direction=(1, 0),
         spans=(span,),
     )
-    return PdfRegion(page_num=0, kind="text", bbox=(0, 0, 0, 0), text=line.text, lines=(line,))
+    return PdfRegion(page_num=0, kind="text", bbox=bbox, text=line.text, lines=(line,))

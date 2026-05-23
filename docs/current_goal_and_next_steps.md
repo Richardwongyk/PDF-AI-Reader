@@ -170,6 +170,9 @@
 - `tests/test_born_digital_math.py tests/test_formula_detector.py` 共 37 项通过。
 - Attention 第 3-4 页 MuPDF rawdict 审计：约 0.206s，5602 glyph，9 vector，2 image，unknown glyph 为 0。
 - Attention 第 3 页 Poppler 对照：MuPDF 约 0.161s，Poppler `-bbox-layout` 约 0.282s。
+- 后续新增结构证据审计：evidence region、cluster、context cluster，并接入 LaTeX 源码匹配指标。
+- Attention 第 3-4 页 cluster 能出现少量源码弱匹配；context cluster 能匹配部分 FFN/MultiHead 片段，但会误吸正文，因此只保留为审计上限，不进入主链路。
+- 下一步必须做行/region 级 display formula 聚类和二维布局树，不能继续扩大 bbox 或堆规则。
 
 ### 全文问答与证据
 

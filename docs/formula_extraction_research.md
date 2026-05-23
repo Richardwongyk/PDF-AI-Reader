@@ -230,6 +230,27 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - Attention 第 3 页 Poppler 对照约 0.282s，可作为独立 word/bbox 审计，不进入滚动热路径。
 - 当前事实层不生成 LaTeX，不做 OCR，不接入主解析，避免把未验证逻辑误认为生产公式识别。
 
+## 结构证据审计结果
+
+已新增三层审计输出：
+
+- `math_evidence.regions`：单个数学证据片段，来自数学字体、数学符号、脚本字号、附近矢量线和未知 glyph。
+- `math_evidence.clusters`：把空间相邻的数学证据片段聚成公式候选簇。
+- `math_evidence.context_clusters`：实验性地吸纳相邻 roman glyph，用于观察源码匹配上限。
+
+当前 Attention 第 3-4 页结果：
+
+- MuPDF 结构抽取约 0.22s，仍然很快。
+- evidence region 约 90 个，cluster 约 29 个。
+- cluster 源码弱匹配从 0 提升到约 4 个；context cluster 能匹配到部分 FFN / MultiHead 公式片段。
+- context cluster 也会误吸相邻正文，不能进入主链路。
+
+结论：
+
+- PDF 结构事实足够快，也确实能看到数学字体、分式线、根号、上下标和部分公式上下文。
+- 仅靠孤立 glyph group 不够，必须做 display formula 的行/region 级空间聚类和二维布局树。
+- 不应继续膨胀 bbox 吸上下文；下一步要做的是基于行、block、vector、数学字体密度和阅读顺序的结构化 formula region，而不是文本正则。
+
 ## 参考资料
 
 - PyMuPDF text extraction appendix: https://pymupdf.readthedocs.io/en/latest/app1.html
