@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
@@ -66,6 +67,10 @@ class KnowledgeIndexBackend(ABC):
         """Return document index status."""
         ...
 
+    def index_matches(self, blocks: list[DocumentBlock], doc_hash: str) -> bool:
+        """Return True when the persisted index fingerprint matches blocks."""
+        return False
+
     def close(self) -> None:
         """Release backend resources."""
 
@@ -94,6 +99,9 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
         force_rebuild: bool,
         emit_progress: ProgressCallback,
     ) -> None:
+        if self.exists(doc_hash) and self.index_matches(blocks, doc_hash):
+            emit_progress(len(blocks), len(blocks))
+            return
         if not force_rebuild and self.exists(doc_hash):
             emit_progress(len(blocks), len(blocks))
             return
@@ -121,6 +129,10 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
                 metadatas=metadatas[batch_start:batch_end],
             )
             emit_progress(batch_end, total)
+        self._repo.update_collection_metadata(
+            doc_hash,
+            _index_metadata(self.name, blocks),
+        )
 
     def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
         total = len(blocks)
@@ -159,6 +171,15 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
 
     def exists(self, doc_hash: str) -> bool:
         return self._repo.collection_exists(doc_hash)
+
+    def index_matches(self, blocks: list[DocumentBlock], doc_hash: str) -> bool:
+        if not self.exists(doc_hash):
+            return False
+        try:
+            metadata = self._repo.get_collection_metadata(doc_hash)
+        except Exception:
+            return False
+        return _metadata_matches_blocks(metadata, self.name, blocks)
 
     def status(self, doc_hash: str) -> KnowledgeStatus:
         exists = self.exists(doc_hash)
@@ -206,6 +227,9 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
         force_rebuild: bool,
         emit_progress: ProgressCallback,
     ) -> None:
+        if self.exists(doc_hash) and self.index_matches(blocks, doc_hash):
+            emit_progress(len(blocks), len(blocks))
+            return
         if not force_rebuild and self.exists(doc_hash):
             emit_progress(len(blocks), len(blocks))
             return
@@ -238,6 +262,11 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
                 ],
             )
             emit_progress(batch_end, total)
+        self._repo.update_collection_metadata(
+            doc_hash,
+            _index_metadata(self.name, blocks),
+            self.COLLECTION_PREFIX,
+        )
 
     def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
         total = len(blocks)
@@ -306,6 +335,15 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
 
     def exists(self, doc_hash: str) -> bool:
         return self._repo.collection_exists(doc_hash, self.COLLECTION_PREFIX)
+
+    def index_matches(self, blocks: list[DocumentBlock], doc_hash: str) -> bool:
+        if not self.exists(doc_hash):
+            return False
+        try:
+            metadata = self._repo.get_collection_metadata(doc_hash, self.COLLECTION_PREFIX)
+        except Exception:
+            return False
+        return _metadata_matches_blocks(metadata, self.name, blocks)
 
     def status(self, doc_hash: str) -> KnowledgeStatus:
         exists = self.exists(doc_hash)
@@ -390,6 +428,45 @@ def _block_metadata(block: DocumentBlock) -> dict[str, Any]:
         "latex_source": str(block.metadata.get("latex_source", "")),
         "source": str(block.metadata.get("source", "")),
     }
+
+
+def build_blocks_fingerprint(blocks: list[DocumentBlock]) -> str:
+    """Stable fingerprint for the current knowledge-indexable block content."""
+    digest = hashlib.sha256()
+    for block in sorted(blocks, key=lambda item: item.id):
+        digest.update(block.id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(block.page_num).encode("ascii", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(block.block_type.value.encode("ascii", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(block.content.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(bool(block.metadata.get("needs_ocr", False))).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _index_metadata(backend_name: str, blocks: list[DocumentBlock]) -> dict[str, Any]:
+    return {
+        "index_backend": backend_name,
+        "index_fingerprint": build_blocks_fingerprint(blocks),
+        "index_block_count": len(blocks),
+        "index_schema": "blocks_v1",
+    }
+
+
+def _metadata_matches_blocks(
+    metadata: dict[str, Any],
+    backend_name: str,
+    blocks: list[DocumentBlock],
+) -> bool:
+    return (
+        str(metadata.get("index_backend", "")) == backend_name
+        and str(metadata.get("index_schema", "")) == "blocks_v1"
+        and int(metadata.get("index_block_count", -1)) >= len(blocks)
+        and str(metadata.get("index_fingerprint", "")) == build_blocks_fingerprint(blocks)
+    )
 
 
 def _format_float(value: float) -> str:

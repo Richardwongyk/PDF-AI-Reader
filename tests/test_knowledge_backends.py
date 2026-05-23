@@ -6,6 +6,7 @@ from src.core.knowledge_backends import (
     LlamaIndexChromaBackend,
     LegacyChromaBackend,
     _block_metadata,
+    build_blocks_fingerprint,
     create_knowledge_backend,
 )
 from src.core.models import BlockType, DocumentBlock, KnowledgeStatus
@@ -17,13 +18,15 @@ class _Repo:
         self.deleted: list[str] = []
         self.exists = False
         self.count = 0
+        self.metadata: dict[str, object] = {}
 
-    def collection_exists(self, doc_hash: str) -> bool:
+    def collection_exists(self, doc_hash: str, collection_prefix: str | None = None) -> bool:
         return self.exists
 
-    def delete_collection(self, doc_hash: str) -> None:
+    def delete_collection(self, doc_hash: str, collection_prefix: str | None = None) -> None:
         self.deleted.append(doc_hash)
         self.exists = False
+        self.metadata = {}
 
     def upsert_blocks(
         self,
@@ -47,13 +50,35 @@ class _Repo:
         return [{"id": "p0_b0", "document": "attention", "metadata": {}, "distance": 0.1}]
 
     def get_collection(self, doc_hash: str) -> object:
-        count = self.count
+        repo = self
 
         class _Collection:
             def count(self) -> int:
-                return count
+                return repo.count
+
+            @property
+            def metadata(self) -> dict[str, object]:
+                return repo.metadata
+
+            def modify(self, metadata: dict[str, object]) -> None:
+                repo.metadata = metadata
 
         return _Collection()
+
+    def update_collection_metadata(
+        self,
+        doc_hash: str,
+        metadata: dict[str, object],
+        collection_prefix: str | None = None,
+    ) -> None:
+        self.metadata = dict(metadata)
+
+    def get_collection_metadata(
+        self,
+        doc_hash: str,
+        collection_prefix: str | None = None,
+    ) -> dict[str, object]:
+        return dict(self.metadata)
 
     def close(self) -> None:
         pass
@@ -81,6 +106,14 @@ def test_block_metadata_preserves_pdf_location_and_keywords() -> None:
     assert metadata["bbox"] == "1.00,2.00,3.00,4.00"
 
 
+def test_blocks_fingerprint_changes_when_indexable_content_changes() -> None:
+    block = _block()
+    original = build_blocks_fingerprint([block])
+    block.content = "Different content"
+
+    assert build_blocks_fingerprint([block]) != original
+
+
 def test_legacy_backend_builds_with_progress_and_status() -> None:
     repo = _Repo()
     backend = LegacyChromaBackend(
@@ -98,6 +131,71 @@ def test_legacy_backend_builds_with_progress_and_status() -> None:
     assert isinstance(status, KnowledgeStatus)
     assert status.is_ready is True
     assert status.total_blocks == 2
+
+
+def test_legacy_backend_index_metadata_omits_chroma_distance_config() -> None:
+    repo = _Repo()
+    backend = LegacyChromaBackend(
+        repo,  # type: ignore[arg-type]
+        embed_texts=lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+
+    backend.build([_block()], "doc-1", True, lambda c, t: None)
+
+    assert "hnsw:space" not in repo.metadata
+    assert repo.metadata["index_schema"] == "blocks_v1"
+
+
+def test_legacy_backend_skips_force_rebuild_when_fingerprint_matches() -> None:
+    repo = _Repo()
+    backend = LegacyChromaBackend(
+        repo,  # type: ignore[arg-type]
+        embed_texts=lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+    blocks = [_block(), _block("p0_b1")]
+    progress: list[tuple[int, int]] = []
+
+    backend.build(blocks, "doc-1", True, lambda c, t: progress.append((c, t)))
+    backend.build(blocks, "doc-1", True, lambda c, t: progress.append((c, t)))
+
+    assert repo.deleted == ["doc-1"]
+    assert len(repo.upserts) == 1
+    assert progress[-1] == (2, 2)
+
+
+def test_legacy_backend_skips_when_incremental_formula_blocks_exist() -> None:
+    repo = _Repo()
+    backend = LegacyChromaBackend(
+        repo,  # type: ignore[arg-type]
+        embed_texts=lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+    blocks = [_block(), _block("p0_b1")]
+
+    backend.build(blocks, "doc-1", True, lambda c, t: None)
+    repo.count += 2
+    repo.metadata["index_block_count"] = 4
+    backend.build(blocks, "doc-1", True, lambda c, t: None)
+
+    assert len(repo.upserts) == 1
+    assert repo.deleted == ["doc-1"]
+
+
+def test_legacy_backend_force_rebuilds_when_fingerprint_changes() -> None:
+    repo = _Repo()
+    backend = LegacyChromaBackend(
+        repo,  # type: ignore[arg-type]
+        embed_texts=lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+    blocks = [_block()]
+    changed = [_block()]
+    changed[0].content = "Updated attention content"
+
+    backend.build(blocks, "doc-1", True, lambda c, t: None)
+    backend.build(changed, "doc-1", True, lambda c, t: None)
+
+    assert repo.deleted == ["doc-1", "doc-1"]
+    assert len(repo.upserts) == 2
+    assert repo.upserts[-1]["documents"] == ["Updated attention content"]
 
 
 def test_legacy_backend_upserts_formula_ocr_metadata() -> None:

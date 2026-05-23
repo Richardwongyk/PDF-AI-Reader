@@ -41,6 +41,7 @@ class ChromaRepo:
         self,
         doc_hash: str,
         collection_prefix: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> chromadb.Collection:
         """为文档创建或获取 Collection。
 
@@ -55,9 +56,12 @@ class ChromaRepo:
         """
         prefix = collection_prefix or self.COLLECTION_PREFIX
         name = f"{prefix}{doc_hash}"
+        collection_metadata = {"hnsw:space": "cosine"}
+        if metadata:
+            collection_metadata.update(metadata)
         return self._client.get_or_create_collection(
             name=name,
-            metadata={"hnsw:space": "cosine"},
+            metadata=collection_metadata,
         )
 
     def get_collection(
@@ -90,6 +94,7 @@ class ChromaRepo:
         documents: list[str],
         vectors: list[list[float]],
         metadatas: list[dict[str, Any]] | None = None,
+        collection_prefix: str | None = None,
     ) -> None:
         """批量写入或更新块及其向量。
 
@@ -100,13 +105,32 @@ class ChromaRepo:
             vectors: 块向量列表（每个为 1024 维 float 列表）。
             metadatas: 可选的元数据列表（每个为 dict）。
         """
-        collection = self.create_or_get_collection(doc_hash)
+        collection = self.create_or_get_collection(doc_hash, collection_prefix)
         collection.upsert(
             ids=block_ids,
             documents=documents,
             embeddings=vectors,  # type: ignore[arg-type]
             metadatas=metadatas,  # type: ignore[arg-type]
         )
+
+    def update_collection_metadata(
+        self,
+        doc_hash: str,
+        metadata: dict[str, Any],
+        collection_prefix: str | None = None,
+    ) -> None:
+        """Update persisted metadata for a document collection."""
+        collection = self.get_collection(doc_hash, collection_prefix)
+        collection.modify(metadata=dict(metadata))
+
+    def get_collection_metadata(
+        self,
+        doc_hash: str,
+        collection_prefix: str | None = None,
+    ) -> dict[str, Any]:
+        """Return persisted metadata for a document collection."""
+        collection = self.get_collection(doc_hash, collection_prefix)
+        return dict(collection.metadata or {})
 
     def query_relevant(
         self,

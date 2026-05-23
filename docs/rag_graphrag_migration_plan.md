@@ -145,6 +145,8 @@ PDF / OCR / MFR
 
 - 索引构建继续在 `QThreadPool` 后台线程执行。
 - Chroma 批量写入默认使用 512 块一批；5000 块合成基准从 batch=50 的约 16.2s 降至约 9.9s。
+- 基础索引写入 `index_fingerprint/index_block_count/index_schema`，手动重建时如果当前 `DocumentBlock` 指纹一致则跳过全量 embedding/upsert。
+- 增量公式 OCR 块允许追加到 collection；指纹只判断基础块集合，避免后台公式块导致无变化文档反复全量重建。
 - 默认打开文档不阻塞等待 GraphRAG。
 - 长文档默认先建基础向量/混合索引，图谱抽取排队或手动触发。
 - 重排候选池由 `rag.candidate_pool` 控制，默认 48。

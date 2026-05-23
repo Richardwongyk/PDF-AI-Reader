@@ -42,6 +42,21 @@
 - 先扩大候选池，再按向量距离、关键词覆盖、章节/摘要/关键词元数据混合重排。
 - 对 HashingEmbedding 兜底场景更稳定。
 
+### 知识库构建性能
+
+已完成：
+
+- Chroma collection metadata 中写入基础块索引指纹、基础块数和 schema 版本。
+- 手动“重建知识库”会先比较当前 `DocumentBlock` 指纹。
+- 指纹一致时跳过删除 collection、重新 embedding 和批量 upsert。
+- 允许后台公式 OCR 增量块存在于 collection 中，不因 collection 总块数大于基础块数而误判失配。
+
+关键性能结论：
+
+- Attention 第二次重建：日志构建耗时 0.0s，E2E 等待约 0.47s。
+- Napkin 第二次重建：日志构建耗时约 0.4s，E2E 等待约 0.72s。
+- Napkin 首次写入清单仍需全量构建，当前约 87s；后续应继续优化首次构建和 MFD 页面预算。
+
 ### RAG / GraphRAG 迁移
 
 已完成：
