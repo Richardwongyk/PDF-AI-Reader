@@ -48,6 +48,9 @@ config.yaml
 data/ai_cache.db
 data/ai_cache.db-shm
 data/ai_cache.db-wal
+data/formula_ocr_cache.db
+data/formula_ocr_cache.db-shm
+data/formula_ocr_cache.db-wal
 
 # ========== 打包工具 / 开源借鉴 ==========
 pack_code.py

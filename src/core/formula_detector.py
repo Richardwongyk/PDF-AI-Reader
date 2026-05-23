@@ -44,9 +44,15 @@ class Pix2TextMFDDetector(FormulaDetector):
     先做 bbox 检测，再对 PDF 图片/扫描公式裁剪并尝试识别 LaTeX。
     """
 
-    def __init__(self, dpi: int = 200, max_existing_ocr_blocks: int = 6) -> None:
+    def __init__(
+        self,
+        dpi: int = 200,
+        max_existing_ocr_blocks: int = 6,
+        max_scanned_ocr_blocks: int = 8,
+    ) -> None:
         self._dpi = dpi
         self._max_existing_ocr_blocks = max_existing_ocr_blocks
+        self._max_scanned_ocr_blocks = max_scanned_ocr_blocks
         self._mfd = None
 
     def name(self) -> str:
@@ -309,9 +315,14 @@ class Pix2TextMFDDetector(FormulaDetector):
         import logging
         logger = logging.getLogger("Pix2TextMFD")
 
+        prioritized = sorted(
+            enumerate(formulas),
+            key=lambda item: self._scanned_formula_ocr_priority(item[1]),
+            reverse=True,
+        )
         images: list[bytes] = []
         image_indices: list[int] = []
-        for idx, formula in enumerate(formulas):
+        for idx, formula in prioritized:
             try:
                 image = self._crop_formula_image(doc, formula)
             except Exception as exc:
@@ -325,7 +336,8 @@ class Pix2TextMFDDetector(FormulaDetector):
             return {}
         try:
             from src.core.math_ocr import MathOCR
-            latex_results = MathOCR().recognize_batch(images)
+            max_uncached = max(0, self._max_scanned_ocr_blocks)
+            latex_results = MathOCR().recognize_batch(images, max_uncached=max_uncached)
         except Exception as exc:
             logger.warning("MFR 公式 OCR 不可用，保留待识别状态: %s", exc)
             return {}
@@ -335,8 +347,23 @@ class Pix2TextMFDDetector(FormulaDetector):
             cleaned = str(latex or "").strip()
             if cleaned:
                 recognized[idx] = cleaned
-        logger.info("MFR OCR 完成: %d/%d 个图片公式识别为 LaTeX", len(recognized), len(formulas))
+        logger.info(
+            "MFR OCR 完成: %d/%d 个图片公式识别为 LaTeX，预算=%d",
+            len(recognized),
+            len(formulas),
+            self._max_scanned_ocr_blocks,
+        )
         return recognized
+
+    @staticmethod
+    def _scanned_formula_ocr_priority(formula: dict[str, Any]) -> tuple[float, float, float]:
+        """越靠前、置信度越高、面积越合理的图片公式越先进入有限 OCR 预算。"""
+        bbox = formula.get("bbox", (0, 0, 0, 0))
+        x0, y0, x1, y1 = [float(v) for v in bbox]
+        area = max((x1 - x0) * (y1 - y0), 0.0)
+        score = float(formula.get("score", 0.0) or 0.0)
+        page = int(formula.get("page", 0) or 0)
+        return (-float(page), score, min(area, 20_000.0))
 
     def apply_to_blocks(self, blocks: list[DocumentBlock], doc: fitz.Document) -> list[DocumentBlock]:
         # 只对有公式特征的页面跑 MFD

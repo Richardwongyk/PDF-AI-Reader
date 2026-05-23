@@ -131,14 +131,18 @@ class MathOCR:
         results = self.recognize_batch([image_bytes])
         return results[0] if results else ""
 
-    def recognize_batch(self, images: list[bytes]) -> list[str]:
+    def recognize_batch(
+        self, images: list[bytes], max_uncached: int | None = None
+    ) -> list[str]:
         """批量识别公式图片 — CPU 多线程并行。
 
         将图片列表分批提交给 MFR 模型，利用 batch_size
-        分摊模型推理开销。
+        分摊模型推理开销。所有图片都会先查持久化缓存；当 ``max_uncached``
+        被设置时，只对缓存未命中的前 N 张图片运行 MFR。
 
         Args:
             images: PNG 格式的公式截图字节数据列表。
+            max_uncached: 本次允许进入模型推理的缓存未命中图片数量。
 
         Returns:
             与输入顺序对应的 LaTeX 字符串列表。
@@ -147,6 +151,17 @@ class MathOCR:
             return [""] * len(images)
 
         cached_results, misses = self._read_cache(images)
+        if max_uncached is not None:
+            allowed = max(0, int(max_uncached))
+            if allowed < len(misses):
+                skipped = len(misses) - allowed
+                _logger.info(
+                    "MFR OCR 预算限制: 推理 %d 张未命中图片，延后 %d 张",
+                    allowed,
+                    skipped,
+                )
+                misses = misses[:allowed]
+
         if not misses:
             return cached_results
 

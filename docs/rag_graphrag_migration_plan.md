@@ -174,6 +174,19 @@ PDF / OCR / MFR
 - 按需精扫层：只对视口附近、用户双击、问答证据涉及的疑似公式块触发 MFD/MFR。
 - 后台批处理层：空闲时增量扫描，结果写入公式 OCR 缓存；长文档按页优先级队列运行，可暂停和恢复。
 
+当前已落地的性能闸门：
+
+- 公式图片先按 hash 查 `data/formula_ocr_cache.db`，缓存命中不加载 Pix2Text。
+- `MathOCR.recognize_batch(..., max_uncached=N)` 可以限制本轮 MFR 推理的缓存未命中数量。
+- MFD 找到的图片/扫描公式先按优先级进入有限 OCR 预算，其余保留 `needs_ocr=True` 占位，等待后台公式索引补扫。
+
+待落地的异步索引层：
+
+- `FormulaIndexWorker`：维护公式候选任务表，字段包含 `doc_hash/page/bbox/block_id/image_hash/status/priority/latex/model/error`。
+- `FormulaIndexScheduler`：把视口、点击解释、问答 evidence、后台空闲扫描合并成一个优先级队列。
+- `KnowledgeEngine.upsert_blocks()`：公式 OCR 完成后只增量更新受影响的公式块，不重建整个知识库。
+- `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
+
 验收门槛：
 
 - 打开 Attention/Napkin 的首屏时间不因公式精扫增加。
