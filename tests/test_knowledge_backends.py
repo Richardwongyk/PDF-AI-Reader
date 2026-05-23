@@ -5,6 +5,7 @@ import pytest
 from src.core.knowledge_backends import (
     LlamaIndexChromaBackend,
     LegacyChromaBackend,
+    SQLiteFtsBackend,
     _block_metadata,
     build_blocks_fingerprint,
     create_knowledge_backend,
@@ -271,3 +272,57 @@ def test_backend_factory_creates_llamaindex_backend() -> None:
     )
 
     assert backend.name == "llamaindex_chroma"
+
+
+def test_sqlite_fts_backend_builds_and_retrieves(tmp_path) -> None:
+    backend = SQLiteFtsBackend(tmp_path)
+    blocks = [
+        _block("p0_b0"),
+        DocumentBlock(
+            id="p1_b0",
+            page_num=1,
+            block_type=BlockType.PARAGRAPH,
+            content="Riemannian curvature tensor and manifold geodesics.",
+            bbox=(0, 0, 1, 1),
+            section_title="Geometry",
+        ),
+    ]
+    progress: list[tuple[int, int]] = []
+
+    backend.build(blocks, "doc-fts", True, lambda c, t: progress.append((c, t)))
+    results = backend.retrieve(
+        "How does attention use keys?",
+        query_vector=[],
+        doc_hash="doc-fts",
+        top_k=1,
+    )
+
+    assert progress[-1] == (2, 2)
+    assert backend.exists("doc-fts") is True
+    assert backend.status("doc-fts").total_blocks == 2
+    assert results[0]["id"] == "p0_b0"
+    assert results[0]["metadata"]["page"] == 0
+
+
+def test_sqlite_fts_backend_skips_matching_rebuild(tmp_path) -> None:
+    backend = SQLiteFtsBackend(tmp_path)
+    blocks = [_block("p0_b0"), _block("p0_b1")]
+    progress: list[tuple[int, int]] = []
+
+    backend.build(blocks, "doc-fts", True, lambda c, t: progress.append((c, t)))
+    backend.build(blocks, "doc-fts", True, lambda c, t: progress.append((c, t)))
+
+    assert progress[-1] == (2, 2)
+    assert backend.status("doc-fts").total_blocks == 2
+
+
+def test_backend_factory_creates_sqlite_fts_backend(tmp_path) -> None:
+    repo = _Repo()
+    backend = create_knowledge_backend(
+        "sqlite_fts",
+        repo,  # type: ignore[arg-type]
+        lambda texts: [],
+        sqlite_dir=tmp_path,
+    )
+
+    assert backend.name == "sqlite_fts"

@@ -10,6 +10,8 @@ model:
   formula_ocr_model: PP-FormulaNet_plus-S
   ollama_host: http://localhost:11434
 rag:
+  # legacy_chroma is the default vector store. sqlite_fts is a lightweight
+  # no-extra-dependency full-text backend for fast large-document baselines.
   backend: legacy_chroma
   graph_backend: disabled
   candidate_pool: 48

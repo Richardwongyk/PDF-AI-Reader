@@ -145,6 +145,7 @@ class KnowledgeEngine(BaseService):
         embed_service: EmbeddingService,
         chroma_repo: ChromaRepo,
         config: AppConfig | None = None,
+        sqlite_fts_dir: str | None = None,
         parent: QObject | None = None,
     ) -> None:
         """初始化知识库引擎。
@@ -162,6 +163,7 @@ class KnowledgeEngine(BaseService):
             self._config.rag.backend,
             self._repo,
             self._embed.embed,
+            sqlite_dir=sqlite_fts_dir,
         )
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(2)  # 最多 2 个并行嵌入线程

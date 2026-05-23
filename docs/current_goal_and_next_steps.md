@@ -204,12 +204,15 @@
 - 手动“重建知识库”会先比较当前 `DocumentBlock` 指纹。
 - 指纹一致时跳过删除 collection、重新 embedding 和批量 upsert。
 - 允许后台公式 OCR 增量块存在于 collection 中，不因 collection 总块数大于基础块数而误判失配。
+- 新增 `sqlite_fts` 轻量全文索引后端，不引入新环境或新模型，作为长文档快速召回基线。
 
 关键性能结论：
 
 - Attention 第二次重建：日志构建耗时 0.0s，最新 E2E 等待约 0.29s。
 - Napkin 第二次重建：日志构建耗时约 0.2s，最新 E2E 等待约 0.26s。
-- Napkin 首次写入清单仍需全量构建，当前约 87s；后续应继续优化首次构建和 MFD 页面预算。
+- 旧向量后端首次写入长文档仍然慢；最新 Napkin E2E 中，非跳过的 Chroma 首次构建约 108.5s。
+- SQLite FTS5 基准：Attention 全量 488 blocks 构建 0.030s、检索 0.0346s；Napkin 120 页 1831 blocks 构建 0.080s、检索 0.0422s；Napkin 全量 21687 blocks 构建 0.835s、检索 0.1028s。
+- 结论：默认阅读路径应优先拥有一个秒级全文索引；高质量语义检索、rerank 和 GraphRAG 在此基础上异步叠加。
 
 ### RAG / GraphRAG 迁移
 
@@ -229,6 +232,7 @@
 - 抽出 `KnowledgeIndexBackend`。
 - 保留 `legacy_chroma` 默认后端。
 - 新增版本隔离的 `llamaindex_chroma` 后端。
+- 新增版本隔离的 `sqlite_fts` 后端，数据写入 `data/knowledge_bases_fts`。
 - 安装并登记 LlamaIndex 依赖。
 - 新增 `GraphIndexStore`，用 SQLite 持久化 GraphRAG block-level 抽取任务和 artifact。
 - GraphRAG 任务层仅记录任务状态与抽取结果，不调用模型、不接 UI 热路径；后续 worker 可接
@@ -240,7 +244,8 @@
 - LlamaIndex 默认 `ChromaVectorStore.add(TextNode)` 写入路径很慢，不能放入热路径。
 - 优化后，写入/检索热路径改回 Chroma 原生批量 upsert/query，LlamaIndex 保留为 schema/GraphRAG 编排层。
 - 5000 块合成基准：Chroma 写入 batch 从 50 提到 512 后，约 16.2s 降到 9.9s。
-- Napkin E2E：知识库构建从约 117s 降到约 83.9s，日志 ERROR/WARNING/CRITICAL 为 0。
+- Napkin E2E：无变化手动重建已降到约 0.26s，日志 ERROR/WARNING/CRITICAL 为 0。
+- SQLite FTS5 不是最终语义理解层，但它证明全文索引本身不应成为长文档交互瓶颈。
 
 ### 公式 OCR / MFD 性能
 

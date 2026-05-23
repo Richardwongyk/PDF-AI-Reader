@@ -156,6 +156,7 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
             cast(EmbeddingService, container.get("embedding_service")),
             cast(ChromaRepo, container.get("chroma_repo")),
             config,
+            sqlite_fts_dir=str(data_dir / "knowledge_bases_fts"),
         )
 
     container.register_singleton("knowledge_engine", _build_knowledge_engine)

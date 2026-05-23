@@ -37,7 +37,25 @@ Qdrant 适合第二阶段替换或并行 Chroma。它对本地持久化、payloa
 
 - 第一阶段仍用 Chroma，降低迁移风险。
 - 第二阶段新增 `QdrantRepo`，数据目录使用 `data/knowledge_bases_qdrant_v1`。
-- 通过 `rag.backend` 在 `legacy_chroma / llamaindex_chroma / qdrant` 间切换。
+- 通过 `rag.backend` 在 `legacy_chroma / llamaindex_chroma / sqlite_fts / qdrant` 间切换。
+
+### SQLite FTS5
+
+SQLite FTS5 是当前性能优先路线的轻量落点：它不引入新环境、不下载模型、不改变 UI evidence 结构，适合作为长文档全文词法检索和后续 hybrid search 的快速基线。
+
+采用方式：
+
+- 新增 `sqlite_fts` 后端，数据目录独立为 `data/knowledge_bases_fts`。
+- 索引内容仍来自 `DocumentBlock`，保留 `block_id/page/type/section/bbox`，结果可直接双击跳转。
+- 使用 SQLite FTS5 `unicode61` tokenizer 和 `bm25()` 排序；该后端只负责快速全文候选召回，不伪装成语义理解。
+- 默认仍保留 `legacy_chroma`，等问答质量和 UI 证据闭环验证后再决定是否把 FTS 作为默认第一层召回。
+
+基准结果：
+
+- Attention 全量 488 blocks：`legacy_chroma` 构建 1.514s、检索 0.0372s；`sqlite_fts` 构建 0.030s、检索 0.0346s。
+- Napkin 120 页 1831 blocks：`legacy_chroma` 构建 5.746s、检索 0.0522s；`sqlite_fts` 构建 0.080s、检索 0.0422s。
+- Napkin 全量 21687 blocks：`sqlite_fts` 构建 0.835s、检索 0.1028s。
+- 结论：FTS5 适合进入默认后台索引/混合召回候选；语义质量仍需由向量后端、reranker 和 `cloud_reasoning` 叠加。
 
 ### Neo4j / GraphRAG
 
@@ -67,6 +85,7 @@ PDF / OCR / MFR
   -> KnowledgeIndexFacade
        -> LegacyChromaIndexBackend
        -> LlamaIndexChromaBackend
+       -> SQLiteFtsBackend
        -> QdrantHybridBackend
        -> GraphIndexBackend
   -> RetrievalResult[]
@@ -104,7 +123,27 @@ PDF / OCR / MFR
 - Attention E2E 通过，日志 ERROR/WARNING/CRITICAL 为 0。
 - Napkin E2E 通过，知识库构建和全文问答耗时不显著劣化。
 
-### Phase 2: Qdrant 混合检索
+### Phase 2: SQLite FTS5 快速全文基线
+
+目标：
+
+- 新增无额外依赖的 SQLite FTS5 后端。
+- 长文档优先获得秒级全文索引，保证全文问答入口尽快可用。
+- 继续保留 Chroma/LlamaIndex/Qdrant 路线，FTS 只作为快速召回层和 hybrid baseline。
+
+验收：
+
+- Attention 与 Napkin 基准脚本输出构建/检索耗时。
+- Napkin 全量 FTS 构建低于 2s，检索低于 200ms。
+- evidence 结果仍含页码、bbox、block id，可跳转。
+
+当前已落地：
+
+- `SQLiteFtsBackend` 支持 build/retrieve/upsert/status/delete/index_matches。
+- `KnowledgeEngine` 可通过 `rag.backend=sqlite_fts` 切换。
+- `tools/knowledge_backend_benchmark.py` 可对 Attention/Napkin 做后端对比。
+
+### Phase 3: Qdrant 混合检索
 
 目标：
 
@@ -118,7 +157,7 @@ PDF / OCR / MFR
 - 全文问答仍返回 8 条 evidence，且每条可双击跳转。
 - 没有 UI 卡顿或主线程阻塞。
 
-### Phase 3: GraphRAG
+### Phase 4: GraphRAG
 
 目标：
 
@@ -143,7 +182,7 @@ PDF / OCR / MFR
 ## 版本与兼容策略
 
 - `legacy_chroma` 数据保持原样，不做迁移写入。
-- 新后端使用独立 collection/data dir：`li_v1`、`qdrant_v1`、`graph_v1`。
+- 新后端使用独立 collection/data dir：`li_v1`、`knowledge_bases_fts`、`qdrant_v1`、`graph_v1`。
 - `doc_hash` 仍是文档主键；索引版本作为 collection 前缀。
 - `DocumentBlock.id` 是 UI 定位主键，任何新工具返回结果都必须映射回该 id。
 - 配置缺字段时由 Pydantic 默认值补齐，旧 `config.yaml` 不需要手工编辑。
@@ -153,6 +192,7 @@ PDF / OCR / MFR
 
 - 索引构建继续在 `QThreadPool` 后台线程执行。
 - Chroma 批量写入默认使用 512 块一批；5000 块合成基准从 batch=50 的约 16.2s 降至约 9.9s。
+- SQLite FTS5 可作为快速全文基线，Napkin 全量 21687 blocks 构建约 0.835s、检索约 0.103s。
 - 基础索引写入 `index_fingerprint/index_block_count/index_schema`，手动重建时如果当前 `DocumentBlock` 指纹一致则跳过全量 embedding/upsert。
 - 增量公式 OCR 块允许追加到 collection；指纹只判断基础块集合，避免后台公式块导致无变化文档反复全量重建。
 - 默认交互式解析的 MFD 页扫描预算为 0，避免长文档打开后加载重型公式检测模型抢占 UI、翻译和渲染。
@@ -242,6 +282,7 @@ PDF / OCR / MFR
 - Qdrant Hybrid Search: https://qdrant.tech/documentation/beginner-tutorials/hybrid-search-fastembed/
 - Microsoft GraphRAG: https://microsoft.github.io/graphrag/get_started/
 - Neo4j GraphRAG Python: https://neo4j.com/docs/neo4j-graphrag-python/current/
+- SQLite FTS5: https://sqlite.org/fts5.html
 - PaddleOCR Formula Recognition Module: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/module_usage/formula_recognition.html
 - PaddleOCR Formula Recognition Pipeline: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/pipeline_usage/formula_recognition.html
 - UniMERNet: https://github.com/opendatalab/UniMERNet

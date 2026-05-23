@@ -164,7 +164,7 @@ class ModelConfig(BaseModel):
 
 class RAGConfig(BaseModel):
     """全文理解与 RAG 配置。"""
-    backend: str = "legacy_chroma"       # legacy_chroma / llamaindex_chroma / qdrant
+    backend: str = "legacy_chroma"       # legacy_chroma / llamaindex_chroma / sqlite_fts / qdrant
     graph_backend: str = "disabled"      # disabled / llamaindex_neo4j
     candidate_pool: int = 48             # 向量检索后进入重排的最大候选数
     final_evidence: int = 8              # 全文问答默认证据数

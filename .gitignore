@@ -20,6 +20,7 @@ env/
 
 # 应用数据
 data/knowledge_bases/
+data/knowledge_bases_fts/
 
 # 日志
 logs/
