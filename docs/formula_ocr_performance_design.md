@@ -102,3 +102,25 @@ PDF 打开
 2. 增加 `tools/formula_ocr_benchmark.py`，从 Attention/Napkin 抽样裁剪公式图，输出冷启动、批量耗时、缓存命中和样例结果。
 3. 基于基准结果优化 Pix2Text 管线：批内 hash 去重、裁剪参数、后台 batch budget。
 4. 若 Pix2Text 准确率仍达不到门禁，再评估轻量 ONNX 后端或 Paddle 独立 worker；默认程序仍保持轻量。
+
+## 当前基准
+
+命令：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmark.py --case attention --max-pages 6 --sample-limit 4 --output test_artifacts\formula_ocr_benchmark_attention.json
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmark.py --case napkin --start-page 60 --max-pages 20 --sample-limit 2 --output test_artifacts\formula_ocr_benchmark_napkin_p60.json
+```
+
+结果：
+
+- Attention：解析 0.538s，裁剪 0.105s，Pix2Text 可用性/冷加载 102.378s，4 个公式 OCR 91.690s，平均 22.922s/公式，临时缓存命中 0.001s。
+- Napkin page 60-79：解析 0.258s，裁剪 0.214s，冷加载 21.561s，2 个样本 OCR 13.946s，平均 6.973s/公式，临时缓存命中约 0ms。
+- 两份样本都出现正文被公式块误判的问题，导致 MFR 输出大量逐字母 `\mathrm{...}`，说明准确率瓶颈不仅是模型，也包括候选过滤和裁剪范围。
+
+结论：
+
+- 当前 Pix2Text MFR 不能进入同步交互路径。
+- 解析/裁剪不是主要性能瓶颈；MFR 模型加载与推理是主要瓶颈。
+- 缓存命中几乎零成本，因此导入即排队、后台小批、二次打开复用缓存是正确方向。
+- 下一步应先优化公式候选过滤，避免把长正文段落送进 MFR；随后再做批内 hash 去重和更小裁剪框。
