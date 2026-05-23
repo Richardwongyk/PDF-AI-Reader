@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ class PdfCase:
     expected_min_pages: int
     scroll_steps: int
     jump_pages: list[int]
+    performance_budget: dict[str, float]
 
 
 @dataclass
@@ -56,6 +58,8 @@ class CaseResult:
     screenshots: list[str]
     actions: list[dict[str, Any]]
     log_summary: dict[str, Any]
+    performance: dict[str, Any]
+    image_metrics: dict[str, Any]
     ok: bool
     error: str = ""
 
@@ -70,6 +74,12 @@ def _cases() -> list[PdfCase]:
             expected_min_pages=10,
             scroll_steps=10,
             jump_pages=[0, 2, 8, 14],
+            performance_budget={
+                "max_zoom_complete_ms": 250.0,
+                "max_render_ms": 150.0,
+                "max_visible_update_ms": 350.0,
+                "min_zoom_complete_count": 4.0,
+            },
         ),
         PdfCase(
             name="napkin",
@@ -78,6 +88,12 @@ def _cases() -> list[PdfCase]:
             expected_min_pages=100,
             scroll_steps=28,
             jump_pages=[0, 10, 50, 120, 250],
+            performance_budget={
+                "max_zoom_complete_ms": 450.0,
+                "max_render_ms": 250.0,
+                "max_visible_update_ms": 600.0,
+                "min_zoom_complete_count": 4.0,
+            },
         ),
     ]
 
@@ -214,6 +230,133 @@ def _summarize_log() -> dict[str, Any]:
         "levels": levels,
         "counts": counts,
         "tail": _tail_log(80),
+    }
+
+
+def _percentile(values: Sequence[float], ratio: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    index = (len(ordered) - 1) * ratio
+    lo = int(index)
+    hi = min(lo + 1, len(ordered) - 1)
+    weight = index - lo
+    return ordered[lo] * (1.0 - weight) + ordered[hi] * weight
+
+
+def _series_summary(values: Sequence[float]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0, "max": 0.0, "p95": 0.0, "avg": 0.0}
+    return {
+        "count": len(values),
+        "max": round(max(values), 1),
+        "p95": round(_percentile(values, 0.95), 1),
+        "avg": round(sum(values) / len(values), 1),
+    }
+
+
+def _summarize_performance(case: PdfCase) -> dict[str, Any]:
+    lines = _tail_log(4000)
+    zoom_complete_ms: list[float] = []
+    render_ms: list[float] = []
+    visible_update_ms: list[float] = []
+    stale_render_drops = 0
+
+    for line in lines:
+        if "丢弃过期" in line:
+            stale_render_drops += 1
+        if match := re.search(r"缩放完成 \(([\d.]+)ms", line):
+            zoom_complete_ms.append(float(match.group(1)))
+        if match := re.search(r"切片\+绘制 \(([\d.]+)ms\)", line):
+            render_ms.append(float(match.group(1)))
+        if match := re.search(r"_update_visible_pages 耗时 ([\d.]+)ms", line):
+            visible_update_ms.append(float(match.group(1)))
+
+    budget = case.performance_budget
+    violations: list[str] = []
+
+    def check_max(name: str, values: Sequence[float], budget_key: str) -> None:
+        if not values:
+            violations.append(f"{name}: no samples")
+            return
+        limit = budget.get(budget_key)
+        if limit is not None and max(values) > limit:
+            violations.append(f"{name}: max {max(values):.1f}ms > {limit:.1f}ms")
+
+    check_max("zoom_complete_ms", zoom_complete_ms, "max_zoom_complete_ms")
+    check_max("render_ms", render_ms, "max_render_ms")
+    check_max("visible_update_ms", visible_update_ms, "max_visible_update_ms")
+    min_zoom = int(budget.get("min_zoom_complete_count", 0))
+    if len(zoom_complete_ms) < min_zoom:
+        violations.append(f"zoom_complete_count: {len(zoom_complete_ms)} < {min_zoom}")
+    if len(render_ms) < max(1, len(zoom_complete_ms)):
+        violations.append(f"render_count: {len(render_ms)} < zoom_complete_count {len(zoom_complete_ms)}")
+
+    return {
+        "budget": budget,
+        "zoom_complete_ms": _series_summary(zoom_complete_ms),
+        "render_ms": _series_summary(render_ms),
+        "visible_update_ms": _series_summary(visible_update_ms),
+        "stale_render_drops": stale_render_drops,
+        "violations": violations,
+        "within_budget": not violations,
+    }
+
+
+def _summarize_image_metrics(screenshots: list[str]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    violations: list[str] = []
+    if not screenshots:
+        return {"screenshots": metrics, "violations": ["no screenshots"], "within_budget": False}
+
+    try:
+        from PIL import Image, ImageFilter, ImageStat
+    except Exception as exc:
+        return {
+            "screenshots": metrics,
+            "violations": [f"Pillow unavailable: {exc}"],
+            "within_budget": False,
+        }
+
+    for relative in screenshots:
+        path = ROOT / relative
+        try:
+            with Image.open(path) as img:
+                gray = img.convert("L")
+                gray.thumbnail((640, 640))
+                pixels = list(gray.getdata())
+                total = max(1, len(pixels))
+                nonwhite_ratio = sum(1 for pixel in pixels if pixel < 245) / total
+                stat = ImageStat.Stat(gray)
+                edges = gray.filter(ImageFilter.FIND_EDGES)
+                edge_mean = ImageStat.Stat(edges).mean[0]
+                item = {
+                    "width": img.width,
+                    "height": img.height,
+                    "nonwhite_ratio": round(nonwhite_ratio, 4),
+                    "edge_mean": round(edge_mean, 2),
+                    "variance": round(stat.var[0], 1),
+                }
+        except Exception as exc:
+            item = {"error": repr(exc)}
+            violations.append(f"{relative}: unreadable screenshot")
+
+        metrics[relative] = item
+        if "error" in item:
+            continue
+        if item["nonwhite_ratio"] < 0.05:
+            violations.append(f"{relative}: likely blank")
+        if item["edge_mean"] < 2.0:
+            violations.append(f"{relative}: low edge detail")
+        if item["variance"] < 40.0:
+            violations.append(f"{relative}: low luminance variance")
+
+    return {
+        "screenshots": metrics,
+        "violations": violations,
+        "within_budget": not violations,
     }
 
 
@@ -473,6 +616,8 @@ def _drive_case(case: PdfCase) -> CaseResult:
         screenshots.append(_screenshot(case_dir, "09_final_scroll"))
 
         log_summary = _summarize_log()
+        performance = _summarize_performance(case)
+        image_metrics = _summarize_image_metrics(screenshots)
         dock_action = next(
             (item for item in actions if item.get("name") == "ask_dock_question"),
             {},
@@ -486,6 +631,8 @@ def _drive_case(case: PdfCase) -> CaseResult:
             and int(dock_action.get("dock_evidence_count", 0)) > 0
             and int(dock_action.get("dock_answer_chars", 0)) > 0
             and int(dock_action.get("dock_followup_count", 0)) > 0
+            and performance["within_budget"]
+            and image_metrics["within_budget"]
         )
         if case.expected_min_pages > 0:
             title = window.window_text()
@@ -500,6 +647,8 @@ def _drive_case(case: PdfCase) -> CaseResult:
             screenshots=screenshots,
             actions=actions,
             log_summary={**log_summary, "events": _read_events()[-80:]},
+            performance=performance,
+            image_metrics=image_metrics,
             ok=ok,
         )
     except Exception as exc:
@@ -518,6 +667,8 @@ def _drive_case(case: PdfCase) -> CaseResult:
             screenshots=screenshots,
             actions=actions,
             log_summary={**_summarize_log(), "events": _read_events()[-80:]},
+            performance=_summarize_performance(case),
+            image_metrics=_summarize_image_metrics(screenshots),
             ok=False,
             error=repr(exc),
         )

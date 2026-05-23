@@ -379,9 +379,9 @@ class HybridModelRouter:
             TaskType.FOLLOWUP_QUESTIONS: self._config.routing.qa,
         }
         strategy = strategy_map.get(task, "local_first")
-        preferred_cloud = self._reasoning if task in {
-            TaskType.QA, TaskType.SUMMARIZATION, TaskType.FOLLOWUP_QUESTIONS
-        } else self._cloud
+        reasoning_tasks = {TaskType.QA, TaskType.SUMMARIZATION}
+        preferred_cloud = self._reasoning if task in reasoning_tasks else self._cloud
+        secondary_cloud = self._cloud if preferred_cloud is self._reasoning else self._reasoning
 
         if strategy == "local_only":
             if self._available(self._local):
@@ -395,8 +395,8 @@ class HybridModelRouter:
         if strategy == "cloud_only":
             if self._available(preferred_cloud):
                 return preferred_cloud
-            if preferred_cloud is not self._cloud and self._available(self._cloud):
-                return self._cloud
+            if self._available(secondary_cloud):
+                return secondary_cloud  # type: ignore[return-value]
             import logging
             if self._available(self._fallback):
                 logging.getLogger("HybridModelRouter").info(
@@ -413,12 +413,12 @@ class HybridModelRouter:
             return self._local
         if self._available(preferred_cloud):
             import logging
-            logging.getLogger("HybridModelRouter").warning(
+            logging.getLogger("HybridModelRouter").info(
                 "本地模型不可用，回退到云端: task=%s", task.value
             )
             return preferred_cloud
-        if preferred_cloud is not self._cloud and self._available(self._cloud):
-            return self._cloud
+        if self._available(secondary_cloud):
+            return secondary_cloud  # type: ignore[return-value]
         if self._available(self._fallback):
             return self._fallback
         import logging
@@ -773,16 +773,49 @@ class QAService:
             {"role": "user", "content": f"问题: {question}\n回答: {answer}"},
         ]
         try:
-            import json
-            raw = client.generate(messages, temperature=0.7, max_tokens=1024)
-            # 尝试提取 JSON 数组
-            start = raw.find("[")
-            end = raw.rfind("]") + 1
-            if start >= 0 and end > start:
-                return json.loads(raw[start:end])
+            raw = client.generate(messages, temperature=0.7, max_tokens=512)
+            return self._parse_followup_questions(raw)
         except Exception:
             pass
         return []
+
+    @staticmethod
+    def _parse_followup_questions(raw: str) -> list[str]:
+        """Parse strict JSON first, then tolerate numbered model output."""
+        import json
+        import re
+
+        text = (raw or "").strip()
+        if not text:
+            return []
+
+        def clean(items: list[Any]) -> list[str]:
+            questions: list[str] = []
+            for item in items:
+                if not isinstance(item, str):
+                    continue
+                value = re.sub(r"\s+", " ", item).strip()
+                value = re.sub(r"^[-*•\d.、)）\s]+", "", value).strip("\"' ")
+                if value and value not in questions:
+                    questions.append(value[:160])
+                if len(questions) >= 3:
+                    break
+            return questions
+
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(text[start:end])
+                if isinstance(parsed, list):
+                    questions = clean(parsed)
+                    if questions:
+                        return questions
+            except json.JSONDecodeError:
+                pass
+
+        lines = [line for line in text.splitlines() if line.strip()]
+        return clean(lines)
 
     def _build_qa_messages(
         self,

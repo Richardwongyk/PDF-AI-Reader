@@ -148,6 +148,20 @@ def test_router_uses_reasoning_client_for_full_document_tasks() -> None:
     assert router.route(TaskType.TRANSLATION).model_name == "translation"
 
 
+def test_router_keeps_followups_on_lightweight_cloud_model() -> None:
+    cfg = AppConfig()
+    cfg.routing.qa = "cloud_only"
+    router = HybridModelRouter(
+        None,
+        _RouterClient("translation"),
+        _RouterClient("fallback"),
+        cfg,
+        reasoning_client=_RouterClient("reasoning"),
+    )
+
+    assert router.route(TaskType.FOLLOWUP_QUESTIONS).model_name == "translation"
+
+
 def test_qa_without_context_does_not_invite_free_answering() -> None:
     cfg = AppConfig()
     router = HybridModelRouter(None, None, MockLLMClient(), cfg)
@@ -186,3 +200,15 @@ def test_mock_qa_generates_followup_questions() -> None:
 
     assert len(questions) == 3
     assert all(question.endswith("？") for question in questions)
+
+
+def test_followup_parser_tolerates_numbered_model_output() -> None:
+    questions = QAService._parse_followup_questions(
+        "1. 注意力机制为何能并行？\n2. 位置编码起什么作用？\n3. 多头注意力的优势是什么？"
+    )
+
+    assert questions == [
+        "注意力机制为何能并行？",
+        "位置编码起什么作用？",
+        "多头注意力的优势是什么？",
+    ]
