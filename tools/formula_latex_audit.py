@@ -95,6 +95,7 @@ class FormulaReport:
     sample_source_unmatched: list[dict[str, Any]]
     sample_pdf_low_similarity: list[dict[str, Any]]
     sample_needs_ocr_blocks: list[dict[str, Any]]
+    born_digital_diagnostics: dict[str, Any]
     quality_gate: dict[str, Any]
 
 
@@ -491,6 +492,7 @@ def _audit_case(
         b for b in formula_blocks
         if b.metadata.get("needs_ocr")
     ]
+    born_digital_diagnostics = _born_digital_diagnostics(formula_blocks)
     pdf_commands = _command_counts([b.content for b in formula_blocks])
     pdf_formula_texts = [b.content for b in formula_blocks]
     similarity_matches, low_similarity_pdf, similarity_metrics = _best_formula_matches(
@@ -567,6 +569,7 @@ def _audit_case(
             }
             for b in needs_ocr[:10]
         ],
+        born_digital_diagnostics=born_digital_diagnostics,
         quality_gate={
             "enabled": any((
                 min_command_recall > 0,
@@ -581,6 +584,35 @@ def _audit_case(
             "passed": not violations,
         },
     )
+
+
+def _born_digital_diagnostics(formula_blocks: list[Any]) -> dict[str, Any]:
+    diagnostics: list[dict[str, Any]] = []
+    for block in formula_blocks:
+        metadata = getattr(block, "metadata", {}) or {}
+        diagnostic = metadata.get("born_digital_diagnostics")
+        if isinstance(diagnostic, dict):
+            diagnostics.append({
+                "id": getattr(block, "id", ""),
+                "page": int(getattr(block, "page_num", 0)) + 1,
+                **diagnostic,
+            })
+    classifications = Counter(str(item.get("classification", "")) for item in diagnostics)
+    risks: Counter[str] = Counter()
+    for item in diagnostics:
+        for risk in item.get("risks", []) or []:
+            risks[str(risk)] += 1
+    review = [
+        item for item in diagnostics
+        if item.get("classification") != "formula_candidate"
+    ]
+    return {
+        "available": bool(diagnostics),
+        "count": len(diagnostics),
+        "classifications": dict(classifications),
+        "risks": dict(risks),
+        "sample_review": review[:10],
+    }
 
 
 def _parse_page_list(value: str) -> list[int] | None:

@@ -2,6 +2,11 @@
 
 ## 当前结论
 
+- 最新实现新增 display region 诊断层：对每个 born-digital 候选公式输出分类、风险、math density、operator/digit/vector/line 统计。该层只做审计和门禁，不生成 LaTeX，不把低置信结果写入默认路径。
+- Attention 全量诊断审计约 2.254s：11 个候选，10 个 `formula_candidate`，1 个 `review`，主要风险是 `prose_like_region`。
+- Napkin 前 120 页诊断审计约 21.002s：116 个候选，101 个 `formula_candidate`，15 个 `review`，风险包括 `table_or_text_like_region`、`tabular_alignment`、`prose_like_region`。
+- 该结果说明当前瓶颈不是“是否找到数学区域”，而是二维布局树、表格/列表误吸、字体编码到数学语义的映射，以及源码页级对齐。
+
 我们先把目标收窄到 **born-digital PDF**：PDF 本身有文本层、字体、glyph 坐标和矢量绘制信息时，公式必须优先走文档结构解析，不能走 OCR。OCR 只处理图片公式、扫描页、无文本层区域、乱码/缺失映射区域。
 
 ## 设计哲学与验收边界

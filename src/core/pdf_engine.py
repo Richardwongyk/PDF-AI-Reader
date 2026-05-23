@@ -317,7 +317,15 @@ class DocumentChunker:
             )
 
             page_facts = MuPDFBornDigitalExtractor().extract_page(page, page_num)
-            regions = BornDigitalMathAuditor().display_formula_regions(page_facts)
+            auditor = BornDigitalMathAuditor()
+            regions = auditor.display_formula_regions(page_facts)
+            try:
+                diagnostics = {
+                    diagnostic.bbox: diagnostic
+                    for diagnostic in auditor.region_diagnostics(page_facts, regions)
+                }
+            except Exception:
+                diagnostics = {}
             reconstructor = PdfFormulaSemanticReconstructor() if self._enable_born_digital_semantics else None
         except Exception as exc:
             import logging
@@ -333,6 +341,7 @@ class DocumentChunker:
             if self._overlaps_existing_formula(region.bbox, existing_formulas):
                 continue
             self._mark_shadowed_blocks(region.bbox, merged)
+            diagnostic = diagnostics.get(region.bbox)
             semantic = reconstructor.reconstruct(page_facts, region) if reconstructor is not None else None
             content = semantic.latex if semantic is not None and semantic.latex else region.text
             evidence = list(region.evidence)
@@ -356,6 +365,9 @@ class DocumentChunker:
                     "line_count": region.line_count,
                     "vector_count": region.vector_count,
                     "semantic_recovery": "layout_v1" if semantic is not None else "pending",
+                    "born_digital_diagnostics": (
+                        diagnostic.to_json() if diagnostic is not None else {}
+                    ),
                 },
             ))
         return sorted(merged, key=lambda block: (block.bbox[1], block.bbox[0]))

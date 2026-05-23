@@ -178,6 +178,28 @@ class FormulaSemanticResult:
 
 
 @dataclass(frozen=True)
+class FormulaRegionDiagnostics:
+    page_num: int
+    bbox: tuple[float, float, float, float]
+    text: str
+    glyph_count: int
+    math_glyph_count: int
+    math_density: float
+    roman_letter_count: int
+    operator_count: int
+    digit_count: int
+    vector_count: int
+    line_count: int
+    line_alignment_spread: float
+    classification: str
+    risks: tuple[str, ...]
+    evidence: tuple[str, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class FormulaSegmentationConfig:
     """Page-relative knobs for born-digital display formula segmentation."""
 
@@ -368,6 +390,16 @@ class BornDigitalMathAuditor:
 
         segmenter = DisplayFormulaSegmenter(self.segmentation)
         return segmenter.segment(page)
+
+    def region_diagnostics(
+        self,
+        page: BornDigitalPage,
+        regions: list[DisplayFormulaRegion] | None = None,
+    ) -> list[FormulaRegionDiagnostics]:
+        """Report quality signals for candidate display formula regions."""
+
+        targets = regions if regions is not None else self.display_formula_regions(page)
+        return [_region_diagnostics(page, region) for region in targets]
 
 
 class DisplayFormulaSegmenter:
@@ -941,6 +973,143 @@ def _dedupe_display_regions(regions: list[DisplayFormulaRegion]) -> list[Display
             continue
         result.append(region)
     return sorted(result, key=lambda item: (item.bbox[1], item.bbox[0]))
+
+
+def _region_diagnostics(
+    page: BornDigitalPage,
+    region: DisplayFormulaRegion,
+) -> FormulaRegionDiagnostics:
+    expanded = _expand_bbox(region.bbox, 1.0)
+    lines: list[PdfLine] = []
+    glyphs: list[PdfGlyph] = []
+    for pdf_region in page.regions:
+        if pdf_region.kind != "text":
+            continue
+        for line in pdf_region.lines:
+            if not _bbox_intersects(line.bbox, expanded):
+                continue
+            line_glyphs = [
+                glyph
+                for span in line.spans
+                for glyph in span.glyphs
+                if glyph.text and not glyph.text.isspace() and _bbox_intersects(glyph.bbox, expanded)
+            ]
+            if not line_glyphs:
+                continue
+            lines.append(line)
+            glyphs.extend(line_glyphs)
+    vectors = [
+        item for item in page.regions
+        if item.kind == "vector" and _bbox_intersects(item.bbox, expanded)
+    ]
+    glyph_count = len(glyphs)
+    math_glyph_count = sum(1 for glyph in glyphs if _glyph_has_math_evidence(glyph))
+    roman_letter_count = sum(1 for glyph in glyphs if glyph.text.isalpha() and _is_latin_text_font(glyph.font))
+    operator_count = sum(1 for glyph in glyphs if _is_math_symbol(glyph.text) or glyph.text in "=+-*/^_()[]{}|<>√∈∑∫")
+    digit_count = sum(1 for glyph in glyphs if glyph.text.isdigit())
+    math_density = math_glyph_count / glyph_count if glyph_count else 0.0
+    line_alignment_spread = _line_alignment_spread(lines)
+
+    risks: set[str] = set()
+    evidence: set[str] = set(region.evidence)
+    if not glyphs:
+        risks.add("empty_region")
+    if any(glyph.is_unknown for glyph in glyphs):
+        risks.add("unknown_glyph")
+    if not _glyphs_look_like_formula_expression(glyphs):
+        risks.add("table_or_text_like_region")
+    if _looks_like_prose_region(glyphs, math_density):
+        risks.add("prose_like_region")
+    if _looks_like_tabular_region(lines, line_alignment_spread):
+        risks.add("tabular_alignment")
+    if region.vector_count or vectors:
+        evidence.add("vector_structure")
+    if operator_count:
+        evidence.add("operator_glyph")
+    if digit_count:
+        evidence.add("numeric_glyph")
+    classification = _diagnostic_classification(
+        risks=risks,
+        math_density=math_density,
+        operator_count=operator_count,
+        vectors=vectors,
+        line_count=len(lines),
+    )
+    return FormulaRegionDiagnostics(
+        page_num=region.page_num,
+        bbox=region.bbox,
+        text=region.text,
+        glyph_count=glyph_count,
+        math_glyph_count=math_glyph_count,
+        math_density=round(math_density, 3),
+        roman_letter_count=roman_letter_count,
+        operator_count=operator_count,
+        digit_count=digit_count,
+        vector_count=len(vectors),
+        line_count=len(lines),
+        line_alignment_spread=round(line_alignment_spread, 3),
+        classification=classification,
+        risks=tuple(sorted(risks)),
+        evidence=tuple(sorted(evidence)),
+    )
+
+
+def _line_alignment_spread(lines: list[PdfLine]) -> float:
+    if len(lines) <= 1:
+        return 0.0
+    lefts = [line.bbox[0] for line in lines]
+    centers = [(line.bbox[0] + line.bbox[2]) / 2.0 for line in lines]
+    return min(max(lefts) - min(lefts), max(centers) - min(centers))
+
+
+def _looks_like_prose_region(glyphs: list[PdfGlyph], math_density: float) -> bool:
+    if not glyphs:
+        return False
+    text = "".join(glyph.text for glyph in sorted(glyphs, key=lambda item: (item.bbox[1], item.bbox[0])))
+    letters = [glyph for glyph in glyphs if glyph.text.isalpha()]
+    roman_letters = [glyph for glyph in letters if _is_latin_text_font(glyph.font)]
+    spaces = text.count(" ")
+    punctuation = sum(1 for ch in text if ch in ",.;:")
+    if len(roman_letters) >= 18 and math_density < 0.45 and spaces >= 2:
+        return True
+    return len(roman_letters) >= 24 and punctuation >= 2 and math_density < 0.65
+
+
+def _looks_like_tabular_region(lines: list[PdfLine], line_alignment_spread: float) -> bool:
+    if len(lines) < 3:
+        return False
+    widths = [_bbox_width(line.bbox) for line in lines]
+    median_width = _median_positive(widths, 0.0)
+    if median_width <= 0:
+        return False
+    short_rows = sum(1 for width in widths if width <= median_width * 1.25)
+    return short_rows >= 3 and line_alignment_spread <= median_width * 0.20
+
+
+def _diagnostic_classification(
+    risks: set[str],
+    math_density: float,
+    operator_count: int,
+    vectors: list[PdfRegion],
+    line_count: int,
+) -> str:
+    if "empty_region" in risks:
+        return "invalid"
+    if "prose_like_region" in risks or "tabular_alignment" in risks:
+        return "review"
+    if "table_or_text_like_region" in risks and math_density < 0.55 and not vectors:
+        return "review"
+    if math_density >= 0.55 or vectors or operator_count >= 2 or line_count > 1:
+        return "formula_candidate"
+    return "review"
+
+
+def _is_latin_text_font(font: str) -> bool:
+    normalized = font.lower()
+    math_markers = ("math", "cmmi", "cmsy", "cmex", "stix", "xits", "euler")
+    if any(marker in normalized for marker in math_markers):
+        return False
+    return True
 
 
 def _estimate_page_layout(

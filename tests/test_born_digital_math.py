@@ -408,6 +408,59 @@ def test_formula_semantic_reconstructor_recovers_fraction_sqrt_and_scripts() -> 
     assert result.warnings == ()
 
 
+def test_region_diagnostics_marks_structured_formula_candidate() -> None:
+    page = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("Q", "CMMI10", 10, (286, 466, 294, 476)),
+                PdfGlyph("K", "CMMI10", 10, (294, 466, 302, 476)),
+                PdfGlyph("T", "CMMI7", 7, (303, 465, 308, 472)),
+            ]),
+            _text_region([
+                PdfGlyph("√", "CMSY10", 10, (286, 473, 294, 483)),
+                PdfGlyph("d", "CMMI10", 10, (296, 480, 304, 490)),
+                PdfGlyph("k", "CMMI7", 7, (304, 484, 309, 491)),
+            ]),
+            PdfRegion(page_num=0, kind="vector", bbox=(286, 478, 310, 479)),
+        ),
+    )
+    auditor = BornDigitalMathAuditor(
+        segmentation=FormulaSegmentationConfig(min_confidence=0.45),
+    )
+    region = auditor.display_formula_regions(page)[0]
+
+    diagnostic = auditor.region_diagnostics(page, [region])[0]
+
+    assert diagnostic.classification == "formula_candidate"
+    assert "vector_structure" in diagnostic.evidence
+    assert "table_or_text_like_region" not in diagnostic.risks
+
+
+def test_region_diagnostics_flags_tabular_text_like_region() -> None:
+    page = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([PdfGlyph("A", "CMMI10", 10, (250, 450, 258, 460)), PdfGlyph("1", "CMR10", 10, (262, 450, 268, 460))]),
+            _text_region([PdfGlyph("B", "CMMI10", 10, (250, 466, 258, 476)), PdfGlyph("2", "CMR10", 10, (262, 466, 268, 476))]),
+            _text_region([PdfGlyph("C", "CMMI10", 10, (250, 482, 258, 492)), PdfGlyph("3", "CMR10", 10, (262, 482, 268, 492))]),
+        ),
+    )
+    auditor = BornDigitalMathAuditor(
+        segmentation=FormulaSegmentationConfig(min_confidence=0.35),
+    )
+    region = auditor.display_formula_regions(page)[0]
+
+    diagnostic = auditor.region_diagnostics(page, [region])[0]
+
+    assert diagnostic.classification == "review"
+    assert "tabular_alignment" in diagnostic.risks
+
+
 def _text_region(glyphs: list[PdfGlyph]) -> PdfRegion:
     bbox = (
         min(glyph.bbox[0] for glyph in glyphs),

@@ -182,6 +182,8 @@
 - `PdfFormulaSemanticReconstructor` v1 已可选恢复上下标、局部分式线、根号和 Unicode 数学符号；Attention 公式 1 可恢复 `\frac{Q K^{T}}{\sqrt{d_{k}}}` 结构。
 - Attention 全量 semantic v1：约 2.276s，`common_source_command_recall=0.353`，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。
 - Napkin 前 120 页 semantic v1：约 21.017s，`common_source_command_recall=0.019`，`source_weak_match_rate=0.035`，`low_similarity_pdf_rate=0.319`。
+- 新增 born-digital display region 诊断层：记录 `formula_candidate/review` 分类、`prose_like_region`、`tabular_alignment`、`table_or_text_like_region` 等风险，不提升置信、不生成 LaTeX，只为默认策略和审计提供可量化过滤依据。
+- 最新诊断审计：Attention 全量约 2.254s，11 个候选中 10 个 `formula_candidate`、1 个 `review`；Napkin 前 120 页约 21.002s，116 个候选中 101 个 `formula_candidate`、15 个 `review`。
 - 下一步必须做 region 级类型判别、表格/列表过滤、矩阵/对齐环境建模和 LaTeX 源码页级对齐；当前可选入口不能默认进入阅读热路径。
 
 ### 全文问答与证据
