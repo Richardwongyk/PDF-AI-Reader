@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 from PySide6.QtCore import QObject, Signal
 
-from src.core.models import AppConfig, ModelConfig, RoutingConfig, UIConfig
+from src.core.models import AppConfig, ModelConfig, RAGConfig, RoutingConfig, UIConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -110,6 +110,7 @@ class ConfigManager(QObject):
         """
         data: dict[str, Any] = {
             "model": config.model.model_dump(),
+            "rag": config.rag.model_dump(),
             "routing": config.routing.model_dump(),
             "ui": config.ui.model_dump(),
             "api_keys": config.api_keys,
@@ -150,6 +151,7 @@ class ConfigManager(QObject):
         # 重新构建 AppConfig
         self._config = AppConfig(
             model=ModelConfig(**full["model"]),
+            rag=RAGConfig(**full.get("rag", {})),
             routing=RoutingConfig(**full["routing"]),
             ui=UIConfig(**full["ui"]),
             api_keys=full.get("api_keys", {}),

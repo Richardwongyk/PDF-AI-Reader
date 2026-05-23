@@ -126,8 +126,20 @@ class ModelConfig(BaseModel):
     """模型配置。"""
     local: str = "qwen3.5:4b"            # 可选本地生成模型（Ollama）
     cloud: str = "deepseek/deepseek-chat" # 云端默认模型
+    cloud_translation: str = "deepseek/deepseek-chat" # 翻译与轻量任务模型
+    cloud_reasoning: str = "deepseek-v4-pro" # 全文问答、结构抽取与图谱模型
     embed_local: str = "bge-m3"          # 可选本地嵌入模型；不可用时使用轻量哈希嵌入
     ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
+
+
+class RAGConfig(BaseModel):
+    """全文理解与 RAG 配置。"""
+    backend: str = "legacy_chroma"       # legacy_chroma / llamaindex_chroma / qdrant
+    graph_backend: str = "disabled"      # disabled / llamaindex_neo4j
+    candidate_pool: int = 48             # 向量检索后进入重排的最大候选数
+    final_evidence: int = 8              # 全文问答默认证据数
+    enable_hybrid_rerank: bool = True    # 向量 + 关键词混合重排
+    enable_graph_index: bool = False     # 是否构建概念/公式/章节知识图谱
 
 
 class RoutingConfig(BaseModel):
@@ -152,6 +164,7 @@ class UIConfig(BaseModel):
 class AppConfig(BaseModel):
     """应用配置总模型。"""
     model: ModelConfig = Field(default_factory=ModelConfig)
+    rag: RAGConfig = Field(default_factory=RAGConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     api_keys: dict[str, str] = Field(default_factory=dict)

@@ -20,6 +20,20 @@ class _NamedClient(MockLLMClient):
         return self._name
 
 
+class _RouterClient(MockLLMClient):
+    def __init__(self, name: str, available: bool = True) -> None:
+        super().__init__()
+        self._name = name
+        self._available = available
+
+    @property
+    def model_name(self) -> str:
+        return self._name
+
+    def check_availability(self) -> bool:
+        return self._available
+
+
 def test_hashing_embedding_is_deterministic_and_query_sensitive() -> None:
     client = HashingEmbeddingClient(dimensions=128)
     a1, a2, b = client.embed_batch([
@@ -64,6 +78,15 @@ def test_knowledge_retrieval_candidate_pool_expands_for_full_document_qa() -> No
     assert KnowledgeEngine._retrieval_candidate_count(100) == 48
 
 
+def test_app_config_exposes_rag_and_reasoning_models() -> None:
+    cfg = AppConfig()
+
+    assert cfg.model.cloud_translation == "deepseek/deepseek-chat"
+    assert cfg.model.cloud_reasoning == "deepseek-v4-pro"
+    assert cfg.rag.backend == "legacy_chroma"
+    assert cfg.rag.candidate_pool == 48
+
+
 def test_router_keeps_local_and_cloud_roles_separate() -> None:
     cfg = AppConfig()
     cfg.routing.translation = "cloud_only"
@@ -84,6 +107,21 @@ def test_router_uses_fallback_only_when_cloud_missing_in_cloud_only_mode() -> No
     router = HybridModelRouter(_UnavailableClient(), None, _NamedClient("fallback"), cfg)
 
     assert router.route(TaskType.TRANSLATION).model_name == "fallback"
+
+
+def test_router_uses_reasoning_client_for_full_document_tasks() -> None:
+    cfg = AppConfig()
+    cfg.routing.qa = "cloud_only"
+    router = HybridModelRouter(
+        None,
+        _RouterClient("translation"),
+        _RouterClient("fallback"),
+        cfg,
+        reasoning_client=_RouterClient("reasoning"),
+    )
+
+    assert router.route(TaskType.QA).model_name == "reasoning"
+    assert router.route(TaskType.TRANSLATION).model_name == "translation"
 
 
 def test_qa_without_context_does_not_invite_free_answering() -> None:

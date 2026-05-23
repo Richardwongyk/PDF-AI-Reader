@@ -1,8 +1,17 @@
 model:
   local: qwen3.5:4b
   cloud: deepseek/deepseek-chat
+  cloud_translation: deepseek/deepseek-chat
+  cloud_reasoning: deepseek-v4-pro
   embed_local: bge-m3
   ollama_host: http://localhost:11434
+rag:
+  backend: legacy_chroma
+  graph_backend: disabled
+  candidate_pool: 48
+  final_evidence: 8
+  enable_hybrid_rerank: true
+  enable_graph_index: false
 routing:
   translation: cloud_only
   qa: cloud_only

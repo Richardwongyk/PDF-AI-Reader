@@ -908,11 +908,11 @@ class MainWindow(QMainWindow):
         layout = QFormLayout(dlg)
 
         provider_box = QComboBox()
-        providers = ["deepseek/deepseek-chat", "openai/gpt-4o", "qwen/qwen-plus",
+        providers = ["deepseek/deepseek-chat", "deepseek-v4-pro", "openai/gpt-4o", "qwen/qwen-plus",
                       "glm-4", "moonshot-v1-8k"]
         provider_box.addItems(providers)
         # 选中当前配置
-        current_cloud = self._config.model.cloud
+        current_cloud = self._config.model.cloud_translation or self._config.model.cloud
         if current_cloud in providers:
             provider_box.setCurrentText(current_cloud)
         layout.addRow("模型:", provider_box)
@@ -938,7 +938,13 @@ class MainWindow(QMainWindow):
                 cm = self._services.get("config_manager")
                 current_cfg = cm.get()
                 current_cfg.api_keys[provider] = api_key
-                cm.update({"model": {"cloud": provider}, "api_keys": {provider: api_key}})
+                cm.update({
+                    "model": {
+                        "cloud": provider,
+                        "cloud_translation": provider,
+                    },
+                    "api_keys": {provider: api_key},
+                })
                 self._status_model_label.setText(f"✅ 云端: {provider}")
                 QMessageBox.information(self, "已保存",
                     f"云端模型 {provider} 已配置。\n请重启应用以初始化云端客户端。")
@@ -957,11 +963,12 @@ class MainWindow(QMainWindow):
     def _model_status_text(self) -> str:
         """状态栏模型说明，明确云端/本地/测试模式边界。"""
         strategy = self._config.routing.translation
-        cloud = self._config.model.cloud
+        cloud = self._config.model.cloud_translation or self._config.model.cloud
+        reasoning = self._config.model.cloud_reasoning
         key = self._services.get("config_manager").get_api_key(cloud)
         has_key = bool(key and key.strip() and "在此填入" not in key)
         if strategy == "cloud_only":
-            return f"云端生成: {cloud}" if has_key else "测试模式: 未配置云端 API"
+            return f"翻译: {cloud} · 全文: {reasoning}" if has_key else "测试模式: 未配置云端 API"
         if strategy == "local_only":
             return f"本地生成: {self._config.model.local}"
         return f"混合路由: 本地优先→{cloud if has_key else 'Mock'}"
@@ -1036,10 +1043,12 @@ class MainWindow(QMainWindow):
     def _check_first_launch(self) -> None:
         """首次启动检查：默认检查云端配置，本地模式才检查 Ollama。"""
         if self._config.routing.translation == "cloud_only" or self._config.routing.qa == "cloud_only":
-            cloud = self._config.model.cloud
+            cloud = self._config.model.cloud_translation or self._config.model.cloud
             key = self._services.get("config_manager").get_api_key(cloud)
             if key and key.strip() and "在此填入" not in key:
-                self._status_model_label.setText(f"✅ 云端生成: {cloud}")
+                self._status_model_label.setText(
+                    f"✅ 翻译: {cloud} · 全文: {self._config.model.cloud_reasoning}"
+                )
                 return
             self._status_model_label.setText("⚠️ 未配置云端 API，当前为测试模式")
             QMessageBox.information(

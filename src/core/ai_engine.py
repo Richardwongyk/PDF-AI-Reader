@@ -319,6 +319,7 @@ class HybridModelRouter:
         cloud_client: BaseLLMClient | None,
         fallback_client: BaseLLMClient | None,
         config: AppConfig,
+        reasoning_client: BaseLLMClient | None = None,
     ) -> None:
         """初始化路由器。
 
@@ -330,6 +331,7 @@ class HybridModelRouter:
         """
         self._local = local_client
         self._cloud = cloud_client
+        self._reasoning = reasoning_client
         self._fallback = fallback_client
         self._config = config
 
@@ -377,6 +379,9 @@ class HybridModelRouter:
             TaskType.FOLLOWUP_QUESTIONS: self._config.routing.qa,
         }
         strategy = strategy_map.get(task, "local_first")
+        preferred_cloud = self._reasoning if task in {
+            TaskType.QA, TaskType.SUMMARIZATION, TaskType.FOLLOWUP_QUESTIONS
+        } else self._cloud
 
         if strategy == "local_only":
             if self._available(self._local):
@@ -388,7 +393,9 @@ class HybridModelRouter:
             raise RuntimeError("本地模型不可用。请启动 Ollama 服务后再试。")
 
         if strategy == "cloud_only":
-            if self._available(self._cloud):
+            if self._available(preferred_cloud):
+                return preferred_cloud
+            if preferred_cloud is not self._cloud and self._available(self._cloud):
                 return self._cloud
             import logging
             if self._available(self._fallback):
@@ -404,11 +411,13 @@ class HybridModelRouter:
         # local_first（默认）：优先本地，回退云端
         if self._available(self._local):
             return self._local
-        if self._available(self._cloud):
+        if self._available(preferred_cloud):
             import logging
             logging.getLogger("HybridModelRouter").warning(
                 "本地模型不可用，回退到云端: task=%s", task.value
             )
+            return preferred_cloud
+        if preferred_cloud is not self._cloud and self._available(self._cloud):
             return self._cloud
         if self._available(self._fallback):
             return self._fallback

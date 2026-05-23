@@ -142,6 +142,7 @@ class KnowledgeEngine(BaseService):
         self,
         embed_service: EmbeddingService,
         chroma_repo: ChromaRepo,
+        config: AppConfig | None = None,
         parent: QObject | None = None,
     ) -> None:
         """初始化知识库引擎。
@@ -154,6 +155,7 @@ class KnowledgeEngine(BaseService):
         super().__init__(parent)
         self._embed = embed_service
         self._repo = chroma_repo
+        self._config = config or AppConfig()
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(2)  # 最多 2 个并行嵌入线程
         self._db_lock = QReadWriteLock()  # 防止 ChromaDB SQLite 并发读写锁死
@@ -219,11 +221,13 @@ class KnowledgeEngine(BaseService):
             return []
 
         query_vector = self._embed.embed_single(query)
-        fetch_k = self._retrieval_candidate_count(top_k)
+        fetch_k = self._configured_candidate_count(top_k)
         with QReadLocker(self._db_lock):
             candidates = self._repo.query_relevant(
                 doc_hash, query_vector, top_k=fetch_k, exclude_ids=exclude_ids
             )
+        if not self._config.rag.enable_hybrid_rerank:
+            return candidates[:top_k]
         return self._rerank_retrieval_results(query, candidates, top_k=top_k)
 
     @classmethod
@@ -232,6 +236,13 @@ class KnowledgeEngine(BaseService):
         if top_k <= 0:
             return 0
         return min(cls._MAX_RETRIEVAL_CANDIDATES, max(top_k * 4, top_k + 8))
+
+    def _configured_candidate_count(self, top_k: int) -> int:
+        """按配置计算候选池大小，并保留安全上限。"""
+        if top_k <= 0:
+            return 0
+        configured = max(int(self._config.rag.candidate_pool), top_k)
+        return min(configured, max(self._retrieval_candidate_count(top_k), top_k))
 
     @classmethod
     def _rerank_retrieval_results(

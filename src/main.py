@@ -148,6 +148,7 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         return KnowledgeEngine(
             cast(EmbeddingService, container.get("embedding_service")),
             cast(ChromaRepo, container.get("chroma_repo")),
+            config,
         )
 
     container.register_singleton("knowledge_engine", _build_knowledge_engine)
@@ -177,18 +178,33 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
                 logging.info("本地生成模型初始化失败，将按配置使用云端或降级客户端", exc_info=True)
 
         cloud_client: BaseLLMClient | None = None
-        cloud_provider = config.model.cloud
-        cloud_api_key = config_manager.get_api_key(cloud_provider)
+        reasoning_client: BaseLLMClient | None = None
+        cloud_provider = config.model.cloud_translation or config.model.cloud
+        reasoning_provider = config.model.cloud_reasoning or cloud_provider
+        cloud_api_key = config_manager.get_api_key(cloud_provider) or config_manager.get_api_key(config.model.cloud)
+        reasoning_api_key = config_manager.get_api_key(reasoning_provider) or cloud_api_key
         if test_mode:
             logging.info("测试模式：生成模型强制使用 Mock 客户端，不调用云端 API")
         elif _is_configured_api_key(cloud_api_key):
-            logging.info("使用云端模型: %s", cloud_provider)
+            logging.info("使用云端翻译模型: %s", cloud_provider)
             cloud_client = LiteLLMClient(model=cloud_provider, api_key=cloud_api_key or "")
         else:
             logging.info("未配置云端 API Key，真实生成将降级为模拟客户端（测试模式）")
+        if not test_mode and _is_configured_api_key(reasoning_api_key):
+            logging.info("使用云端全文理解模型: %s", reasoning_provider)
+            reasoning_client = LiteLLMClient(
+                model=reasoning_provider,
+                api_key=reasoning_api_key or "",
+            )
 
         fallback_client: BaseLLMClient = MockLLMClient()
-        router = HybridModelRouter(local_client, cloud_client, fallback_client, config)
+        router = HybridModelRouter(
+            local_client,
+            cloud_client,
+            fallback_client,
+            config,
+            reasoning_client=reasoning_client,
+        )
 
         translation_service = TranslationService(
             router,
