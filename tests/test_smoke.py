@@ -60,6 +60,33 @@ def test_build_services_smoke() -> None:
     assert "service smoke ok" in result.stdout
 
 
+def test_ollama_reachability_negative_result_is_fast_and_cached() -> None:
+    result = _run_python(
+        """
+        import time
+        import src.main as main
+
+        main._OLLAMA_REACHABILITY_CACHE.clear()
+        host = "http://127.0.0.1:9"
+
+        start = time.perf_counter()
+        first = main._ollama_host_reachable(host)
+        first_elapsed = time.perf_counter() - start
+
+        start = time.perf_counter()
+        second = main._ollama_host_reachable(host)
+        second_elapsed = time.perf_counter() - start
+
+        assert first is False
+        assert second is False
+        assert first_elapsed < 1.0
+        assert second_elapsed < 0.05
+        print("ollama reachability cache ok")
+        """
+    )
+    assert "ollama reachability cache ok" in result.stdout
+
+
 def test_build_services_uses_fts_for_hash_embedding() -> None:
     result = _run_python(
         """

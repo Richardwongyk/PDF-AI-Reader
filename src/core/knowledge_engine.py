@@ -18,12 +18,12 @@ from src.core.models import (
     KnowledgeStatus,
 )
 from src.core.knowledge_backends import KnowledgeIndexBackend, create_knowledge_backend
-from src.data.chroma_repo import ChromaRepo
 
 # 嵌入客户端接口（避免循环依赖，仅用于类型注解）
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.core.ai_engine import BaseLLMClient
+    from src.data.chroma_repo import ChromaRepo
 
 
 # =============================================================================

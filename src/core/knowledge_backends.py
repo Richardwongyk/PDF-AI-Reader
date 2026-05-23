@@ -10,10 +10,12 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.core.models import DocumentBlock, KnowledgeStatus, document_block_index_text
-from src.data.chroma_repo import ChromaRepo
+
+if TYPE_CHECKING:
+    from src.data.chroma_repo import ChromaRepo
 
 
 ProgressCallback = Callable[[int, int], None]

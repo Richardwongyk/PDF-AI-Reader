@@ -202,6 +202,7 @@ PDF / OCR / MFR
 - 基础索引写入 `index_fingerprint/index_block_count/index_schema`，手动重建时如果当前 `DocumentBlock` 指纹一致则跳过全量 embedding/upsert。
 - 增量公式 OCR 块允许追加到 collection；指纹只判断基础块集合，避免后台公式块导致无变化文档反复全量重建。
 - 默认交互式解析的 MFD 页扫描预算为 0，避免长文档打开后加载重型公式检测模型抢占 UI、翻译和渲染。
+- Ollama 不可达时先做 120ms TCP 快速探测并短期缓存，不再构造 Ollama client/list；FTS fallback 路径不再 import Chroma。当前实测：AI 引擎创建约 0.15s，FTS fallback 知识库引擎约 0.012s。
 - 默认打开文档不阻塞等待 GraphRAG。
 - GraphRAG 默认关闭；开启后只在全量解析完成后启动一个后台批次，批次大小复用 `rag.candidate_pool`，不会阻塞基础知识库构建。
 - 长文档默认先建基础向量/混合索引，图谱抽取排队或手动触发。

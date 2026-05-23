@@ -218,6 +218,7 @@
 - 新增 `sqlite_fts` 轻量全文索引后端，不引入新环境或新模型，作为长文档快速召回基线。
 - 运行时如果实际 embedding 只是 `HashingEmbeddingClient` 兜底，会自动把知识库后端从 `legacy_chroma` 切到 `sqlite_fts`；真实 embedding 可用时仍保留配置后端。
 - `sqlite_fts` fallback 不再初始化 `ChromaRepo`，减少没有真实 embedding 时的知识库启动开销。
+- Ollama 不可达时先做 120ms TCP 快速探测并短期缓存；FTS fallback 路径也不再 import Chroma。当前实测：AI 引擎创建约 0.15s，FTS fallback 知识库引擎约 0.012s。
 
 ### GraphRAG 管线
 

@@ -9,8 +9,11 @@ import logging
 import os
 import sys
 import argparse
+import socket
+import time
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlparse
 
 # 必须在任何 chromadb 导入之前禁用 telemetry，避免 posthog 报错
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -33,6 +36,9 @@ from src.data.config_manager import ConfigManager
 
 
 REQUIRED_PYTHON = (3, 14, 4)
+_OLLAMA_REACHABILITY_CACHE: dict[str, tuple[float, bool]] = {}
+_OLLAMA_REACHABILITY_TTL_SEC = 15.0
+_OLLAMA_PROBE_TIMEOUT_SEC = 0.12
 
 
 def _is_configured_api_key(value: str | None) -> bool:
@@ -44,6 +50,38 @@ def _is_configured_api_key(value: str | None) -> bool:
         return False
     placeholders = ("在此填入", "your_api_key", "your-api-key", "api key")
     return not any(p in stripped.lower() for p in placeholders)
+
+
+def _ollama_host_reachable(host: str) -> bool:
+    """Fast TCP reachability check before constructing Ollama clients."""
+    endpoint = _ollama_endpoint(host)
+    if endpoint is None:
+        return True
+    cache_key = f"{endpoint[0]}:{endpoint[1]}"
+    now = time.monotonic()
+    cached = _OLLAMA_REACHABILITY_CACHE.get(cache_key)
+    if cached and now - cached[0] < _OLLAMA_REACHABILITY_TTL_SEC:
+        return cached[1]
+    try:
+        with socket.create_connection(endpoint, timeout=_OLLAMA_PROBE_TIMEOUT_SEC):
+            reachable = True
+    except OSError:
+        reachable = False
+    _OLLAMA_REACHABILITY_CACHE[cache_key] = (now, reachable)
+    return reachable
+
+
+def _ollama_endpoint(host: str) -> tuple[str, int] | None:
+    parsed = urlparse(str(host or "http://localhost:11434"))
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        return None
+    hostname = parsed.hostname or parsed.path or "localhost"
+    if hostname.lower() == "localhost":
+        hostname = "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 11434)
+    if not hostname:
+        return None
+    return (hostname, int(port))
 
 
 def setup_logging() -> None:
@@ -135,6 +173,9 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         if test_mode:
             logging.info("测试模式：嵌入服务使用确定性哈希嵌入，不探测 Ollama")
             return HashingEmbeddingClient()
+        if not _ollama_host_reachable(config.model.ollama_host):
+            logging.info("Ollama 服务不可达，嵌入服务直接使用确定性哈希嵌入")
+            return HashingEmbeddingClient()
         try:
             client = OllamaClient(
                 model=config.model.embed_local,
@@ -160,7 +201,6 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
     def _build_knowledge_engine():
         from src.core.knowledge_engine import KnowledgeEngine
         from src.core.knowledge_engine import EmbeddingService
-        from src.data.chroma_repo import ChromaRepo
         effective_config = config.model_copy(deep=True)
         embed_client = container.get("embed_client")
         if (
@@ -171,7 +211,7 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
             effective_config.rag.backend = "sqlite_fts"
         chroma_repo = None
         if effective_config.rag.backend in {"legacy_chroma", "llamaindex_chroma"}:
-            chroma_repo = cast(ChromaRepo, container.get("chroma_repo"))
+            chroma_repo = container.get("chroma_repo")
         return KnowledgeEngine(
             cast(EmbeddingService, container.get("embedding_service")),
             chroma_repo,
@@ -191,6 +231,8 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         local_client: BaseLLMClient | None = None
         if test_mode:
             logging.info("测试模式：跳过本地生成模型探测，不连接 Ollama")
+        elif not _ollama_host_reachable(config.model.ollama_host):
+            logging.info("Ollama 服务不可达，跳过本地生成模型探测")
         else:
             try:
                 candidate = OllamaClient(
