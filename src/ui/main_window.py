@@ -319,11 +319,13 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(evidence_label)
         self._ai_evidence_tree = QTreeWidget()
         self._ai_evidence_tree.setObjectName("ai_evidence_tree")
-        self._ai_evidence_tree.setHeaderLabels(["来源", "片段"])
+        self._ai_evidence_tree.setHeaderLabels(["证据", "相关度", "片段"])
         self._ai_evidence_tree.setRootIsDecorated(False)
         self._ai_evidence_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._ai_evidence_tree.itemDoubleClicked.connect(self._on_evidence_item_activated)
         self._ai_evidence_tree.setMinimumHeight(170)
+        self._ai_evidence_tree.setColumnWidth(0, 112)
+        self._ai_evidence_tree.setColumnWidth(1, 72)
         right_layout.addWidget(self._ai_evidence_tree, 1)
 
         answer_label = QLabel("回答")
@@ -1030,14 +1032,26 @@ class MainWindow(QMainWindow):
             page = int(item.get("page", 0))
             content = str(item.get("content", "")).strip().replace("\n", " ")
             relevance = float(item.get("retrieval_score", 0.0))
+            lexical = float(item.get("lexical_score", 0.0))
+            vector = float(item.get("vector_score", 0.0))
+            source_id = str(item.get("source_id") or "")
+            block_type = str(item.get("type") or "")
+            section = str(item.get("section") or "")
             tree_item = QTreeWidgetItem(self._ai_evidence_tree)
-            tree_item.setText(0, str(page))
-            tree_item.setText(1, content[:160])
-            tree_item.setToolTip(0, f"相关度 {relevance:.2f}")
-            tree_item.setToolTip(1, content)
+            tree_item.setText(0, f"[{source_id}] 第{page}页")
+            tree_item.setText(1, f"{relevance:.2f}")
+            tree_item.setText(2, content[:180])
+            detail = (
+                f"{source_id} · 第{page}页 · {block_type}"
+                f"{' · ' + section if section else ''}\n"
+                f"相关度 {relevance:.2f} · 词面 {lexical:.2f} · 向量 {vector:.2f}\n\n"
+                f"{content}"
+            )
+            tree_item.setToolTip(0, detail)
+            tree_item.setToolTip(1, detail)
+            tree_item.setToolTip(2, detail)
             tree_item.setData(0, Qt.ItemDataRole.UserRole, page - 1)
-            tree_item.setData(1, Qt.ItemDataRole.UserRole, item.get("id", ""))
-            tree_item.setText(0, f"第{page}页 · {relevance:.2f}")
+            tree_item.setData(2, Qt.ItemDataRole.UserRole, item.get("id", ""))
         self._ai_doc_status.setText(f"检索到 {len(evidence)} 条依据")
         self._schedule_evidence_formula_scan(evidence)
 

@@ -46,6 +46,7 @@ def test_full_document_question_emits_retrieval_evidence() -> None:
         block_type=BlockType.PARAGRAPH,
         content="Attention links queries, keys, and values across a sequence.",
         bbox=(0, 0, 100, 20),
+        section_title="Attention",
     )
     knowledge = _KnowledgeEngine()
     ai_engine = _AIEngine()
@@ -72,11 +73,13 @@ def test_full_document_question_emits_retrieval_evidence() -> None:
                     "id": "p0_b0",
                     "page": 1,
                     "type": "paragraph",
+                    "source_id": "S1",
                     "distance": 0.125,
                     "retrieval_score": 0.82,
                     "lexical_score": 0.75,
                     "vector_score": 0.88,
                     "content": block.content,
+                    "section": "Attention",
                 },
             ],
         )

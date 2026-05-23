@@ -189,7 +189,28 @@ def test_qa_with_context_includes_page_reference() -> None:
 
     messages = service._build_qa_messages("attention?", block, [], None)
 
-    assert "[当前段落 — 第1页]" in messages[-1]["content"]
+    assert "[S0] 当前段落 · 第1页" in messages[-1]["content"]
+    assert "[S1]" not in messages[-1]["content"]
+    assert block.content in messages[-1]["content"]
+    assert "证据编号形如 [S1]" in messages[0]["content"]
+
+
+def test_qa_with_retrieved_blocks_uses_source_ids() -> None:
+    cfg = AppConfig()
+    router = HybridModelRouter(None, None, MockLLMClient(), cfg)
+    service = QAService(router)
+    block = DocumentBlock(
+        id="p2_b0",
+        page_num=2,
+        block_type=BlockType.FORMULA,
+        content=r"$$\nA=\frac{QK^T}{\sqrt{d_k}}\n$$",
+        bbox=(0, 0, 100, 20),
+        section_title="Attention",
+    )
+
+    messages = service._build_qa_messages("attention?", None, [block], None)
+
+    assert "[S1] 相关片段 · 第3页 · formula · Attention" in messages[-1]["content"]
     assert block.content in messages[-1]["content"]
 
 

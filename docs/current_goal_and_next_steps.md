@@ -192,7 +192,8 @@
 - 证据树展示全文检索依据。
 - 问答完成后生成追问建议。
 - evidence 中包含 `retrieval_score / lexical_score / vector_score`。
-- UI 展示“相关度”，不暴露原始向量 distance。
+- UI 展示证据编号、页码、块类型、相关度、词面/向量分数和片段，不暴露原始向量 distance。
+- `QAService` prompt 已把检索片段组织成 `[S1]`、`[S2]` 证据，并要求回答中引用证据编号，不能引用未提供来源。
 
 ### 检索质量
 

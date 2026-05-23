@@ -704,11 +704,12 @@ class QAService:
     QA_SYSTEM_PROMPT: str = (
         "你是一名严谨的研究助手，专门帮助读者理解学术论文。\n"
         "## 规则\n"
-        "1. 严格依据以下提供的文档片段回答问题。\n"
+        "1. 严格依据以下带编号的文档证据回答问题，证据编号形如 [S1]、[S2]。\n"
         '2. 如果答案不在提供的片段中，明确告知用户"根据当前文档内容无法确定"，绝不编造。\n'
-        "3. 回答中使用 LaTeX 格式展示数学公式：行内用 \\(...\\)，行间用 \\[...\\]。\n"
-        "4. 若涉及推导，逐步展示中间步骤。\n"
-        "5. 引用具体的章节、定理编号或页码。"
+        "3. 每个关键结论后引用对应证据编号，例如 [S1] 或 [S2][S4]；不能引用未提供的来源。\n"
+        "4. 回答中使用 LaTeX 格式展示数学公式：行内用 \\(...\\)，行间用 $$...$$。\n"
+        "5. 若涉及推导，逐步展示中间步骤。\n"
+        "6. 引用具体的章节、定理编号或页码。"
     )
 
     def __init__(self, router: HybridModelRouter) -> None:
@@ -848,10 +849,16 @@ class QAService:
         context_parts: list[str] = []
 
         if current_block:
-            context_parts.append(f"[当前段落 — 第{current_block.page_num + 1}页]\n{current_block.content}")
+            context_parts.append(
+                self._format_evidence_block(
+                    "S0",
+                    current_block,
+                    label="当前段落",
+                )
+            )
 
         for i, rb in enumerate(retrieved_blocks, 1):
-            context_parts.append(f"[相关片段{i} — 第{rb.page_num + 1}页]\n{rb.content}")
+            context_parts.append(self._format_evidence_block(f"S{i}", rb, label="相关片段"))
 
         if context_parts:
             context_text = "\n\n---\n\n".join(context_parts)
@@ -867,6 +874,15 @@ class QAService:
         })
 
         return messages
+
+    @staticmethod
+    def _format_evidence_block(source_id: str, block: DocumentBlock, label: str) -> str:
+        section = f" · {block.section_title}" if block.section_title else ""
+        block_type = block.block_type.value
+        return (
+            f"[{source_id}] {label} · 第{block.page_num + 1}页 · {block_type}{section}\n"
+            f"{block.content}"
+        )
 
 
 # =============================================================================
