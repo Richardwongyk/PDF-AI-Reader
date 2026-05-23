@@ -379,7 +379,17 @@ def _drive_case(case: PdfCase) -> CaseResult:
         })
         _wait_for_event("qa_requested", event_index, timeout=20)
         _wait_for_log(r"(问答完成|知识库中没有检索到可引用片段|知识库还在构建中)", timeout=60)
-        _action(actions, "ask_question", t, block_id=block_id)
+        _wait_for_log(r"追问建议 split=", timeout=60)
+        event_index = len(_read_events())
+        _send_command({"cmd": "snapshot_state"})
+        split_state = _wait_for_event("state", event_index, timeout=10)
+        _action(
+            actions,
+            "ask_question",
+            t,
+            block_id=block_id,
+            followup_count=split_state.get("split_followups", {}).get(block_id, 0),
+        )
         screenshots.append(_screenshot(case_dir, "07_qa"))
 
         t = time.perf_counter()
@@ -390,6 +400,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
         })
         _wait_for_event("dock_qa_requested", event_index, timeout=20)
         _wait_for_log(r"问答完成 split=__dock_qa__", timeout=60)
+        _wait_for_log(r"追问建议 split=__dock_qa__", timeout=60)
         event_index = len(_read_events())
         _send_command({"cmd": "snapshot_state"})
         state = _wait_for_event("state", event_index, timeout=10)
@@ -399,6 +410,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
             t,
             dock_evidence_count=state.get("dock", {}).get("dock_evidence_count", 0),
             dock_answer_chars=state.get("dock", {}).get("dock_answer_chars", 0),
+            dock_followup_count=state.get("dock", {}).get("dock_followup_count", 0),
         )
         screenshots.append(_screenshot(case_dir, "08_dock_qa"))
 
@@ -419,6 +431,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
             and len(screenshots) >= 6
             and int(dock_action.get("dock_evidence_count", 0)) > 0
             and int(dock_action.get("dock_answer_chars", 0)) > 0
+            and int(dock_action.get("dock_followup_count", 0)) > 0
         )
         if case.expected_min_pages > 0:
             title = window.window_text()

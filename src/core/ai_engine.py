@@ -847,6 +847,7 @@ class AIEngine(BaseService):
     answer_token = Signal(str, str)          # (token, split_id)
     answer_finished = Signal(str, str)       # (完整回答, split_id)
     answer_error = Signal(str, str)          # (错误信息, split_id)
+    followup_ready = Signal(list, str)       # (追问建议, split_id)
 
     def __init__(
         self,
@@ -925,6 +926,9 @@ class AIEngine(BaseService):
         )
         thread.finished_signal.connect(
             lambda t, sid=split_id: self.answer_finished.emit(t, sid)
+        )
+        thread.followup_signal.connect(
+            lambda q, sid=split_id: self.followup_ready.emit(q, sid)
         )
         thread.error_signal.connect(
             lambda e, sid=split_id: self.answer_error.emit(e, sid)
@@ -1121,9 +1125,15 @@ class MockLLMClient(BaseLLMClient):
                 system = m["content"]
                 break
 
-        # 判断是翻译任务还是问答任务
+        # 判断是翻译、追问建议还是问答任务
         if "翻译" in system or "将以下英文" in system:
             return self._mock_translate(text)
+        if "生成3个可能的追问问题" in system:
+            return (
+                '["这个结论依赖哪些文档片段？", '
+                '"相关公式中的符号分别表示什么？", '
+                '"作者后续如何验证这个方法？"]'
+            )
         else:
             return self._mock_qa(text)
 
@@ -1211,6 +1221,7 @@ class _QAThread(QThread):
     """问答线程 —— 直接继承 QThread。"""
     token_generated = Signal(str)
     finished_signal = Signal(str)
+    followup_signal = Signal(list)
     error_signal = Signal(str)
 
     def __init__(
@@ -1239,6 +1250,11 @@ class _QAThread(QThread):
                 full_text += token
                 self.token_generated.emit(token)
             self.finished_signal.emit(full_text)
+            try:
+                followups = self._service.generate_followup_questions(self._question, full_text)
+            except Exception:
+                followups = []
+            self.followup_signal.emit(followups)
         except Exception as e:
             import traceback
             self.error_signal.emit(f"{e}\n{traceback.format_exc()}")

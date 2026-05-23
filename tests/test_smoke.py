@@ -139,3 +139,34 @@ def test_main_window_smoke() -> None:
         timeout=60,
     )
     assert "main window smoke ok" in result.stdout
+
+
+def test_split_widget_followup_buttons() -> None:
+    result = _run_python(
+        """
+        import sys
+        from PySide6.QtWidgets import QApplication, QPushButton
+
+        from src.core.models import BlockType, DocumentBlock, SplitMode
+        from src.ui.split_widget import SplitWidget
+
+        app = QApplication(sys.argv)
+        block = DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.PARAGRAPH,
+            content="The attention mechanism maps queries and keys.",
+            bbox=(0, 0, 100, 20),
+        )
+        widget = SplitWidget(block, mode=SplitMode.QUESTION)
+        widget.show_followup_questions(["问题一？", "问题二？", "问题三？"])
+        buttons = widget.findChildren(QPushButton)
+        followups = [button.property("followup_question") for button in buttons if button.property("followup_question")]
+        assert followups == ["问题一？", "问题二？", "问题三？"]
+        widget.close()
+        app.quit()
+        print("split followup smoke ok")
+        """,
+        timeout=60,
+    )
+    assert "split followup smoke ok" in result.stdout

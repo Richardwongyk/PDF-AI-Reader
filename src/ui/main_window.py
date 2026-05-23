@@ -120,6 +120,7 @@ class MainWindow(QMainWindow):
         self._dock_answer_text: str = ""
         self._dock_answer_split_id: str = "__dock_qa__"
         self._dock_last_question: str = ""
+        self._dock_followup_questions: list[str] = []
 
         self._init_ui()
         self._connect_signals()
@@ -306,6 +307,14 @@ class MainWindow(QMainWindow):
         self._ai_answer_view.setMinimumHeight(220)
         right_layout.addWidget(self._ai_answer_view, 2)
 
+        self._ai_followup_label = QLabel("追问")
+        self._ai_followup_label.setStyleSheet("font-weight: 600;")
+        self._ai_followup_label.setVisible(False)
+        right_layout.addWidget(self._ai_followup_label)
+        self._ai_followup_layout = QVBoxLayout()
+        self._ai_followup_layout.setSpacing(4)
+        right_layout.addLayout(self._ai_followup_layout)
+
         self._right_dock.setWidget(right_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._right_dock)
 
@@ -360,6 +369,7 @@ class MainWindow(QMainWindow):
         self._ask_flow.retrieval_ready.connect(self._on_retrieval_ready)
         self._ai_engine.answer_token.connect(self._on_answer_token)
         self._ai_engine.answer_finished.connect(self._on_answer_finished)
+        self._ai_engine.followup_ready.connect(self._on_followup_ready)
         self._ai_engine.answer_error.connect(self._on_answer_error)
 
         # Navigator
@@ -443,6 +453,7 @@ class MainWindow(QMainWindow):
         )
         self._ai_answer_view.clear()
         self._ai_evidence_tree.clear()
+        self._clear_dock_followups()
         self._dock_answer_text = ""
         self.setWindowTitle(f"{result.title or Path(result.filepath).name} — PDF AI Reader")
 
@@ -707,8 +718,10 @@ class MainWindow(QMainWindow):
             return
         self._dock_last_question = question
         self._dock_answer_text = ""
+        self._dock_followup_questions = []
         self._ai_answer_view.setPlainText("正在检索全文知识库...")
         self._ai_evidence_tree.clear()
+        self._clear_dock_followups()
         self._ask_flow.request_answer(
             question=question,
             block=None,
@@ -740,6 +753,23 @@ class MainWindow(QMainWindow):
         page = item.data(0, Qt.ItemDataRole.UserRole)
         if page is not None:
             self._pdf_viewer.scroll_to_page(int(page))
+
+    def _clear_dock_followups(self) -> None:
+        """清空右侧全文问答追问建议。"""
+        if not hasattr(self, "_ai_followup_layout"):
+            return
+        while self._ai_followup_layout.count():
+            item = self._ai_followup_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self._dock_followup_questions = []
+        self._ai_followup_label.setVisible(False)
+
+    def _on_dock_followup_clicked(self, question: str) -> None:
+        """右侧追问按钮点击后继续基于全文提问。"""
+        self._ai_question_input.setText(question)
+        self._on_dock_question_submitted()
 
     # =========================================================================
     # AI 翻译回调
@@ -776,6 +806,29 @@ class MainWindow(QMainWindow):
         split = self._pdf_viewer.find_split_widget(split_id)
         if split:
             split.display_full_answer(full_answer)
+
+    def _on_followup_ready(self, questions: list[str], split_id: str) -> None:
+        """问答完成后的追问建议。"""
+        clean_questions = [q.strip() for q in questions if isinstance(q, str) and q.strip()]
+        if split_id == self._dock_answer_split_id:
+            self._clear_dock_followups()
+            self._dock_followup_questions = clean_questions[:3]
+            for question in self._dock_followup_questions:
+                btn = QPushButton(question[:56] + ("..." if len(question) > 56 else ""))
+                btn.setObjectName("ai_followup_button")
+                btn.setToolTip(question)
+                btn.setProperty("followup_question", question)
+                btn.clicked.connect(lambda checked=False, text=question: self._on_dock_followup_clicked(text))
+                self._ai_followup_layout.addWidget(btn)
+            self._ai_followup_label.setVisible(bool(self._dock_followup_questions))
+            if self._dock_followup_questions:
+                self._ai_doc_status.setText("全文问答完成，可继续追问")
+            self.logger.info("追问建议 split=%s count=%d", split_id, len(self._dock_followup_questions))
+            return
+        split = self._pdf_viewer.find_split_widget(split_id)
+        if split:
+            split.show_followup_questions(clean_questions)
+        self.logger.info("追问建议 split=%s count=%d", split_id, len(clean_questions))
 
     def _on_answer_unavailable(self, message: str, split_id: str) -> None:
         """知识库未就绪或无上下文时，直接在裂缝中给出边界提示。"""

@@ -154,6 +154,7 @@ class TestCommandBridge(QObject):
             "split_count": len(splits),
             "pages": self._window._doc_engine.page_count,
             "dock": self._dock_state(),
+            "split_followups": self._split_followup_state(splits),
         }
 
     def _dock_state(self) -> dict[str, Any]:
@@ -164,7 +165,19 @@ class TestCommandBridge(QObject):
             "dock_evidence_count": evidence.topLevelItemCount() if evidence else 0,
             "dock_answer_chars": len(answer.toPlainText()) if answer else 0,
             "dock_status": status.text() if status else "",
+            "dock_followup_count": len(getattr(self._window, "_dock_followup_questions", [])),
         }
+
+    def _split_followup_state(self, splits: dict[str, Any]) -> dict[str, int]:
+        state: dict[str, int] = {}
+        for split_id, split in splits.items():
+            widget = getattr(split, "_followup_widget", None)
+            layout = getattr(split, "_followup_layout", None)
+            if widget is None or layout is None:
+                state[split_id] = 0
+                continue
+            state[split_id] = layout.count() if widget.isVisible() else 0
+        return state
 
     def _read_events(self) -> list[dict[str, Any]]:
         if not self._event_file.exists():

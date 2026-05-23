@@ -309,6 +309,11 @@ class SplitWidget(QFrame):
         text = answer if answer else self._current_answer
         if text:
             self._current_answer = text
+            if (
+                self._mode == SplitMode.QUESTION
+                and (not self._chat_history or self._chat_history[-1].get("role") != "assistant")
+            ):
+                self._chat_history.append({"role": "assistant", "content": text})
             self._update_webview(is_finished=True)
         self.set_busy(False)
 
@@ -321,6 +326,7 @@ class SplitWidget(QFrame):
             btn = QPushButton(q[:50] + ("..." if len(q) > 50 else ""))
             btn.setObjectName("action_button")
             btn.setToolTip(q)
+            btn.setProperty("followup_question", q)
             btn.clicked.connect(lambda checked, text=q: self._on_followup_click(text))
             self._followup_layout.addWidget(btn)
         self._followup_widget.setVisible(len(questions) > 0)

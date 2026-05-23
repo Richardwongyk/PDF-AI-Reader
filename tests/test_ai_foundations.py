@@ -81,3 +81,14 @@ def test_qa_with_context_includes_page_reference() -> None:
 
     assert "[当前段落 — 第1页]" in messages[-1]["content"]
     assert block.content in messages[-1]["content"]
+
+
+def test_mock_qa_generates_followup_questions() -> None:
+    cfg = AppConfig()
+    router = HybridModelRouter(None, None, MockLLMClient(), cfg)
+    service = QAService(router)
+
+    questions = service.generate_followup_questions("what is attention?", "It uses context.")
+
+    assert len(questions) == 3
+    assert all(question.endswith("？") for question in questions)
