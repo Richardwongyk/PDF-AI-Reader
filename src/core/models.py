@@ -98,6 +98,34 @@ class DocumentBlock(BaseModel):
     # - "keywords": list[str], 关键术语
 
 
+def is_math_wrapped(text: str) -> bool:
+    """Return True when text already has a LaTeX math delimiter."""
+    stripped = str(text or "").strip()
+    return (
+        stripped.startswith("$$")
+        or stripped.startswith(r"\[")
+        or stripped.startswith(r"\(")
+        or (stripped.startswith("$") and not stripped.startswith("$$"))
+    )
+
+
+def wrap_math_text(text: str, display: bool = True) -> str:
+    """Wrap math text with display or inline LaTeX delimiters if needed."""
+    stripped = str(text or "").strip()
+    if not stripped or is_math_wrapped(stripped):
+        return stripped
+    if display:
+        return f"$$\n{stripped}\n$$"
+    return rf"\({stripped}\)"
+
+
+def document_block_index_text(block: DocumentBlock) -> str:
+    """Text form used by translation/RAG indexes for a document block."""
+    if block.block_type == BlockType.FORMULA:
+        return wrap_math_text(block.content, display=True)
+    return str(block.content or "")
+
+
 class GlossaryEntry(BaseModel):
     """术语表条目。"""
     en: str                              # 英文术语

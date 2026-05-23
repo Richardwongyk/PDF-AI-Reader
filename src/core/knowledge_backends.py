@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
-from src.core.models import DocumentBlock, KnowledgeStatus
+from src.core.models import DocumentBlock, KnowledgeStatus, document_block_index_text
 from src.data.chroma_repo import ChromaRepo
 
 
@@ -114,7 +114,7 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
         if total == 0:
             return
 
-        text_contents = [block.content for block in blocks]
+        text_contents = [document_block_index_text(block) for block in blocks]
         vectors = self._embed_texts(text_contents)
         block_ids = [block.id for block in blocks]
         metadatas = [_block_metadata(block) for block in blocks]
@@ -138,7 +138,7 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
         total = len(blocks)
         if total == 0:
             return
-        text_contents = [block.content for block in blocks]
+        text_contents = [document_block_index_text(block) for block in blocks]
         vectors = self._embed_texts(text_contents)
         for batch_start in range(0, total, self._BATCH_SIZE):
             batch_end = min(batch_start + self._BATCH_SIZE, total)
@@ -246,7 +246,7 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
         for batch_start in range(0, total, self._BATCH_SIZE):
             batch_end = min(batch_start + self._BATCH_SIZE, total)
             batch_blocks = blocks[batch_start:batch_end]
-            batch_texts = [block.content for block in batch_blocks]
+            batch_texts = [document_block_index_text(block) for block in batch_blocks]
             vectors = self._embed_texts(batch_texts)
             collection.upsert(
                 ids=[block.id for block in batch_blocks],
@@ -276,7 +276,7 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
         for batch_start in range(0, total, self._BATCH_SIZE):
             batch_end = min(batch_start + self._BATCH_SIZE, total)
             batch_blocks = blocks[batch_start:batch_end]
-            batch_texts = [block.content for block in batch_blocks]
+            batch_texts = [document_block_index_text(block) for block in batch_blocks]
             vectors = self._embed_texts(batch_texts)
             collection.upsert(
                 ids=[block.id for block in batch_blocks],
@@ -386,7 +386,7 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
             raise RuntimeError("llamaindex_chroma 后端缺少 llama-index-core。") from exc
         node = TextNode(
             id_=block.id,
-            text=block.content,
+            text=document_block_index_text(block),
             metadata={
                 **_block_metadata(block),
                 "block_id": block.id,

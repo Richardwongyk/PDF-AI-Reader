@@ -222,7 +222,7 @@ def test_legacy_backend_upserts_formula_ocr_metadata() -> None:
 
     backend.upsert_blocks([formula], "doc-1")
 
-    assert embedded_texts == [[r"\frac{a}{b}"]]
+    assert embedded_texts == [[f"$$\n{r'\frac{a}{b}'}\n$$"]]
     assert repo.upserts[-1]["block_ids"] == ["p1_b2"]
     metadata = repo.upserts[-1]["metadatas"][0]  # type: ignore[index]
     assert metadata["type"] == "formula"

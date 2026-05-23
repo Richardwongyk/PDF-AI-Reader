@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore
-from src.core.models import BlockType, DocumentBlock
+from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 _logger = logging.getLogger(__name__)
 
@@ -517,7 +517,7 @@ class _FormulaOcrWorker(QThread):
                         "reason": "cache_miss" if self._cache_only else "ocr_empty",
                     })
                     continue
-                block.content = cleaned
+                block.content = wrap_math_text(cleaned, display=True)
                 block.block_type = BlockType.FORMULA
                 block.metadata.update({
                     "formula_ocr": "pix2text-mfr",

@@ -19,6 +19,7 @@ from src.core.models import (
     BlockType,
     DocumentBlock,
     ParseResult,
+    wrap_math_text,
 )
 
 
@@ -265,15 +266,69 @@ class DocumentChunker:
             else:
                 block_type = BlockType.PARAGRAPH
 
+            content = text.strip()
+            metadata: dict[str, Any] = {}
+            if block_type == BlockType.FORMULA:
+                content = wrap_math_text(content, display=True)
+                metadata["math_wrapped"] = "display"
+            elif self._contains_math_font_spans(spans):
+                content = self._text_with_inline_math_spans(spans)
+                metadata["math_wrapped"] = "inline"
+
             blocks.append(DocumentBlock(
                 id=f"p{page_num}_b{len(blocks)}",
                 page_num=page_num,
                 block_type=block_type,
-                content=text.strip(),
+                content=content,
                 bbox=bbox,
+                metadata=metadata,
             ))
 
         return blocks
+
+    @classmethod
+    def _contains_math_font_spans(cls, spans: list[dict[str, Any]]) -> bool:
+        return any(cls._is_math_font_span(span) for span in spans)
+
+    @classmethod
+    def _text_with_inline_math_spans(cls, spans: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        math_buffer: list[str] = []
+
+        def flush_math() -> None:
+            if not math_buffer:
+                return
+            raw = "".join(math_buffer).strip()
+            math_buffer.clear()
+            if raw:
+                parts.append(wrap_math_text(raw, display=False))
+
+        for span in spans:
+            text = str(span.get("text", ""))
+            if not text:
+                continue
+            if cls._is_math_font_span(span):
+                math_buffer.append(text)
+            else:
+                flush_math()
+                parts.append(text)
+        flush_math()
+        joined = " ".join(part.strip() for part in parts if part.strip())
+        joined = re.sub(r"\s+([,.;:)\]])", r"\1", joined)
+        joined = re.sub(r"([([])\s+", r"\1", joined)
+        return joined.strip()
+
+    @staticmethod
+    def _is_math_font_span(span: dict[str, Any]) -> bool:
+        font = str(span.get("font", ""))
+        text = str(span.get("text", ""))
+        if not text.strip():
+            return False
+        lowered = font.lower()
+        return any(
+            keyword in lowered
+            for keyword in ("math", "cmmi", "cmsy", "symbol", "stix", "xits", "euler")
+        )
 
     @staticmethod
     def _detect_columns(blocks: list[DocumentBlock]) -> list[list[DocumentBlock]]:
@@ -315,6 +370,8 @@ class DocumentChunker:
 
     def _is_formula_from_spans(self, spans: list[dict[str, Any]]) -> bool:
         """基于 span 级别检测数学公式。"""
+        import string
+
         full_text = "".join(s.get("text", "") for s in spans)
         fonts = [s.get("font", "") for s in spans]
         # 排除：太短、email、大量英文单词（说明是正文）
@@ -322,14 +379,49 @@ class DocumentChunker:
             return False
         if "@" in full_text and len(full_text) < 60:
             return False
+        plain_text = " ".join(full_text.split())
+        if len(plain_text) > 180 and "." in plain_text:
+            return False
         # 英文单词>20个 → 不是公式
-        english_words = sum(1 for w in full_text.split() if w.isalpha() and len(w) > 2)
-        if english_words > 20:
+        words = [
+            w.strip(string.punctuation)
+            for w in full_text.split()
+            if w.strip(string.punctuation)
+        ]
+        english_words = sum(1 for w in words if w.isalpha() and len(w) > 2)
+        math_markers = sum(full_text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫→")
+        prose_prefix = re.match(
+            r"^\s*(?:proof|we\s+have|if|for|the|where|therefore|thus|hence|this|let)\b",
+            plain_text,
+            re.IGNORECASE,
+        )
+        if prose_prefix and english_words >= 4:
+            return False
+        if re.search(
+            r"\b(?:called|figure|points?|neighborhood|unit\s+circle)\b",
+            plain_text,
+            re.IGNORECASE,
+        ):
+            return False
+        if english_words >= 6 and re.search(
+            r"\b(?:the|and|or|if|only|with|for|any|maps?|continuous|metric|proof|"
+            r"called|figure|set|points?|neighborhood)\b",
+            plain_text,
+            re.IGNORECASE,
+        ):
+            return False
+        if english_words > 14 and math_markers < 8:
+            return False
+        if english_words > 24:
             return False
         # 数学字体
         for f in fonts:
             for kw in ("CM", "Math", "Symbol", "Cambria", "STIX", "XITS", "TeX"):
-                if kw.lower() in f.lower() and len(full_text) > 10:
+                if (
+                    kw.lower() in f.lower()
+                    and len(full_text) > 10
+                    and (math_markers >= 2 or english_words <= 8)
+                ):
                     return True
         # LaTeX 命令（使用预编译正则，至少匹配2个才认为是公式，减少误判）
         latex_count = len(self._LATEX_COMMAND_PATTERN.findall(full_text))

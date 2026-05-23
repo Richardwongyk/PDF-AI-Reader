@@ -11,7 +11,7 @@ from typing import Any
 
 import fitz
 
-from src.core.models import BlockType, DocumentBlock
+from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 
 class FormulaDetector(ABC):
@@ -304,12 +304,16 @@ class Pix2TextMFDDetector(FormulaDetector):
             return False
         if len(text) < 8 or len(text) > 260:
             return False
+        if len(text) > 170 and re.search(r"[.!?]", text):
+            return False
         if re.search(r"\b(?:Layer Type|BLEU|params|steps|EN-DE|EN-FR|dev)\b", text):
             return False
 
         words = re.findall(r"[A-Za-z]{3,}", text)
         math_markers = sum(text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫")
         has_math_word = bool(re.search(r"\b(?:softmax|Attention|FFN|sin|cos|log|exp|max|min)\b", text))
+        if len(words) > 8 and not has_math_word:
+            return False
         if "=" not in text:
             return False
         if len(words) > 12:
@@ -473,7 +477,7 @@ class Pix2TextMFDDetector(FormulaDetector):
             latex = self._normalize_latex(existing_ocr_results.get(block.id, ""))
             if not latex:
                 continue
-            block.content = latex
+            block.content = wrap_math_text(latex, display=True)
             block.block_type = BlockType.FORMULA
             block.metadata.update({
                 "formula_detector": "pix2text-mfd",
@@ -574,7 +578,7 @@ class Pix2TextMFDDetector(FormulaDetector):
                 id=new_id,
                 page_num=page_num,
                 block_type=BlockType.FORMULA,
-                content=latex or "[图片公式，等待 OCR 识别]",
+                content=wrap_math_text(latex, display=True) if latex else "[图片公式，等待 OCR 识别]",
                 bbox=tuple(float(v) for v in fb),
                 metadata=metadata,
             )

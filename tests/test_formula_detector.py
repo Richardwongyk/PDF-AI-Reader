@@ -189,7 +189,7 @@ def test_mfd_apply_recognizes_scanned_formula_latex(monkeypatch) -> None:
 
     formulas = [b for b in refined if b.block_type == BlockType.FORMULA]
     assert len(formulas) == 1
-    assert formulas[0].content == r"\frac{a}{b}"
+    assert formulas[0].content == "$$\n\\frac{a}{b}\n$$"
     assert formulas[0].metadata["needs_ocr"] is False
     assert formulas[0].metadata["mfr_recognized"] is True
 
@@ -261,9 +261,126 @@ def test_mfd_apply_recognizes_existing_non_latex_formula_block(monkeypatch) -> N
     refined = detector.apply_to_blocks(blocks, doc=doc)
 
     formula = refined[0]
-    assert formula.content == r"\mathrm{Attention}(Q,K,V)=\frac{QK^T}{\sqrt{d_k}}"
+    assert formula.content == "$$\n\\mathrm{Attention}(Q,K,V)=\\frac{QK^T}{\\sqrt{d_k}}\n$$"
     assert formula.metadata["latex_source"] == "existing_block_ocr"
     assert formula.metadata["needs_ocr"] is False
+
+
+def test_document_chunker_rejects_math_font_long_prose() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    chunker = DocumentChunker()
+    spans = [
+        {
+            "text": (
+                "If M = N = R, we get R2, the Euclidean plane. "
+                "The metric d Euclid is the one we started with, "
+                "but using either of the other two metrics also makes sense."
+            ),
+            "font": "CMR10",
+        }
+    ]
+
+    assert chunker._is_formula_from_spans(spans) is False
+
+
+def test_document_chunker_rejects_proof_sentence_with_math_symbols() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    chunker = DocumentChunker()
+    spans = [
+        {
+            "text": (
+                "Proof. We have d max ((x,y),(xn,yn)) = max {dM(x,xn), dN(y,yn)}."
+            ),
+            "font": "CMR10",
+        }
+    ]
+
+    assert chunker._is_formula_from_spans(spans) is False
+
+
+def test_document_chunker_rejects_figure_caption_with_math_symbols() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    chunker = DocumentChunker()
+    spans = [
+        {
+            "text": "Figure 2.1: The set of points x2 + y2 < 1 in R2 is open in R2.",
+            "font": "CMR10",
+        }
+    ]
+
+    assert chunker._is_formula_from_spans(spans) is False
+
+
+def test_document_chunker_accepts_short_math_font_formula() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    chunker = DocumentChunker()
+    spans = [
+        {
+            "text": "Attention(Q,K,V)=softmax(QK^T/sqrt(d_k))V",
+            "font": "CMMI10",
+        }
+    ]
+
+    assert chunker._is_formula_from_spans(spans) is True
+
+
+def test_math_text_wrapping_helpers_use_latex_delimiters() -> None:
+    from src.core.models import BlockType, DocumentBlock, document_block_index_text, wrap_math_text
+
+    assert wrap_math_text(r"\frac{a}{b}", display=True) == "$$\n\\frac{a}{b}\n$$"
+    assert wrap_math_text("x+y", display=False) == r"\(x+y\)"
+    already = "$$\nx+y\n$$"
+    assert wrap_math_text(already, display=True) == already
+
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"\alpha+\beta",
+        bbox=(0, 0, 10, 10),
+    )
+    assert document_block_index_text(block) == "$$\n\\alpha+\\beta\n$$"
+
+
+def test_document_chunker_wraps_math_font_spans_inline() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    spans = [
+        {"text": "dimension", "font": "NimbusRomNo9L-Regu"},
+        {"text": " d", "font": "CMMI10"},
+        {"text": "k", "font": "CMMI7"},
+        {"text": ", and apply", "font": "NimbusRomNo9L-Regu"},
+        {"text": "√", "font": "CMSY10"},
+        {"text": "d", "font": "CMMI10"},
+        {"text": "k", "font": "CMMI7"},
+        {"text": ".", "font": "NimbusRomNo9L-Regu"},
+    ]
+
+    wrapped = DocumentChunker._text_with_inline_math_spans(spans)
+
+    assert r"\(dk\)" in wrapped
+    assert r"\(√dk\)" in wrapped
+    assert wrapped.endswith(".")
+
+
+def test_existing_formula_ocr_rejects_long_prose_with_math_symbols() -> None:
+    detector = Pix2TextMFDDetector(max_existing_ocr_blocks=2)
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=(
+            "Where the projections are parameter matrices W Q i in R d model x d k, "
+            "W K i in R d model x d k, W V i in R d model x d v and W O in R h d v x d model."
+        ),
+        bbox=(0, 0, 100, 20),
+    )
+
+    assert detector._should_ocr_existing_formula_block(block) is False
 
 
 def test_normalize_latex_collapses_spaced_text_commands() -> None:
@@ -684,7 +801,7 @@ def test_scanned_formula_ocr_budget_keeps_placeholders(monkeypatch) -> None:
     pending = [b for b in formulas if b.metadata["needs_ocr"] is True]
     assert len(recognized) == 1
     assert recognized[0].page_num == 0
-    assert recognized[0].content == r"\alpha+\beta"
+    assert recognized[0].content == "$$\n\\alpha+\\beta\n$$"
     assert len(pending) == 1
     assert pending[0].content == "[图片公式，等待 OCR 识别]"
 
