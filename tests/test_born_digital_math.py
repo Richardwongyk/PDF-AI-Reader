@@ -5,6 +5,7 @@ from src.core.born_digital_math import (
     BornDigitalPage,
     FormulaSegmentationConfig,
     MuPDFBornDigitalExtractor,
+    PdfFormulaSemanticReconstructor,
     PdfGlyph,
     PdfLine,
     PdfRegion,
@@ -362,6 +363,49 @@ def test_display_formula_regions_reject_body_width_math_sentence() -> None:
     regions = BornDigitalMathAuditor().display_formula_regions(extracted)
 
     assert regions == []
+
+
+def test_formula_semantic_reconstructor_recovers_fraction_sqrt_and_scripts() -> None:
+    page = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("A", "CMR10", 10, (220, 473, 228, 483)),
+                PdfGlyph("(", "CMR10", 10, (228, 473, 232, 483)),
+                PdfGlyph("Q", "CMMI10", 10, (232, 473, 240, 483)),
+                PdfGlyph(",", "CMMI10", 10, (240, 473, 244, 483)),
+                PdfGlyph("K", "CMMI10", 10, (246, 473, 254, 483)),
+                PdfGlyph(")", "CMR10", 10, (254, 473, 258, 483)),
+                PdfGlyph("=", "CMR10", 10, (262, 473, 270, 483)),
+                PdfGlyph("s", "CMR10", 10, (274, 473, 280, 483)),
+                PdfGlyph("(", "CMR10", 10, (280, 473, 284, 483)),
+                PdfGlyph("Q", "CMMI10", 10, (286, 466, 294, 476)),
+                PdfGlyph("K", "CMMI10", 10, (294, 466, 302, 476)),
+                PdfGlyph("T", "CMMI7", 7, (303, 465, 308, 472)),
+            ]),
+            _text_region([
+                PdfGlyph("√", "CMSY10", 10, (286, 473, 294, 483)),
+                PdfGlyph("d", "CMMI10", 10, (296, 480, 304, 490)),
+                PdfGlyph("k", "CMMI7", 7, (304, 484, 309, 491)),
+                PdfGlyph(")", "CMR10", 10, (314, 473, 318, 483)),
+                PdfGlyph("V", "CMMI10", 10, (318, 473, 326, 483)),
+            ]),
+            PdfRegion(page_num=0, kind="vector", bbox=(286, 478, 310, 479)),
+        ),
+    )
+    region = BornDigitalMathAuditor(
+        segmentation=FormulaSegmentationConfig(min_confidence=0.45),
+    ).display_formula_regions(page)[0]
+
+    result = PdfFormulaSemanticReconstructor().reconstruct(page, region)
+
+    assert r"\frac{" in result.latex
+    assert r"Q K^{T}" in result.latex
+    assert r"\sqrt{d_{k}}" in result.latex
+    assert "fraction_vector" in result.evidence
+    assert result.warnings == ()
 
 
 def _text_region(glyphs: list[PdfGlyph]) -> PdfRegion:

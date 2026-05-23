@@ -435,10 +435,12 @@ def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> 
         def __init__(
             self,
             enable_born_digital_math: bool = False,
+            enable_born_digital_semantics: bool = False,
             enable_legacy_formula_heuristic: bool = True,
         ) -> None:
             init_args.append({
                 "born_digital_math": enable_born_digital_math,
+                "born_digital_semantics": enable_born_digital_semantics,
                 "legacy_formula_heuristic": enable_legacy_formula_heuristic,
             })
 
@@ -455,6 +457,7 @@ def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> 
         mfd_pages=None,
         max_pages=2,
         born_digital_math=True,
+        born_digital_semantics=True,
         legacy_formula_heuristic=False,
     )
 
@@ -463,6 +466,7 @@ def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> 
     assert seen_pages == [0, 1]
     assert init_args == [{
         "born_digital_math": True,
+        "born_digital_semantics": True,
         "legacy_formula_heuristic": False,
     }]
 

@@ -271,6 +271,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - 追加结构公式块时会把完全重叠的普通段落标记为 `shadowed_by=born_digital_display_formula`，知识库索引会跳过该 shadowed 段落，避免同一公式重复进入 RAG。
 - Attention 全量、关闭旧 span 启发式、只启用 born-digital display：耗时约 2.189s，公式块 11 个，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。相比旧 no-MFD baseline 更干净，但远未达质量门禁。
 - Napkin 前 120 页、关闭旧 span 启发式、只启用 born-digital display：耗时约 17.823s，公式块 116 个，`source_weak_match_rate=0.037`，`low_similarity_pdf_rate=0.250`。性能不能进入默认热路径，只能作为后台/审计/后续增量索引候选。
+- 新增 `PdfFormulaSemanticReconstructor` v1，可选从 display region 的 glyph/bbox/vector 事实恢复上下标、局部分式线、根号、常见 Unicode 数学符号和 upright 字母串；不使用样本词表，不使用 OCR。
+- Attention 全量、纯 born-digital display + semantic v1：耗时约 2.276s，公式块 11 个，`common_source_command_recall=0.353`，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。公式 1 可恢复 `\frac{Q K^{T}}{\sqrt{d_{k}}}` 结构。
+- Napkin 前 120 页、semantic v1：耗时约 21.017s，公式块 116 个，`common_source_command_recall=0.019`，`source_weak_match_rate=0.035`，`low_similarity_pdf_rate=0.319`。教材混排仍会吸入正文词，不能默认启用。
 
 当前边界：
 
@@ -278,6 +281,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - 这一步还不是 99.99% LaTeX 还原；它是后续二维结构树和 LaTeX 语义恢复的事实基础。
 - 当前区域文本不能直接作为最终公式 truth；进入主链路前必须带 confidence/warnings，并完成二维结构恢复、表格/列表过滤和质量门禁。
 - 旧 span 级公式启发式会把表格数值、复杂证明句、列表项误判为公式；后续应逐步降级为 fallback，默认公式入口转向结构事实层。
+- semantic v1 已证明命令恢复可量化提升，但仍不是高精度成品。下一步重点不是扩大字符规则，而是做 region 级类型判别、表格/列表/正文混排隔离、矩阵/对齐环境建模和 LaTeX 源码页级对齐审计。
 
 ## 参考资料
 

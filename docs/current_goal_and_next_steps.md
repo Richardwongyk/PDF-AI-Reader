@@ -179,7 +179,10 @@
 - `DocumentChunker(enable_born_digital_math=True)` 已可选追加 display formula 块，并把重叠原段落标记为 `shadowed_by=born_digital_display_formula`；知识库索引跳过 shadowed 段落，避免重复证据。
 - Attention 全量纯 born-digital display 审计：约 2.189s，公式块 11 个，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。
 - Napkin 前 120 页纯 born-digital display 审计：约 17.823s，公式块 116 个，`source_weak_match_rate=0.037`，`low_similarity_pdf_rate=0.250`。
-- 下一步必须做二维布局树、表格/列表过滤与 LaTeX 语义恢复；当前可选入口不能默认进入阅读热路径。
+- `PdfFormulaSemanticReconstructor` v1 已可选恢复上下标、局部分式线、根号和 Unicode 数学符号；Attention 公式 1 可恢复 `\frac{Q K^{T}}{\sqrt{d_{k}}}` 结构。
+- Attention 全量 semantic v1：约 2.276s，`common_source_command_recall=0.353`，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。
+- Napkin 前 120 页 semantic v1：约 21.017s，`common_source_command_recall=0.019`，`source_weak_match_rate=0.035`，`low_similarity_pdf_rate=0.319`。
+- 下一步必须做 region 级类型判别、表格/列表过滤、矩阵/对齐环境建模和 LaTeX 源码页级对齐；当前可选入口不能默认进入阅读热路径。
 
 ### 全文问答与证据
 

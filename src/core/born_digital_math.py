@@ -7,6 +7,7 @@ does not guess LaTeX from prose with regular expressions.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Literal
 
@@ -159,6 +160,18 @@ class DisplayFormulaRegion:
     evidence: tuple[DisplayFormulaEvidence, ...]
     confidence: float
     source: str = "pdf_structure_display_region"
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FormulaSemanticResult:
+    latex: str
+    confidence: float
+    evidence: tuple[str, ...]
+    warnings: tuple[str, ...]
+    source: str = "pdf_structure_semantic_layout_v1"
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -390,6 +403,191 @@ class DisplayFormulaSegmenter:
         return _dedupe_display_regions(merged)
 
 
+class PdfFormulaSemanticReconstructor:
+    """Recover evidence-backed LaTeX fragments from born-digital formula regions."""
+
+    def reconstruct(
+        self,
+        page: BornDigitalPage,
+        region: DisplayFormulaRegion,
+    ) -> FormulaSemanticResult:
+        glyphs = self._region_glyphs(page, region)
+        warnings: set[str] = set()
+        evidence: set[str] = set(region.evidence)
+        if any(glyph.is_unknown for glyph in glyphs):
+            warnings.add("unknown_glyph")
+        if not glyphs:
+            return FormulaSemanticResult(
+                latex="",
+                confidence=0.0,
+                evidence=tuple(sorted(evidence)),
+                warnings=("empty_region",),
+            )
+        vectors = self._region_vectors(page, region)
+        formula_like = _glyphs_look_like_formula_expression(glyphs)
+        fraction = self._best_fraction_vector(glyphs, vectors) if formula_like else None
+        if fraction is not None:
+            latex = self._render_with_fraction(glyphs, fraction, vectors)
+            evidence.add("fraction_vector")
+            confidence = min(1.0, region.confidence + 0.06)
+        else:
+            latex = self._render_glyphs(glyphs, vectors)
+            confidence = region.confidence
+        if not formula_like:
+            warnings.add("table_or_text_like_region")
+        if any(glyph.text == "√" for glyph in glyphs):
+            evidence.add("radical_glyph")
+        if _has_script_size_pattern([glyph for glyph in glyphs if not glyph.text.isspace()]):
+            evidence.add("script_layout")
+        return FormulaSemanticResult(
+            latex=_cleanup_latex(latex),
+            confidence=round(confidence, 3),
+            evidence=tuple(sorted(evidence)),
+            warnings=tuple(sorted(warnings)),
+        )
+
+    def _region_glyphs(
+        self,
+        page: BornDigitalPage,
+        region: DisplayFormulaRegion,
+    ) -> list[PdfGlyph]:
+        glyphs: list[PdfGlyph] = []
+        expanded = _expand_bbox(region.bbox, 1.0)
+        for pdf_region in page.regions:
+            if pdf_region.kind != "text":
+                continue
+            for line in pdf_region.lines:
+                if not _bbox_intersects(line.bbox, expanded):
+                    continue
+                line_glyphs = [
+                    glyph
+                    for span in line.spans
+                    for glyph in span.glyphs
+                    if glyph.text and not glyph.text.isspace() and _bbox_intersects(glyph.bbox, expanded)
+                ]
+                if not line_glyphs:
+                    continue
+                if _glyphs_look_like_equation_label(line_glyphs, page.page_size):
+                    continue
+                glyphs.extend(line_glyphs)
+        return glyphs
+
+    def _region_vectors(
+        self,
+        page: BornDigitalPage,
+        region: DisplayFormulaRegion,
+    ) -> list[PdfRegion]:
+        expanded = _expand_bbox(region.bbox, 1.0)
+        return [
+            item
+            for item in page.regions
+            if item.kind == "vector" and _bbox_intersects(item.bbox, expanded)
+        ]
+
+    def _best_fraction_vector(
+        self,
+        glyphs: list[PdfGlyph],
+        vectors: list[PdfRegion],
+    ) -> PdfRegion | None:
+        best: PdfRegion | None = None
+        best_width = 0.0
+        for vector in vectors:
+            width = _bbox_width(vector.bbox)
+            height = _bbox_height(vector.bbox)
+            if width < 6.0 or height > max(1.5, width * 0.18):
+                continue
+            y = (vector.bbox[1] + vector.bbox[3]) / 2.0
+            above = [glyph for glyph in glyphs if _glyph_overlaps_x(glyph, vector.bbox, 1.0) and _glyph_center(glyph)[1] < y - 0.8]
+            below = [glyph for glyph in glyphs if _glyph_overlaps_x(glyph, vector.bbox, 1.0) and _glyph_center(glyph)[1] > y + 0.8]
+            if not above or not below:
+                continue
+            if not _glyphs_look_like_local_fraction_part(above):
+                continue
+            if not _glyphs_look_like_local_fraction_part(below):
+                continue
+            if width > best_width:
+                best = vector
+                best_width = width
+        return best
+
+    def _render_with_fraction(
+        self,
+        glyphs: list[PdfGlyph],
+        fraction: PdfRegion,
+        vectors: list[PdfRegion],
+    ) -> str:
+        y = (fraction.bbox[1] + fraction.bbox[3]) / 2.0
+        numerator = [
+            glyph for glyph in glyphs
+            if _glyph_overlaps_x(glyph, fraction.bbox, 1.0) and _glyph_center(glyph)[1] < y - 0.8
+        ]
+        denominator = [
+            glyph for glyph in glyphs
+            if (
+                _glyph_overlaps_x(glyph, fraction.bbox, 2.0)
+                and (_glyph_center(glyph)[1] > y + 0.4 or glyph.text == "√")
+            )
+        ]
+        fraction_glyphs = set(numerator + denominator)
+        before = [
+            glyph for glyph in glyphs
+            if glyph not in fraction_glyphs and _glyph_center(glyph)[0] < fraction.bbox[0] - 0.6
+        ]
+        after = [
+            glyph for glyph in glyphs
+            if glyph not in fraction_glyphs and _glyph_center(glyph)[0] > fraction.bbox[2] + 0.6
+        ]
+        parts = [
+            self._render_glyphs(before, vectors),
+            r"\frac{" + self._render_glyphs(numerator, vectors) + "}{" + self._render_glyphs(denominator, vectors) + "}",
+            self._render_glyphs(after, vectors),
+        ]
+        return " ".join(part for part in parts if part.strip())
+
+    def _render_glyphs(self, glyphs: list[PdfGlyph], vectors: list[PdfRegion]) -> str:
+        glyphs = [glyph for glyph in glyphs if glyph.text and not glyph.text.isspace()]
+        if not glyphs:
+            return ""
+        if glyphs[0].text == "√" and len(glyphs) > 1:
+            return r"\sqrt{" + self._render_glyphs(glyphs[1:], vectors) + "}"
+        lines = _cluster_glyph_lines(glyphs)
+        rendered = [self._render_line(line, vectors) for line in lines]
+        return r" \\ ".join(item for item in rendered if item)
+
+    def _render_line(self, glyphs: list[PdfGlyph], vectors: list[PdfRegion]) -> str:
+        ordered = sorted(glyphs, key=lambda glyph: (glyph.bbox[0], glyph.bbox[1]))
+        tokens: list[_LatexToken] = []
+        i = 0
+        while i < len(ordered):
+            glyph = ordered[i]
+            if tokens:
+                relation = _script_relation(tokens[-1].glyph, glyph)
+                if relation:
+                    script_glyphs, i = _take_script_glyphs(ordered, i, tokens[-1].glyph, relation)
+                    script_text = self._render_line(script_glyphs, vectors)
+                    tokens[-1] = replace(
+                        tokens[-1],
+                        text=f"{tokens[-1].text}{relation}{{{script_text}}}",
+                    )
+                    continue
+            if glyph.text == "√":
+                radicand, next_i = _take_radical_glyphs(ordered, i, vectors)
+                if radicand:
+                    tokens.append(_LatexToken(r"\sqrt{" + self._render_line(radicand, vectors) + "}", radicand[-1]))
+                    i = next_i
+                    continue
+            word, next_i = _take_roman_word(ordered, i)
+            if word:
+                text = "".join(glyph.text for glyph in word)
+                token = rf"\mathrm{{{text}}}" if len(text) > 1 else _glyph_to_latex(word[0])
+                tokens.append(_LatexToken(token, word[-1]))
+                i = next_i
+                continue
+            tokens.append(_LatexToken(_glyph_to_latex(glyph), glyph))
+            i += 1
+        return _join_latex_tokens([token.text for token in tokens])
+
+
 @dataclass(frozen=True)
 class _DisplayLineInfo:
     order: int
@@ -420,6 +618,12 @@ class _PageLayout:
     @property
     def body_center(self) -> float:
         return (self.body_left + self.body_right) / 2.0
+
+
+@dataclass(frozen=True)
+class _LatexToken:
+    text: str
+    glyph: PdfGlyph
 
 
 def _page_lines(page: BornDigitalPage) -> list[tuple[int, PdfRegion, PdfLine]]:
@@ -1075,6 +1279,235 @@ def _flush_group(groups: list[list[PdfGlyph]], current: list[PdfGlyph]) -> None:
 
 def _glyph_has_math_evidence(glyph: PdfGlyph) -> bool:
     return _is_math_font_name(glyph.font) or _is_math_symbol(glyph.text) or glyph.is_unknown
+
+
+def _glyphs_look_like_formula_expression(glyphs: list[PdfGlyph]) -> bool:
+    text = "".join(glyph.text for glyph in glyphs if glyph.text and not glyph.text.isspace())
+    if not text:
+        return False
+    letters = sum(1 for ch in text if ch.isalpha())
+    digits = sum(1 for ch in text if ch.isdigit())
+    operators = sum(1 for ch in text if ch in "=+-−*/·×^_()[]{}|<>√∈∑∫")
+    math_fonts = sum(1 for glyph in glyphs if _glyph_has_math_evidence(glyph))
+    roman_letters = sum(
+        1
+        for glyph in glyphs
+        if glyph.text.isalpha() and _is_roman_math_word_glyph(glyph)
+    )
+    if operators >= 2 and math_fonts >= 1:
+        return True
+    if operators >= 3 and digits + math_fonts >= 2:
+        return True
+    if letters >= 10 and roman_letters / max(letters, 1) > 0.65 and operators < 3:
+        return False
+    if digits >= 12 and operators >= 4 and math_fonts <= 2:
+        return False
+    return math_fonts >= 2 and operators >= 1
+
+
+def _glyphs_look_like_local_fraction_part(glyphs: list[PdfGlyph]) -> bool:
+    clean = [glyph for glyph in glyphs if glyph.text and not glyph.text.isspace()]
+    if not clean or len(clean) > 18:
+        return False
+    lines = _cluster_glyph_lines(clean)
+    if len(lines) > 2:
+        return False
+    if sum(1 for glyph in clean if _glyph_has_math_evidence(glyph)) == 0:
+        return False
+    height = _bbox_height(_union_bbox([glyph.bbox for glyph in clean]))
+    median_height = _median_positive([_bbox_height(glyph.bbox) for glyph in clean], 10.0)
+    return height <= median_height * 2.9
+
+
+def _cluster_glyph_lines(glyphs: list[PdfGlyph]) -> list[list[PdfGlyph]]:
+    lines: list[list[PdfGlyph]] = []
+    for glyph in sorted(glyphs, key=lambda item: (_glyph_center(item)[1], item.bbox[0])):
+        center_y = _glyph_center(glyph)[1]
+        target: list[PdfGlyph] | None = None
+        for line in lines:
+            line_center = sum(_glyph_center(item)[1] for item in line) / len(line)
+            line_height = _median_positive([_bbox_height(item.bbox) for item in line] + [_bbox_height(glyph.bbox)], 10.0)
+            if abs(center_y - line_center) <= line_height * 0.42:
+                target = line
+                break
+        if target is None:
+            lines.append([glyph])
+        else:
+            target.append(glyph)
+    return [sorted(line, key=lambda item: item.bbox[0]) for line in lines]
+
+
+def _script_relation(base: PdfGlyph, script: PdfGlyph) -> str | None:
+    base_height = max(_bbox_height(base.bbox), 1.0)
+    script_height = _bbox_height(script.bbox)
+    if script_height <= 0 or script_height >= base_height * 0.90:
+        return None
+    base_center_y = _glyph_center(base)[1]
+    script_center_y = _glyph_center(script)[1]
+    horizontal_gap = script.bbox[0] - base.bbox[2]
+    if horizontal_gap < -base_height * 0.15 or horizontal_gap > base_height * 0.95:
+        return None
+    if script_center_y < base_center_y - base_height * 0.10:
+        return "^"
+    if script_center_y > base_center_y + base_height * 0.10:
+        return "_"
+    return None
+
+
+def _take_script_glyphs(
+    ordered: list[PdfGlyph],
+    start: int,
+    base: PdfGlyph,
+    relation: str,
+) -> tuple[list[PdfGlyph], int]:
+    result: list[PdfGlyph] = []
+    i = start
+    base_height = max(_bbox_height(base.bbox), 1.0)
+    last_x = base.bbox[2]
+    while i < len(ordered):
+        glyph = ordered[i]
+        if _script_relation(base, glyph) != relation:
+            break
+        if glyph.bbox[0] - last_x > base_height * 1.2:
+            break
+        result.append(glyph)
+        last_x = glyph.bbox[2]
+        i += 1
+    return result, i
+
+
+def _take_radical_glyphs(
+    ordered: list[PdfGlyph],
+    start: int,
+    vectors: list[PdfRegion],
+) -> tuple[list[PdfGlyph], int]:
+    radical = ordered[start]
+    bar = _radical_bar(radical, vectors)
+    if bar is None:
+        if start + 1 >= len(ordered):
+            return [], start + 1
+        return [ordered[start + 1]], start + 2
+    result: list[PdfGlyph] = []
+    i = start + 1
+    while i < len(ordered):
+        glyph = ordered[i]
+        if glyph.bbox[0] > bar.bbox[2] + 1.0:
+            break
+        if _glyph_overlaps_x(glyph, bar.bbox, 1.0) and glyph.bbox[1] >= bar.bbox[1] - 1.5:
+            result.append(glyph)
+        i += 1
+    return result, i
+
+
+def _radical_bar(radical: PdfGlyph, vectors: list[PdfRegion]) -> PdfRegion | None:
+    candidates = [
+        vector for vector in vectors
+        if _bbox_width(vector.bbox) >= max(_bbox_width(radical.bbox), 4.0)
+        and abs(vector.bbox[1] - radical.bbox[1]) <= max(_bbox_height(radical.bbox), 1.0)
+        and vector.bbox[0] >= radical.bbox[0] - 1.0
+        and vector.bbox[0] <= radical.bbox[2] + 3.0
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: _bbox_width(item.bbox))
+
+
+def _take_roman_word(ordered: list[PdfGlyph], start: int) -> tuple[list[PdfGlyph], int]:
+    first = ordered[start]
+    if not _is_roman_math_word_glyph(first):
+        return [], start
+    result = [first]
+    i = start + 1
+    while i < len(ordered):
+        glyph = ordered[i]
+        if not _is_roman_math_word_glyph(glyph):
+            break
+        gap = glyph.bbox[0] - result[-1].bbox[2]
+        if gap > max(_bbox_height(first.bbox) * 0.45, 3.0):
+            break
+        result.append(glyph)
+        i += 1
+    if len(result) < 2:
+        return [], start
+    return result, i
+
+
+def _is_roman_math_word_glyph(glyph: PdfGlyph) -> bool:
+    text = glyph.text
+    if len(text) != 1 or not text.isalpha():
+        return False
+    font = glyph.font.lower()
+    if _is_math_font_name(glyph.font):
+        return False
+    return "cmr" in font or "roman" in font or "times" in font or "nimbus" in font
+
+
+def _glyph_to_latex(glyph: PdfGlyph) -> str:
+    text = glyph.text
+    if glyph.is_unknown:
+        return r"\unknown"
+    replacements = {
+        "−": "-",
+        "·": r"\cdot",
+        "×": r"\times",
+        "∈": r"\in",
+        "∼": r"\sim",
+        "≅": r"\cong",
+        "≤": r"\leq",
+        "≥": r"\geq",
+        "√": r"\sqrt{}",
+    }
+    if text in replacements:
+        return replacements[text]
+    return _escape_latex_char(text)
+
+
+def _escape_latex_char(text: str) -> str:
+    if text in {"_", "^"}:
+        return "\\" + text
+    return text
+
+
+def _join_latex_tokens(tokens: list[str]) -> str:
+    text = " ".join(token for token in tokens if token)
+    text = re.sub(r"\s+([,.;:)\\}\\]])", r"\1", text)
+    text = re.sub(r"([({\\[])\s+", r"\1", text)
+    text = re.sub(r"\s+([_^])", r"\1", text)
+    text = re.sub(r"([_^])\s+", r"\1", text)
+    text = re.sub(r"\\mathrm\{([A-Za-z]+)\}\s*\(", r"\\mathrm{\1}(", text)
+    return text.strip()
+
+
+def _cleanup_latex(text: str) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r" ?\\\\ ?", r" \\\\ ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _glyph_center(glyph: PdfGlyph) -> tuple[float, float]:
+    return ((glyph.bbox[0] + glyph.bbox[2]) / 2.0, (glyph.bbox[1] + glyph.bbox[3]) / 2.0)
+
+
+def _glyph_overlaps_x(
+    glyph: PdfGlyph,
+    bbox: tuple[float, float, float, float],
+    margin: float,
+) -> bool:
+    return glyph.bbox[2] >= bbox[0] - margin and glyph.bbox[0] <= bbox[2] + margin
+
+
+def _glyphs_look_like_equation_label(glyphs: list[PdfGlyph], page_size: tuple[float, float]) -> bool:
+    text = "".join(glyph.text for glyph in glyphs if glyph.text and not glyph.text.isspace())
+    if len(text) < 3 or len(text) > 8:
+        return False
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    if not all(ch.isdigit() or ch in {".", "-"} for ch in text[1:-1]):
+        return False
+    bbox = _union_bbox([glyph.bbox for glyph in glyphs])
+    return bbox[0] >= page_size[0] * 0.68
 
 
 def _is_short_math_connector(text: str) -> bool:

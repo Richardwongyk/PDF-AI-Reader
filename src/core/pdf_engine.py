@@ -170,6 +170,7 @@ class DocumentChunker:
         median_font_size: float = 10.0,
         line_spacing_factor: float = 1.5,
         enable_born_digital_math: bool = False,
+        enable_born_digital_semantics: bool = False,
         enable_legacy_formula_heuristic: bool = True,
     ) -> None:
         """初始化分块器。
@@ -178,11 +179,13 @@ class DocumentChunker:
             median_font_size: 默认正文中位数字号（pt），用于标题检测。
             line_spacing_factor: 行间距阈值因子（相对于行高中位数）。
             enable_born_digital_math: 启用 MuPDF rawdict 数学事实层补充显示公式块。
+            enable_born_digital_semantics: 对结构公式块启用证据驱动 LaTeX 恢复。
             enable_legacy_formula_heuristic: 保留旧 span 级公式分类逻辑。
         """
         self._median_font_size = median_font_size
         self._line_spacing_factor = line_spacing_factor
         self._enable_born_digital_math = enable_born_digital_math
+        self._enable_born_digital_semantics = enable_born_digital_semantics
         self._enable_legacy_formula_heuristic = enable_legacy_formula_heuristic
 
     def chunk(self, doc: fitz.Document) -> list[DocumentBlock]:
@@ -307,10 +310,15 @@ class DocumentChunker:
     ) -> list[DocumentBlock]:
         """Append high-confidence display formula regions from PDF structure facts."""
         try:
-            from src.core.born_digital_math import BornDigitalMathAuditor, MuPDFBornDigitalExtractor
+            from src.core.born_digital_math import (
+                BornDigitalMathAuditor,
+                MuPDFBornDigitalExtractor,
+                PdfFormulaSemanticReconstructor,
+            )
 
             page_facts = MuPDFBornDigitalExtractor().extract_page(page, page_num)
             regions = BornDigitalMathAuditor().display_formula_regions(page_facts)
+            reconstructor = PdfFormulaSemanticReconstructor() if self._enable_born_digital_semantics else None
         except Exception as exc:
             import logging
 
@@ -325,21 +333,29 @@ class DocumentChunker:
             if self._overlaps_existing_formula(region.bbox, existing_formulas):
                 continue
             self._mark_shadowed_blocks(region.bbox, merged)
+            semantic = reconstructor.reconstruct(page_facts, region) if reconstructor is not None else None
+            content = semantic.latex if semantic is not None and semantic.latex else region.text
+            evidence = list(region.evidence)
+            warnings: list[str] = []
+            if semantic is not None:
+                evidence = list(semantic.evidence)
+                warnings = list(semantic.warnings)
             merged.append(DocumentBlock(
                 id=f"p{page_num}_b{len(merged)}",
                 page_num=page_num,
                 block_type=BlockType.FORMULA,
-                content=wrap_math_text(region.text, display=True),
+                content=wrap_math_text(content, display=True),
                 bbox=region.bbox,
                 metadata={
-                    "source": region.source,
+                    "source": semantic.source if semantic is not None else region.source,
                     "math_wrapped": "display",
                     "needs_ocr": False,
-                    "confidence": region.confidence,
-                    "evidence": list(region.evidence),
+                    "confidence": semantic.confidence if semantic is not None else region.confidence,
+                    "evidence": evidence,
+                    "warnings": warnings,
                     "line_count": region.line_count,
                     "vector_count": region.vector_count,
-                    "semantic_recovery": "pending",
+                    "semantic_recovery": "layout_v1" if semantic is not None else "pending",
                 },
             ))
         return sorted(merged, key=lambda block: (block.bbox[1], block.bbox[0]))
