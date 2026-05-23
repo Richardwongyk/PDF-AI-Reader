@@ -37,7 +37,11 @@ class ChromaRepo:
         os.makedirs(persist_dir, exist_ok=True)
         self._client = chromadb.PersistentClient(path=persist_dir)
 
-    def create_or_get_collection(self, doc_hash: str) -> chromadb.Collection:
+    def create_or_get_collection(
+        self,
+        doc_hash: str,
+        collection_prefix: str | None = None,
+    ) -> chromadb.Collection:
         """为文档创建或获取 Collection。
 
         Collection 名称格式: pdf_{doc_hash}
@@ -49,13 +53,18 @@ class ChromaRepo:
         Returns:
             ChromaDB Collection 对象。
         """
-        name = f"{self.COLLECTION_PREFIX}{doc_hash}"
+        prefix = collection_prefix or self.COLLECTION_PREFIX
+        name = f"{prefix}{doc_hash}"
         return self._client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},
         )
 
-    def get_collection(self, doc_hash: str) -> chromadb.Collection:
+    def get_collection(
+        self,
+        doc_hash: str,
+        collection_prefix: str | None = None,
+    ) -> chromadb.Collection:
         """获取已有 Collection。
 
         Args:
@@ -67,7 +76,8 @@ class ChromaRepo:
         Raises:
             ValueError: Collection 不存在时。
         """
-        name = f"{self.COLLECTION_PREFIX}{doc_hash}"
+        prefix = collection_prefix or self.COLLECTION_PREFIX
+        name = f"{prefix}{doc_hash}"
         try:
             return self._client.get_collection(name)
         except Exception:
@@ -186,19 +196,28 @@ class ChromaRepo:
             }
         return None
 
-    def delete_collection(self, doc_hash: str) -> None:
+    def delete_collection(
+        self,
+        doc_hash: str,
+        collection_prefix: str | None = None,
+    ) -> None:
         """删除指定文档的知识库 Collection。
 
         Args:
             doc_hash: 文档哈希。
         """
-        name = f"{self.COLLECTION_PREFIX}{doc_hash}"
+        prefix = collection_prefix or self.COLLECTION_PREFIX
+        name = f"{prefix}{doc_hash}"
         try:
             self._client.delete_collection(name)
         except Exception:
             pass  # Collection 不存在时不报错
 
-    def collection_exists(self, doc_hash: str) -> bool:
+    def collection_exists(
+        self,
+        doc_hash: str,
+        collection_prefix: str | None = None,
+    ) -> bool:
         """检查指定文档的知识库是否已构建。
 
         Args:
@@ -207,7 +226,8 @@ class ChromaRepo:
         Returns:
             True 表示 Collection 存在。
         """
-        name = f"{self.COLLECTION_PREFIX}{doc_hash}"
+        prefix = collection_prefix or self.COLLECTION_PREFIX
+        name = f"{prefix}{doc_hash}"
         try:
             collection = self._client.get_collection(name)
             return collection.count() > 0

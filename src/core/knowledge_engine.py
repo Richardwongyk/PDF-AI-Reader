@@ -17,6 +17,7 @@ from src.core.models import (
     DocumentBlock,
     KnowledgeStatus,
 )
+from src.core.knowledge_backends import KnowledgeIndexBackend, create_knowledge_backend
 from src.data.chroma_repo import ChromaRepo
 
 # 嵌入客户端接口（避免循环依赖，仅用于类型注解）
@@ -156,6 +157,11 @@ class KnowledgeEngine(BaseService):
         self._embed = embed_service
         self._repo = chroma_repo
         self._config = config or AppConfig()
+        self._backend = create_knowledge_backend(
+            self._config.rag.backend,
+            self._repo,
+            self._embed.embed,
+        )
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(2)  # 最多 2 个并行嵌入线程
         self._db_lock = QReadWriteLock()  # 防止 ChromaDB SQLite 并发读写锁死
@@ -170,6 +176,11 @@ class KnowledgeEngine(BaseService):
         """获取 ChromaDB 仓库实例。"""
         return self._repo
 
+    @property
+    def backend_name(self) -> str:
+        """当前知识库后端名称。"""
+        return self._backend.name
+
     def build_knowledge_base(
         self, blocks: list[DocumentBlock], doc_hash: str, force_rebuild: bool = False
     ) -> None:
@@ -180,15 +191,12 @@ class KnowledgeEngine(BaseService):
             doc_hash: 文件 SHA256 哈希（前 16 位）。
             force_rebuild: True 时即使已存在也重新构建。
         """
-        if not force_rebuild and self._repo.collection_exists(doc_hash):
+        if not force_rebuild and self._backend.exists(doc_hash):
             self.build_finished.emit(doc_hash)
             return
 
-        if force_rebuild:
-            self._repo.delete_collection(doc_hash)
-
         # 使用 QThreadPool 异步执行
-        worker = _BuildWorker(self._embed, self._repo, blocks, doc_hash, self._db_lock)
+        worker = _BuildWorker(self._backend, blocks, doc_hash, force_rebuild, self._db_lock)
         worker.progress.connect(self.build_progress.emit)
         worker.finished.connect(self.build_finished.emit)
         worker.error.connect(self.build_error.emit)
@@ -223,8 +231,12 @@ class KnowledgeEngine(BaseService):
         query_vector = self._embed.embed_single(query)
         fetch_k = self._configured_candidate_count(top_k)
         with QReadLocker(self._db_lock):
-            candidates = self._repo.query_relevant(
-                doc_hash, query_vector, top_k=fetch_k, exclude_ids=exclude_ids
+            candidates = self._backend.retrieve(
+                query,
+                query_vector,
+                doc_hash,
+                top_k=fetch_k,
+                exclude_ids=exclude_ids,
             )
         if not self._config.rag.enable_hybrid_rerank:
             return candidates[:top_k]
@@ -375,7 +387,7 @@ class KnowledgeEngine(BaseService):
         Args:
             doc_hash: 文档哈希。
         """
-        self._repo.delete_collection(doc_hash)
+        self._backend.delete(doc_hash)
 
     def check_exists(self, doc_hash: str) -> bool:
         """检查指定文档的知识库是否已构建。
@@ -386,7 +398,7 @@ class KnowledgeEngine(BaseService):
         Returns:
             True 表示知识库已存在。
         """
-        return self._repo.collection_exists(doc_hash)
+        return self._backend.exists(doc_hash)
 
     def get_status(self, doc_hash: str) -> KnowledgeStatus:
         """获取知识库状态。
@@ -397,21 +409,7 @@ class KnowledgeEngine(BaseService):
         Returns:
             KnowledgeStatus 对象。
         """
-        exists = self._repo.collection_exists(doc_hash)
-        total_blocks = 0
-        if exists:
-            try:
-                collection = self._repo.get_collection(doc_hash)
-                total_blocks = collection.count()
-            except Exception:
-                total_blocks = 0
-        return KnowledgeStatus(
-            doc_hash=doc_hash,
-            collection_name=f"pdf_{doc_hash}",
-            is_ready=exists,
-            total_blocks=total_blocks,
-            embedded_blocks=total_blocks,
-        )
+        return self._backend.status(doc_hash)
 
     def close(self) -> None:
         """关闭知识库引擎，释放线程池和数据库连接。"""
@@ -419,7 +417,7 @@ class KnowledgeEngine(BaseService):
         if self._pool.activeThreadCount() > 0:
             self._pool.waitForDone(5000)
         # 2. 关闭 ChromaDB 连接
-        self._repo.close()
+        self._backend.close()
         self.logger.info("知识库引擎已关闭")
 
 
@@ -435,26 +433,26 @@ class _BuildWorker(QRunnable):
 
     def __init__(
         self,
-        embed_service: EmbeddingService,
-        chroma_repo: ChromaRepo,
+        backend: KnowledgeIndexBackend,
         blocks: list[DocumentBlock],
         doc_hash: str,
+        force_rebuild: bool,
         db_lock: QReadWriteLock | None = None,
     ) -> None:
         """初始化构建 Worker。
 
         Args:
-            embed_service: 嵌入服务实例。
-            chroma_repo: ChromaDB 仓库实例。
+            backend: 知识库后端实例。
             blocks: 文档块列表。
             doc_hash: 文档哈希。
+            force_rebuild: 是否强制重建。
             db_lock: 数据库写锁（防止 SQLite 并发锁死）。
         """
         super().__init__()
-        self._embed = embed_service
-        self._repo = chroma_repo
+        self._backend = backend
         self._blocks = blocks
         self._doc_hash = doc_hash
+        self._force_rebuild = force_rebuild
         self._db_lock = db_lock
 
         from PySide6.QtCore import Signal, QObject
@@ -485,9 +483,9 @@ class _BuildWorker(QRunnable):
         """在 QThreadPool 工作线程中执行构建。
 
         步骤：
-        1. 创建 ChromaDB Collection
-        2. 分批生成嵌入向量
-        3. 批量写入 ChromaDB
+        1. 委托当前 KnowledgeIndexBackend 构建索引
+        2. 透传构建进度
+        3. 发出完成或错误信号
         """
         import logging
         _logger = logging.getLogger("KnowledgeEngine")
@@ -496,50 +494,29 @@ class _BuildWorker(QRunnable):
             start_time = time.time()
 
             total = len(self._blocks)
-            self._signals.progress.emit(0, total)
+            def _emit_progress(current: int, total_blocks: int) -> None:
+                self._signals.progress.emit(current, total_blocks)
 
-            text_contents = [b.content for b in self._blocks]
-            vectors = self._embed.embed(text_contents)
-
-            # 准备写入数据
-            block_ids = [b.id for b in self._blocks]
-            metadatas = [
-                {
-                    "page": b.page_num,
-                    "type": b.block_type.value,
-                    "section": b.section_title,
-                    "summary": b.metadata.get("summary", ""),
-                }
-                for b in self._blocks
-            ]
-
-            # 分批写入（加锁防 SQLite 并发锁死）
-            _BATCH_SIZE = 50
-            for batch_start in range(0, total, _BATCH_SIZE):
-                batch_end = min(batch_start + _BATCH_SIZE, total)
-                if self._db_lock:
-                    with QWriteLocker(self._db_lock):
-                        self._repo.upsert_blocks(
-                            self._doc_hash,
-                            block_ids=block_ids[batch_start:batch_end],
-                            documents=text_contents[batch_start:batch_end],
-                            vectors=vectors[batch_start:batch_end],
-                            metadatas=metadatas[batch_start:batch_end],
-                        )
-                else:
-                    self._repo.upsert_blocks(
+            if self._db_lock:
+                with QWriteLocker(self._db_lock):
+                    self._backend.build(
+                        self._blocks,
                         self._doc_hash,
-                        block_ids=block_ids[batch_start:batch_end],
-                        documents=text_contents[batch_start:batch_end],
-                        vectors=vectors[batch_start:batch_end],
-                        metadatas=metadatas[batch_start:batch_end],
+                        self._force_rebuild,
+                        _emit_progress,
                     )
-                self._signals.progress.emit(batch_end, total)
+            else:
+                self._backend.build(
+                    self._blocks,
+                    self._doc_hash,
+                    self._force_rebuild,
+                    _emit_progress,
+                )
 
             elapsed = time.time() - start_time
             _logger.info(
-                "知识库构建完成: doc_hash=%s, blocks=%d, time=%.1fs",
-                self._doc_hash, total, elapsed,
+                "知识库构建完成: backend=%s, doc_hash=%s, blocks=%d, time=%.1fs",
+                self._backend.name, self._doc_hash, total, elapsed,
             )
             self._signals.finished.emit(self._doc_hash)
 

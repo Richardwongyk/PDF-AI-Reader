@@ -96,6 +96,7 @@ PDF / OCR / MFR
 - 引入 LlamaIndex Node/VectorStoreIndex 编排。
 - 底层仍用 Chroma，数据目录与 collection 名使用新版本：`pdf_li_v1_{doc_hash}`。
 - 现有 `legacy_chroma` 保持默认，新增 `llamaindex_chroma` 可配置启用。
+- 性能审计：直接使用 LlamaIndex ChromaVectorStore 写入已有 embedding 的构建耗时约为旧后端 4 倍，不能放入热路径。优化后写入/检索热路径改为 Chroma 原生批量 upsert/query，LlamaIndex 保留为 schema/GraphRAG 编排层；在 488 块合成 Attention 规模基准上，旧后端构建约 1.46s、检索约 0.035s，优化后 LlamaIndex 后端构建约 1.51s、检索约 0.036s，性能基本持平。
 
 验收：
 
@@ -143,6 +144,7 @@ PDF / OCR / MFR
 ## 性能策略
 
 - 索引构建继续在 `QThreadPool` 后台线程执行。
+- Chroma 批量写入默认使用 512 块一批；5000 块合成基准从 batch=50 的约 16.2s 降至约 9.9s。
 - 默认打开文档不阻塞等待 GraphRAG。
 - 长文档默认先建基础向量/混合索引，图谱抽取排队或手动触发。
 - 重排候选池由 `rag.candidate_pool` 控制，默认 48。
@@ -162,7 +164,21 @@ PDF / OCR / MFR
 3. `KnowledgeEngine` 改为 facade，保留原信号。
 4. 增加 backend 选择测试、Node metadata 映射测试、旧配置兼容测试。
 5. 在 `config.example.yaml` 中保留默认 `legacy_chroma`，避免未验证前影响用户。
-6. E2E 先跑默认后端，再单独跑 `llamaindex_chroma` 后端。
+6. LlamaIndex Chroma 默认写入路径不得使用；后端必须走项目优化过的原生批量写入路径。后续默认性能路径仍应评估 Qdrant hybrid，但 LlamaIndex 可以继续作为 GraphRAG/高级编排候选。
+
+## 公式识别性能策略
+
+公式识别不能以牺牲阅读体验为代价全量同步运行。后续改造按三层执行：
+
+- 快速打开层：PDF 首屏、滚动、缩放只依赖 PyMuPDF 原生文本和已有缓存。
+- 按需精扫层：只对视口附近、用户双击、问答证据涉及的疑似公式块触发 MFD/MFR。
+- 后台批处理层：空闲时增量扫描，结果写入公式 OCR 缓存；长文档按页优先级队列运行，可暂停和恢复。
+
+验收门槛：
+
+- 打开 Attention/Napkin 的首屏时间不因公式精扫增加。
+- 同一公式二次打开必须命中缓存，不重复 MFR。
+- E2E 日志不得出现 OCR 线程阻塞 UI 或渲染队列积压。
 
 ## 官方资料
 
