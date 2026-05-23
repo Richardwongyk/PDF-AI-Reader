@@ -179,7 +179,9 @@ PDF / OCR / MFR
 - 新增 `GraphIndexStore`，使用 SQLite 记录 block-level 图谱抽取任务和抽取结果 artifact。
 - 任务状态支持 queued / running / done / failed / skipped，支持内容 hash，内容未变化时不重复抽取。
 - artifact 保存 extractor、nodes、edges、updated_at，后续可接 LlamaIndex PropertyGraph、Neo4j、DeepSeek V4 Pro 或其他成熟后端。
-- 该层不调用模型、不构建图谱、不接入 UI 热路径，只提供可暂停、可恢复、可回滚的任务边界。
+- 新增 `GraphIndexFlow`，在 `rag.enable_graph_index=true` 时由 `DocumentFlow` 在全量解析完成后异步调度，默认关闭，不进入打开/滚动/缩放热路径。
+- 默认 `structural_v1` extractor 只抽取已有 `DocumentBlock` 事实：document / page / block / section / formula / theorem 节点，以及 contains / in_section / expresses_formula 等边。
+- 当前结构抽取不调用模型，不把临时概念词表当作 GraphRAG；它只先打通可暂停、可恢复、可回滚的图谱 artifact 管线。
 - 图谱任务数据库写入 `data/graph_index_jobs.db`，已加入 `.gitignore`。
 
 ## 版本与兼容策略
@@ -201,6 +203,7 @@ PDF / OCR / MFR
 - 增量公式 OCR 块允许追加到 collection；指纹只判断基础块集合，避免后台公式块导致无变化文档反复全量重建。
 - 默认交互式解析的 MFD 页扫描预算为 0，避免长文档打开后加载重型公式检测模型抢占 UI、翻译和渲染。
 - 默认打开文档不阻塞等待 GraphRAG。
+- GraphRAG 默认关闭；开启后只在全量解析完成后启动一个后台批次，批次大小复用 `rag.candidate_pool`，不会阻塞基础知识库构建。
 - 长文档默认先建基础向量/混合索引，图谱抽取排队或手动触发。
 - 重排候选池由 `rag.candidate_pool` 控制，默认 48。
 - evidence 输出由 `rag.final_evidence` 控制，默认 8。

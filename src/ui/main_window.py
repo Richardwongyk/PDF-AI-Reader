@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         self._document_flow = DocumentFlow(
             self._doc_engine, self._knowledge_engine,
             self._ai_engine, self._glossary_manager,
+            services.get("graph_index_flow"),
         )
 
         # 概念解释流程协调器（借鉴 Mad Professor AIManager 模式）

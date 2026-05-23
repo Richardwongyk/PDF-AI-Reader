@@ -41,6 +41,7 @@ class DocumentFlow(QObject):
         knowledge_engine: object,   # KnowledgeEngine
         ai_engine: object,          # AIEngine
         glossary_manager: object,   # GlossaryManager
+        graph_index_flow: object | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -48,6 +49,7 @@ class DocumentFlow(QObject):
         self._knowledge_engine = knowledge_engine
         self._ai_engine = ai_engine
         self._glossary_manager = glossary_manager
+        self._graph_index_flow = graph_index_flow
         self._current_hash: str = ""
 
         # 连接 DocumentEngine 信号（借鉴 DataManager 连接 Pipeline 信号模式）
@@ -122,3 +124,13 @@ class DocumentFlow(QObject):
             self._knowledge_engine.build_knowledge_base(
                 result.blocks, self._current_hash
             )
+
+        graph_flow = self._graph_index_flow
+        if graph_flow is not None and getattr(graph_flow, "enabled", False):
+            started = graph_flow.enqueue_document(
+                result.filepath,
+                self._current_hash,
+                result.blocks,
+            )
+            if started:
+                _logger.info("DocumentFlow: 图谱索引后台任务已启动")

@@ -48,7 +48,8 @@ def test_build_services_smoke() -> None:
         required = {
             "config_manager", "glossary_manager", "navigator", "page_cache",
             "ai_cache", "chroma_repo", "embed_client", "embedding_service",
-            "knowledge_engine", "ai_engine", "document_engine",
+            "knowledge_engine", "ai_engine", "graph_index_flow",
+            "document_engine",
         }
         missing = required - names
         assert not missing, missing

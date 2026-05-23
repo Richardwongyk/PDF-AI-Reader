@@ -111,6 +111,15 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
     navigator = Navigator()
     container.register_instance("navigator", navigator)
 
+    def _build_graph_index_flow():
+        from src.app.graph_index_flow import GraphIndexFlow
+        return GraphIndexFlow(
+            enabled=bool(config.rag.enable_graph_index),
+            batch_budget=max(1, int(config.rag.candidate_pool)),
+        )
+
+    container.register_singleton("graph_index_flow", _build_graph_index_flow)
+
     # ── 4. 重量级基础设施 (LAZY SINGLETON — 延迟到首次使用) ──
 
     def _build_chroma_repo():

@@ -215,6 +215,15 @@
 - 运行时如果实际 embedding 只是 `HashingEmbeddingClient` 兜底，会自动把知识库后端从 `legacy_chroma` 切到 `sqlite_fts`；真实 embedding 可用时仍保留配置后端。
 - `sqlite_fts` fallback 不再初始化 `ChromaRepo`，减少没有真实 embedding 时的知识库启动开销。
 
+### GraphRAG 管线
+
+已完成：
+
+- 新增 `GraphIndexFlow`，在 `rag.enable_graph_index=true` 时由 `DocumentFlow` 异步调度；默认关闭，不影响导入、滚动、缩放、翻译和基础问答热路径。
+- 默认 `structural_v1` extractor 只抽取已有 PDF/DocumentBlock 事实：document、page、block、section、formula、theorem 节点及 contains / in_section / expresses_formula 等证据边。
+- 图谱 artifact 继续写入 `GraphIndexStore`，支持内容 hash、跳过未变化块、失败记录和后续恢复。
+- 当前版本不使用临时概念词表或样本特化正则，不把结构抽取伪装成最终 GraphRAG；下一步接 DeepSeek V4 Pro 或 LlamaIndex PropertyGraph 作为可选高阶抽取后端。
+
 关键性能结论：
 
 - Attention 第二次重建：日志构建耗时 0.0s，最新 E2E 等待约 0.29s。
