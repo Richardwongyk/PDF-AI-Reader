@@ -1,8 +1,12 @@
 # Formula OCR Performance Design
 
+> 公式“判断/抽取”的完整调研与迁移路线见
+> [formula_extraction_research.md](formula_extraction_research.md)。本文件只保留 OCR
+> 性能策略；后续不要再把普通 born-digital PDF 的公式判断继续堆到单个启发式函数里。
+
 ## 目标
 
-公式 OCR 的目标不是“同步把全书扫完”，而是在不破坏阅读体验的前提下，让公式识别越用越完整、越扫越准。
+公式 OCR 的目标不是“同步把全书扫完”，而是在不破坏阅读体验的前提下，让公式识别越用越完整、越扫越准。普通文本 PDF 的公式应先通过字符、字体、bbox、行几何结构抽取；图片/扫描公式才进入 MFD/MFR。
 
 硬约束：
 
