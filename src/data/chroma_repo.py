@@ -201,8 +201,8 @@ class ChromaRepo:
         """
         name = f"{self.COLLECTION_PREFIX}{doc_hash}"
         try:
-            self._client.get_collection(name)
-            return True
+            collection = self._client.get_collection(name)
+            return collection.count() > 0
         except Exception:
             return False
 

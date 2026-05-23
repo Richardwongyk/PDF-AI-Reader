@@ -4,10 +4,22 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
-SAMPLE_PDF = ROOT / "Attention is all you need.pdf"
+SAMPLE_PDF = next(
+    (
+        path
+        for path in (
+            ROOT / "Attention is all you need.pdf",
+            ROOT / "测试资料" / "Attention is all you need.pdf",
+        )
+        if path.exists()
+    ),
+    ROOT / "Attention is all you need.pdf",
+)
 
 
 def _run_python(source: str, timeout: int = 45) -> subprocess.CompletedProcess[str]:
@@ -48,7 +60,8 @@ def test_build_services_smoke() -> None:
 
 
 def test_sample_pdf_parse_smoke() -> None:
-    assert SAMPLE_PDF.exists()
+    if not SAMPLE_PDF.exists():
+        pytest.skip("sample PDF is not available in this checkout")
     result = _run_python(
         f"""
         import sys
@@ -62,7 +75,7 @@ def test_sample_pdf_parse_smoke() -> None:
         state = {{"result": None, "error": None}}
 
         def finish():
-            engine.close_document()
+            engine.shutdown()
             app.quit()
 
         def on_finished(result):

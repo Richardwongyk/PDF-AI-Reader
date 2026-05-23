@@ -124,18 +124,18 @@ class Bookmark(BaseModel):
 
 class ModelConfig(BaseModel):
     """模型配置。"""
-    local: str = "qwen3.5:4b"            # 本地默认模型
+    local: str = "qwen3.5:4b"            # 可选本地生成模型（Ollama）
     cloud: str = "deepseek/deepseek-chat" # 云端默认模型
-    embed_local: str = "bge-m3"          # 本地嵌入模型
+    embed_local: str = "bge-m3"          # 可选本地嵌入模型；不可用时使用轻量哈希嵌入
     ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
 
 
 class RoutingConfig(BaseModel):
     """路由策略配置。"""
-    translation: str = "local_first"     # local_first / cloud_only / local_only
-    qa: str = "local_first"
-    summarization: str = "local_first"
-    embed: str = "local_only"            # 嵌入固定本地
+    translation: str = "cloud_only"      # cloud_only / local_first / local_only
+    qa: str = "cloud_only"
+    summarization: str = "cloud_only"
+    embed: str = "local_only"            # Ollama 不可用时自动退到确定性哈希嵌入
     auto_upgrade_threshold: int = 2000   # 字符数超过此值自动升级到云端
 
 

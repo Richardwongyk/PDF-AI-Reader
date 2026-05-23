@@ -296,6 +296,7 @@ class MainWindow(QMainWindow):
         self._explain_flow.question_ready.connect(
             lambda q, bid: self._on_split_ask(q, bid)
         )
+        self._ask_flow.answer_unavailable.connect(self._on_answer_unavailable)
         self._ai_engine.answer_token.connect(self._on_answer_token)
         self._ai_engine.answer_finished.connect(self._on_answer_finished)
         self._ai_engine.answer_error.connect(self._on_answer_error)
@@ -401,7 +402,8 @@ class MainWindow(QMainWindow):
             self._navigator.generate_toc_from_blocks(result.blocks)
 
         render_engine = "PyMuPDF"
-        self._status_model_label.setText(f"检查知识库... | {render_engine}")
+        model_state = self._model_status_text()
+        self._status_model_label.setText(f"检查知识库... | {model_state} | {render_engine}")
         QTimer.singleShot(0, self._refresh_knowledge_status)
 
         elapsed = time.time() - start
@@ -415,10 +417,14 @@ class MainWindow(QMainWindow):
         if not self._current_doc_hash:
             return
         render_engine = "PyMuPDF"
+        model_state = self._model_status_text()
         if self._knowledge_engine.check_exists(self._current_doc_hash):
-            self._status_model_label.setText(f"知识库就绪 | {render_engine}")
+            status = self._knowledge_engine.get_status(self._current_doc_hash)
+            count = status.embedded_blocks or status.total_blocks
+            suffix = f"{count} 块" if count else "就绪"
+            self._status_model_label.setText(f"知识库就绪({suffix}) | {model_state} | {render_engine}")
         else:
-            self._status_model_label.setText(f"知识库构建中... | {render_engine}")
+            self._status_model_label.setText(f"知识库构建中... | {model_state} | {render_engine}")
 
     def _on_page_blocks_ready(self, page_num: int, blocks: list[DocumentBlock]) -> None:
         """长文档后台补齐某页 blocks。"""
@@ -454,14 +460,33 @@ class MainWindow(QMainWindow):
     def _on_formula_blocks_updated(self, updated: list[dict[str, Any]]) -> None:
         """MFD/MFR 精扫完成：更新块类型、LaTeX 内容并刷新 overlay。"""
         update_map = {u["id"]: u for u in updated}
+        touched_pages: set[int] = set()
         for block in self._current_blocks:
             if block.id in update_map:
                 info = update_map[block.id]
                 block.block_type = BlockType(info["block_type"])
                 block.metadata.update(info.get("metadata", {}))
+                touched_pages.add(block.page_num)
                 # MFR 阶段：用识别到的 LaTeX 替换公式块内容
                 if "content" in info:
                     block.content = info["content"]
+        for info in updated:
+            if not info.get("is_new") or info["id"] in self._blocks_by_id:
+                continue
+            block = DocumentBlock(
+                id=info["id"],
+                page_num=int(info["page_num"]),
+                block_type=BlockType(info["block_type"]),
+                content=info.get("content", ""),
+                bbox=tuple(info["bbox"]),
+                metadata=info.get("metadata", {}),
+            )
+            self._current_blocks.append(block)
+            self._blocks_by_id[block.id] = block
+            touched_pages.add(block.page_num)
+        for page_num in touched_pages:
+            page_blocks = [b for b in self._current_blocks if b.page_num == page_num]
+            self._pdf_viewer.update_page_blocks(page_num, page_blocks)
         # 刷新已渲染的 overlay
         for block_id in update_map:
             ov = self._pdf_viewer._overlays.get(block_id)
@@ -491,7 +516,7 @@ class MainWindow(QMainWindow):
         """知识库构建完成。"""
         self._status_progress.setVisible(False)
         render_engine = "QtPdf" if self._doc_engine.using_qtpdf else "PyMuPDF"
-        self._status_model_label.setText(f"📚 知识库就绪 | 🖥️ {render_engine}")
+        self._status_model_label.setText(f"📚 知识库就绪 | {self._model_status_text()} | 🖥️ {render_engine}")
 
     def _on_kb_error(self, message: str) -> None:
         """知识库构建失败。"""
@@ -607,6 +632,12 @@ class MainWindow(QMainWindow):
         if split:
             split.display_full_answer(full_answer)
 
+    def _on_answer_unavailable(self, message: str, split_id: str) -> None:
+        """知识库未就绪或无上下文时，直接在裂缝中给出边界提示。"""
+        split = self._pdf_viewer.find_split_widget(split_id)
+        if split:
+            split.display_full_answer(message)
+
     def _on_translation_error(self, message: str, block_id: str) -> None:
         """翻译出错。"""
         self._active_translation_blocks.discard(block_id)
@@ -713,6 +744,18 @@ class MainWindow(QMainWindow):
         self._config = config
         self._apply_theme()
 
+    def _model_status_text(self) -> str:
+        """状态栏模型说明，明确云端/本地/测试模式边界。"""
+        strategy = self._config.routing.translation
+        cloud = self._config.model.cloud
+        key = self._services.get("config_manager").get_api_key(cloud)
+        has_key = bool(key and key.strip() and "在此填入" not in key)
+        if strategy == "cloud_only":
+            return f"云端生成: {cloud}" if has_key else "测试模式: 未配置云端 API"
+        if strategy == "local_only":
+            return f"本地生成: {self._config.model.local}"
+        return f"混合路由: 本地优先→{cloud if has_key else 'Mock'}"
+
     def _on_about(self) -> None:
         """关于对话框。"""
         QMessageBox.about(
@@ -781,7 +824,23 @@ class MainWindow(QMainWindow):
 
 
     def _check_first_launch(self) -> None:
-        """首次启动检查：验证本地模型状态。"""
+        """首次启动检查：默认检查云端配置，本地模式才检查 Ollama。"""
+        if self._config.routing.translation == "cloud_only" or self._config.routing.qa == "cloud_only":
+            cloud = self._config.model.cloud
+            key = self._services.get("config_manager").get_api_key(cloud)
+            if key and key.strip() and "在此填入" not in key:
+                self._status_model_label.setText(f"✅ 云端生成: {cloud}")
+                return
+            self._status_model_label.setText("⚠️ 未配置云端 API，当前为测试模式")
+            QMessageBox.information(
+                self,
+                "模型配置",
+                "当前默认使用云端模型生成翻译和回答，但尚未配置 API Key。\n\n"
+                "在配置前，应用会使用模拟回答，知识库检索和翻译质量不能代表真实效果。\n"
+                "配置云端模型后，翻译/问答内容会发送到对应 API 服务；PDF 解析和本地索引仍保存在本机。",
+            )
+            return
+
         model_status = self._ai_engine.check_local_model_status()
 
         if not model_status["ollama_available"]:
@@ -790,7 +849,7 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self, "首次启动",
                 "未检测到 Ollama 服务。\n\n"
-                "Ollama 是运行本地 AI 模型所必需的后台服务。\n"
+                "只有在启用本地生成模式时才需要 Ollama。\n"
                 "请确保已安装并启动 Ollama 桌面应用。\n\n"
                 "是否前往 Ollama 官网下载？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

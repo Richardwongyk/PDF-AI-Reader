@@ -118,7 +118,10 @@ class Pix2TextMFDDetector(FormulaDetector):
 
     def _page_has_formulas(self, blocks: list[DocumentBlock], page_num: int) -> bool:
         """粗略判断页面是否可能包含公式。"""
-        page_blocks = [b for b in blocks if b.page_num == page_num and b.block_type == BlockType.PARAGRAPH]
+        page_all_blocks = [b for b in blocks if b.page_num == page_num]
+        if any(b.block_type == BlockType.IMAGE for b in page_all_blocks):
+            return True
+        page_blocks = [b for b in page_all_blocks if b.block_type == BlockType.PARAGRAPH]
         if not page_blocks:
             return False
         import re
@@ -142,6 +145,8 @@ class Pix2TextMFDDetector(FormulaDetector):
                      ','.join(str(p+1) for p in candidate_pages))
         formulas = self.detect_specific_pages(doc, candidate_pages)
         matched = 0
+        added = 0
+        existing_ids = {b.id for b in blocks}
         for block in blocks:
             if block.block_type != BlockType.PARAGRAPH:
                 continue
@@ -160,5 +165,49 @@ class Pix2TextMFDDetector(FormulaDetector):
                         block.metadata["formula_score"] = f["score"]
                         matched += 1
                         break
-        logger.info("共标注 %d 个公式块", matched)
+        by_page: dict[int, list[DocumentBlock]] = {}
+        for block in blocks:
+            by_page.setdefault(block.page_num, []).append(block)
+        for f in formulas:
+            page_blocks = by_page.get(f["page"], [])
+            fb = f["bbox"]
+            matched_existing = False
+            for block in page_blocks:
+                if block.block_type == BlockType.IMAGE:
+                    continue
+                bx0, by0, bx1, by1 = block.bbox
+                ox, oy = max(bx0, fb[0]), max(by0, fb[1])
+                ox2, oy2 = min(bx1, fb[2]), min(by1, fb[3])
+                if ox < ox2 and oy < oy2:
+                    overlap = (ox2 - ox) * (oy2 - oy)
+                    formula_area = max((fb[2] - fb[0]) * (fb[3] - fb[1]), 1.0)
+                    if overlap / formula_area > 0.3:
+                        matched_existing = True
+                        break
+            if matched_existing:
+                continue
+            page_num = int(f["page"])
+            next_index = len(page_blocks)
+            new_id = f"p{page_num}_b{next_index}"
+            while new_id in existing_ids:
+                next_index += 1
+                new_id = f"p{page_num}_b{next_index}"
+            new_block = DocumentBlock(
+                id=new_id,
+                page_num=page_num,
+                block_type=BlockType.FORMULA,
+                content="[图片公式，等待 OCR 识别]",
+                bbox=tuple(float(v) for v in fb),
+                metadata={
+                    "formula_detector": "pix2text-mfd",
+                    "formula_score": f["score"],
+                    "source": "image_or_scan",
+                    "needs_ocr": True,
+                },
+            )
+            blocks.append(new_block)
+            by_page.setdefault(page_num, []).append(new_block)
+            existing_ids.add(new_id)
+            added += 1
+        logger.info("共标注 %d 个文本公式块，新增 %d 个图片/扫描公式块", matched, added)
         return blocks

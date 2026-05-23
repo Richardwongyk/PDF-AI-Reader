@@ -237,10 +237,19 @@ class KnowledgeEngine(BaseService):
             KnowledgeStatus 对象。
         """
         exists = self._repo.collection_exists(doc_hash)
+        total_blocks = 0
+        if exists:
+            try:
+                collection = self._repo.get_collection(doc_hash)
+                total_blocks = collection.count()
+            except Exception:
+                total_blocks = 0
         return KnowledgeStatus(
             doc_hash=doc_hash,
             collection_name=f"pdf_{doc_hash}",
             is_ready=exists,
+            total_blocks=total_blocks,
+            embedded_blocks=total_blocks,
         )
 
     def close(self) -> None:

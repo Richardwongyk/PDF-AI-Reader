@@ -32,13 +32,13 @@ DEFAULT_DPI: int = 150        # rendering resolution
 
 
 class _TileRenderTask(QRunnable):
-    """Renders a single tile in a background thread via fitz.
+    """Renders a single tile to PPM bytes in a background thread via fitz.
 
     Shares the fitz.Document (thread-safe read in PyMuPDF ≥ 1.18).
     """
 
     class _Signals(QObject):
-        done = Signal(TileKey, int, object, float)  # key, request_id, QPixmap|None, elapsed_sec
+        done = Signal(TileKey, int, object, float)  # key, request_id, PPM bytes|None, elapsed_sec
 
     def __init__(
         self, doc: fitz.Document, key: TileKey, dpi: int, request_id: int,
@@ -77,12 +77,15 @@ class _TileRenderTask(QRunnable):
             pix = page.get_pixmap(matrix=mat, clip=clip, colorspace=fitz.csRGB)
             # 渲染结果物理像素 = tile_pt_w * zoom = TILE_SIZE * DPR ✓
 
-            qpixmap = QPixmap()
-            qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
+            image_data = pix.tobytes("ppm")
             elapsed = time.perf_counter() - t0
-            _log.debug("瓦片渲染完成: %s (%.0fms, %dx%d)",
-                       self._key, elapsed * 1000, qpixmap.width(), qpixmap.height())
-            self._signals.done.emit(self._key, self._request_id, qpixmap, elapsed)
+            _log.debug(
+                "瓦片渲染完成: %s (%.0fms, %d bytes)",
+                self._key,
+                elapsed * 1000,
+                len(image_data),
+            )
+            self._signals.done.emit(self._key, self._request_id, image_data, elapsed)
         except Exception as e:
             elapsed = time.perf_counter() - t0
             _log.warning("瓦片渲染失败: %s → %s (%.0fms)", self._key, e, elapsed * 1000)
@@ -280,7 +283,7 @@ class TileRenderer(QObject):
         _logger.info("TileRenderer: SCHEDULE %s (req#%d, pending=%d)",
                      key, request_id, len(self._pending))
 
-    def _on_tile_done(self, key: TileKey, request_id: int, qpixmap: object, elapsed: float) -> None:
+    def _on_tile_done(self, key: TileKey, request_id: int, image_data: object, elapsed: float) -> None:
         """Callback from background thread — check token, cache, emit."""
         current_id = self._pending.get(key)
         if current_id != request_id:
@@ -291,7 +294,14 @@ class TileRenderer(QObject):
 
         del self._pending[key]
 
-        pixmap = qpixmap if isinstance(qpixmap, QPixmap) else None
+        if isinstance(image_data, QPixmap):
+            pixmap = image_data
+        elif isinstance(image_data, (bytes, bytearray)):
+            pixmap = QPixmap()
+            pixmap.loadFromData(bytes(image_data), "PPM")
+        else:
+            pixmap = None
+
         if pixmap is None or pixmap.isNull():
             _logger.warning("TileRenderer: FAILED %s (req#%d)", key, request_id)
             return

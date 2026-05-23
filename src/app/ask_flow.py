@@ -14,7 +14,7 @@ Usage:
 import logging
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal
 
 from src.core.models import DocumentBlock
 
@@ -28,6 +28,8 @@ class AskQuestionFlow(QObject):
     - 从 KnowledgeEngine 检索相关块
     - 委托 AIEngine 生成答案（信号已由 MainWindow 直连）
     """
+
+    answer_unavailable = Signal(str, str)  # (message, block_id)
 
     def __init__(
         self,
@@ -63,7 +65,15 @@ class AskQuestionFlow(QObject):
             find_block_cb: 根据 block_id 查找 DocumentBlock 的回调。
         """
         retrieved: list[DocumentBlock] = []
-        if self._current_doc_hash and self._knowledge_engine.check_exists(self._current_doc_hash):
+        if not self._current_doc_hash:
+            self.answer_unavailable.emit("当前文档尚未建立知识库上下文，请等待解析完成后再提问。", block_id)
+            return
+
+        if not self._knowledge_engine.check_exists(self._current_doc_hash):
+            self.answer_unavailable.emit("知识库还在构建中，稍后再问才能基于全文回答。", block_id)
+            return
+
+        if self._current_doc_hash:
             try:
                 retrieved_raw = self._knowledge_engine.retrieve(
                     question, self._current_doc_hash, top_k=3,
@@ -76,6 +86,10 @@ class AskQuestionFlow(QObject):
                 _logger.info("AskQuestionFlow: 检索到 %d 个相关块", len(retrieved))
             except Exception:
                 _logger.warning("AskQuestionFlow: 检索失败", exc_info=True)
+
+        if block is None and not retrieved:
+            self.answer_unavailable.emit("知识库中没有检索到可引用片段，无法按文档依据回答这个问题。", block_id)
+            return
 
         self._ai_engine.request_answer(
             question=question,

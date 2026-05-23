@@ -33,6 +33,17 @@ from src.data.config_manager import ConfigManager
 REQUIRED_PYTHON = (3, 14, 4)
 
 
+def _is_configured_api_key(value: str | None) -> bool:
+    """Return True only for a real-looking configured API key."""
+    if not value:
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    placeholders = ("在此填入", "your_api_key", "your-api-key", "api key")
+    return not any(p in stripped.lower() for p in placeholders)
+
+
 def setup_logging() -> None:
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
@@ -98,8 +109,8 @@ def build_services() -> ServiceContainer:
     container.register_singleton("chroma_repo", _build_chroma_repo)
 
     def _build_embed_client():
-        """延迟创建嵌入模型客户端（Ollama 优先，Mock 回退）。"""
-        from src.core.ai_engine import BaseLLMClient, MockLLMClient, OllamaClient
+        """延迟创建嵌入模型客户端（Ollama 优先，哈希嵌入兜底）。"""
+        from src.core.ai_engine import HashingEmbeddingClient, OllamaClient
         try:
             client = OllamaClient(
                 model=config.model.embed_local,
@@ -110,8 +121,8 @@ def build_services() -> ServiceContainer:
                 return client
             raise RuntimeError("Ollama 服务未连接")
         except Exception:
-            logging.info("本地嵌入模型不可用，使用模拟向量（语义检索精度降低）")
-            return MockLLMClient()
+            logging.info("本地嵌入模型不可用，使用确定性哈希嵌入（关键词检索兜底）")
+            return HashingEmbeddingClient()
 
     container.register_singleton("embed_client", _build_embed_client)
 
@@ -137,21 +148,34 @@ def build_services() -> ServiceContainer:
         """延迟构建 AI 引擎（~3s LiteLLM 初始化推迟到首次翻译/问答时）。"""
         from src.core.ai_engine import (
             AIEngine, BaseLLMClient, HybridModelRouter,
-            LiteLLMClient, MockLLMClient, QAService, TranslationService,
+            LiteLLMClient, MockLLMClient, OllamaClient, QAService, TranslationService,
         )
 
-        primary_client: BaseLLMClient
+        local_client: BaseLLMClient | None = None
+        try:
+            candidate = OllamaClient(
+                model=config.model.local,
+                host=config.model.ollama_host,
+            )
+            if candidate.check_availability():
+                logging.info("本地生成模型可用: %s", config.model.local)
+                local_client = candidate
+            else:
+                logging.info("本地生成模型不可用或未下载: %s", config.model.local)
+        except Exception:
+            logging.info("本地生成模型初始化失败，将按配置使用云端或降级客户端", exc_info=True)
+
+        cloud_client: BaseLLMClient | None = None
         cloud_provider = config.model.cloud
         cloud_api_key = config_manager.get_api_key(cloud_provider)
-        if cloud_api_key:
+        if _is_configured_api_key(cloud_api_key):
             logging.info("使用云端模型: %s", cloud_provider)
-            primary_client = LiteLLMClient(model=cloud_provider, api_key=cloud_api_key)
+            cloud_client = LiteLLMClient(model=cloud_provider, api_key=cloud_api_key or "")
         else:
-            logging.info("未配置云端API Key，使用模拟客户端（测试模式）")
-            primary_client = MockLLMClient()
+            logging.info("未配置云端 API Key，真实生成将降级为模拟客户端（测试模式）")
 
-        fallback_client = MockLLMClient()
-        router = HybridModelRouter(primary_client, fallback_client, config)
+        fallback_client: BaseLLMClient = MockLLMClient()
+        router = HybridModelRouter(local_client, cloud_client, fallback_client, config)
 
         translation_service = TranslationService(
             router,
@@ -238,6 +262,10 @@ def main() -> int:
             f"应用启动时发生错误:\n\n{e}\n\n请检查 logs/app.log 获取详细信息。",
         )
         return 1
+    finally:
+        services = locals().get("services")
+        if services is not None:
+            services.shutdown()
 
 
 if __name__ == "__main__":

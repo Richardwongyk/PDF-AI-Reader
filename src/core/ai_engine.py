@@ -174,10 +174,22 @@ class OllamaClient(BaseLLMClient):
         return self._model
 
     def check_availability(self) -> bool:
-        """通过尝试列出模型来检查 Ollama 服务是否可用。"""
+        """检查 Ollama 服务和指定模型是否可用。"""
         try:
-            self._client.list()
-            return True
+            models = self._client.list()
+            names: list[str] = []
+            model_items = models.get("models", []) if hasattr(models, "get") else getattr(models, "models", [])
+            for item in model_items:
+                if hasattr(item, "get"):
+                    name = item.get("name") or item.get("model") or ""
+                else:
+                    name = getattr(item, "name", "") or getattr(item, "model", "")
+                if name:
+                    names.append(str(name))
+            return any(
+                n == self._model or n.startswith(f"{self._model}:")
+                for n in names
+            )
         except Exception:
             return False
 
@@ -303,20 +315,32 @@ class HybridModelRouter:
 
     def __init__(
         self,
-        local_client: BaseLLMClient,
+        local_client: BaseLLMClient | None,
         cloud_client: BaseLLMClient | None,
+        fallback_client: BaseLLMClient | None,
         config: AppConfig,
     ) -> None:
         """初始化路由器。
 
         Args:
-            local_client: 本地模型客户端（OllamaClient）。
+            local_client: 本地模型客户端（OllamaClient），未配置时为 None。
             cloud_client: 云端模型客户端（LiteLLMClient），未配置时为 None。
+            fallback_client: 最终降级客户端（MockLLMClient），仅用于无真实模型时保底。
             config: 应用配置，包含路由规则。
         """
         self._local = local_client
         self._cloud = cloud_client
+        self._fallback = fallback_client
         self._config = config
+
+    @staticmethod
+    def _available(client: BaseLLMClient | None) -> bool:
+        if client is None:
+            return False
+        try:
+            return client.check_availability()
+        except Exception:
+            return False
 
     def route(self, task: TaskType) -> BaseLLMClient:
         """根据任务类型决定使用哪个客户端。
@@ -337,11 +361,11 @@ class HybridModelRouter:
         Raises:
             RuntimeError: 没有可用客户端时。
         """
-        # 嵌入任务：本地优先，云端回退
+        # 嵌入任务：本地优先，云端回退。真正的本地嵌入兜底在 EmbeddingService 中处理。
         if task == TaskType.EMBEDDING:
-            if self._local.check_availability():
+            if self._available(self._local):
                 return self._local
-            if self._cloud and self._cloud.check_availability():
+            if self._available(self._cloud):
                 return self._cloud
             raise RuntimeError("无可用的嵌入模型。请启动 Ollama 或配置云端 API Key。")
 
@@ -355,7 +379,7 @@ class HybridModelRouter:
         strategy = strategy_map.get(task, "local_first")
 
         if strategy == "local_only":
-            if self._local.check_availability():
+            if self._available(self._local):
                 return self._local
             import logging
             logging.getLogger("HybridModelRouter").error(
@@ -364,23 +388,27 @@ class HybridModelRouter:
             raise RuntimeError("本地模型不可用。请启动 Ollama 服务后再试。")
 
         if strategy == "cloud_only":
-            if self._cloud and self._cloud.check_availability():
+            if self._available(self._cloud):
                 return self._cloud
             import logging
             logging.getLogger("HybridModelRouter").error(
                 "云端模型不可用 (策略=cloud_only): task=%s", task.value
             )
+            if self._available(self._fallback):
+                return self._fallback
             raise RuntimeError("云端模型不可用。请检查 API Key 配置和网络连接。")
 
         # local_first（默认）：优先本地，回退云端
-        if self._local.check_availability():
+        if self._available(self._local):
             return self._local
-        if self._cloud and self._cloud.check_availability():
+        if self._available(self._cloud):
             import logging
             logging.getLogger("HybridModelRouter").warning(
                 "本地模型不可用，回退到云端: task=%s", task.value
             )
             return self._cloud
+        if self._available(self._fallback):
+            return self._fallback
         import logging
         logging.getLogger("HybridModelRouter").error(
             "本地和云端模型均不可用: task=%s", task.value
@@ -390,12 +418,12 @@ class HybridModelRouter:
     @property
     def local_available(self) -> bool:
         """本地模型是否可用。"""
-        return self._local.check_availability()
+        return self._available(self._local)
 
     @property
     def cloud_available(self) -> bool:
         """云端模型是否可用。"""
-        return self._cloud is not None and self._cloud.check_availability()
+        return self._available(self._cloud)
 
 
 # =============================================================================
@@ -783,7 +811,10 @@ class QAService:
         if context_parts:
             context_text = "\n\n---\n\n".join(context_parts)
         else:
-            context_text = "（无额外上下文，请根据你的知识回答）"
+            context_text = (
+                "（当前没有可引用的文档片段。请直接回答："
+                "知识库未就绪或未检索到相关片段，无法基于本文档给出可靠答案。）"
+            )
 
         messages.append({
             "role": "user",
@@ -961,6 +992,75 @@ class AIEngine(BaseService):
 
 
 # =============================================================================
+# HashingEmbeddingClient —— 无模型时的确定性轻量嵌入
+# =============================================================================
+
+class HashingEmbeddingClient(BaseLLMClient):
+    """确定性词袋哈希嵌入。
+
+    这是没有 Ollama/BGE 或云端 embedding 时的最低可用兜底。它不是语义模型，
+    但能保证相同文本生成相同向量，并让关键词、术语和相近词形具有可检索性。
+    """
+
+    def __init__(self, dimensions: int = 1024) -> None:
+        self._dimensions = dimensions
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        raise RuntimeError("HashingEmbeddingClient 仅支持嵌入，不支持文本生成。")
+
+    def generate_stream(
+        self, messages: list[dict[str, str]], **kwargs: Any
+    ) -> Generator[str, None, None]:
+        raise RuntimeError("HashingEmbeddingClient 仅支持嵌入，不支持文本生成。")
+
+    @property
+    def model_name(self) -> str:
+        return "hashing-embedding"
+
+    def check_availability(self) -> bool:
+        return True
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed_one(text) for text in texts]
+
+    def _embed_one(self, text: str) -> list[float]:
+        import hashlib
+        import math
+
+        vec = [0.0] * self._dimensions
+        tokens = self._tokens(text)
+        if not tokens:
+            return vec
+
+        for token in tokens:
+            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+            value = int.from_bytes(digest, "little", signed=False)
+            index = value % self._dimensions
+            sign = 1.0 if (value >> 63) == 0 else -1.0
+            weight = 1.0 + min(len(token), 12) / 12.0
+            vec[index] += sign * weight
+
+        norm = math.sqrt(sum(v * v for v in vec))
+        if norm > 0:
+            vec = [v / norm for v in vec]
+        return vec
+
+    @staticmethod
+    def _tokens(text: str) -> list[str]:
+        lowered = text.lower()
+        base = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]", lowered)
+        tokens: list[str] = []
+        for token in base:
+            tokens.append(token)
+            if len(token) >= 6 and re.match(r"^[a-z0-9_]+$", token):
+                for n in (3, 4):
+                    tokens.extend(token[i:i + n] for i in range(0, len(token) - n + 1))
+        for i in range(len(base) - 1):
+            tokens.append(base[i] + "_" + base[i + 1])
+        return tokens
+
+
+# =============================================================================
 # MockLLMClient —— 测试用模拟客户端（不调用任何 API）
 # =============================================================================
 
@@ -1131,9 +1231,11 @@ class _QAThread(QThread):
                 self._question, self._current_block,
                 self._retrieved_blocks, self._chat_history, stream=True,
             )
+            full_text = ""
             for token in result:  # type: ignore[union-attr]
+                full_text += token
                 self.token_generated.emit(token)
-            self.finished_signal.emit("")
+            self.finished_signal.emit(full_text)
         except Exception as e:
             import traceback
             self.error_signal.emit(f"{e}\n{traceback.format_exc()}")

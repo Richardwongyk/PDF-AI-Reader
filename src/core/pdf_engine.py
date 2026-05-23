@@ -557,6 +557,7 @@ class DocumentEngine(BaseService):
         self._pending_renders: set[tuple[int, int]] = set()
         self._latest_render_dpi: dict[int, int] = {}
         self._thread: QThread | None = None
+        self._retired_parse_threads: list[QThread] = []
         # 使用 PageCache 替代内嵌字典（借鉴 PDFCrop，线程安全 + LRU + 高分辨率回退）
         self._page_cache = page_cache
         self._filepath: str = ""  # PageCache 缓存键需要文件路径
@@ -618,20 +619,7 @@ class DocumentEngine(BaseService):
         # 清理上一个线程（协作式取消，不调用 terminate）
         if self._thread is not None:
             self.logger.info("清理上一解析线程...")
-            if self._thread.isRunning():
-                self._thread.requestInterruption()
-                self._thread.quit()
-                self._thread.wait(5000)
-            try:
-                self._thread.progress.disconnect()
-                self._thread.finished_parsing.disconnect()
-                self._thread.completed_parsing.disconnect()
-                self._thread.parse_error.disconnect()
-                self._thread.formula_blocks_updated.disconnect()
-                self._thread.page_blocks_ready.disconnect()
-            except Exception:
-                pass
-            self._thread.deleteLater()
+            self._stop_parse_thread(self._thread, timeout_ms=2000, reason="打开新文档")
             self._thread = None
             self.logger.info("上一解析线程已清理")
         self._render_pool.clear()
@@ -705,20 +693,7 @@ class DocumentEngine(BaseService):
 
         # 1. 停止解析线程
         if self._thread is not None:
-            if self._thread.isRunning():
-                self._thread.requestInterruption()
-                self._thread.quit()
-                self._thread.wait(5000)
-            try:
-                self._thread.progress.disconnect()
-                self._thread.finished_parsing.disconnect()
-                self._thread.completed_parsing.disconnect()
-                self._thread.parse_error.disconnect()
-                self._thread.formula_blocks_updated.disconnect()
-                self._thread.page_blocks_ready.disconnect()
-            except Exception:
-                pass
-            self._thread.deleteLater()
+            self._stop_parse_thread(self._thread, timeout_ms=2000, reason="关闭文档")
             self._thread = None
 
         # 2. 取消异步渲染 / 按需解析。必须先等后台任务退出，再关闭共享的 fitz.Document。
@@ -741,6 +716,60 @@ class DocumentEngine(BaseService):
         if self._page_cache:
             self._page_cache.clear_document(self._filepath)
         self.logger.info("close_document: END")
+
+    def shutdown(self) -> None:
+        """服务关闭入口，供 ServiceContainer 调用。"""
+        self.close_document()
+        for thread in list(self._retired_parse_threads):
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                if not thread.wait(10000):
+                    self.logger.warning("解析线程仍未退出，保留后台引用等待自然结束")
+                    continue
+            self._cleanup_retired_parse_thread(thread)
+
+    def _stop_parse_thread(self, thread: QThread, timeout_ms: int, reason: str) -> None:
+        """请求解析线程停止；若重模型阶段暂时无法退出，则退役后台清理。"""
+        if thread.isRunning():
+            thread.requestInterruption()
+            thread.quit()
+            if not thread.wait(timeout_ms):
+                self._retire_parse_thread(thread, reason)
+                return
+        self._disconnect_parse_thread(thread)
+        thread.deleteLater()
+
+    def _disconnect_parse_thread(self, thread: QThread) -> None:
+        for signal_name in (
+            "progress",
+            "finished_parsing",
+            "completed_parsing",
+            "parse_error",
+            "formula_blocks_updated",
+            "page_blocks_ready",
+        ):
+            signal = getattr(thread, signal_name, None)
+            if signal is None:
+                continue
+            try:
+                signal.disconnect()
+            except Exception:
+                pass
+
+    def _retire_parse_thread(self, thread: QThread, reason: str) -> None:
+        self._disconnect_parse_thread(thread)
+        if thread not in self._retired_parse_threads:
+            self._retired_parse_threads.append(thread)
+            thread.finished.connect(
+                lambda retired=thread: self._cleanup_retired_parse_thread(retired)
+            )
+        self.logger.warning("解析线程未在超时时间内退出，已后台退役: %s", reason)
+
+    def _cleanup_retired_parse_thread(self, thread: QThread) -> None:
+        if thread in self._retired_parse_threads:
+            self._retired_parse_threads.remove(thread)
+        thread.deleteLater()
 
     def get_page_pixmap(
         self, page_num: int, dpi: int = 150
@@ -848,7 +877,7 @@ class DocumentEngine(BaseService):
         self._render_pool.start(task)
 
     def _on_async_page_rendered(
-        self, generation: int, page_num: int, dpi: int, qpixmap: QPixmap
+        self, generation: int, page_num: int, dpi: int, image_data: object
     ) -> None:
         """异步渲染完成回调（主线程）。"""
         if generation != self._document_generation:
@@ -860,6 +889,14 @@ class DocumentEngine(BaseService):
                 page_num, dpi, self._latest_render_dpi.get(page_num),
             )
             return
+        if isinstance(image_data, QPixmap):
+            qpixmap = image_data
+        elif isinstance(image_data, (bytes, bytearray)):
+            qpixmap = QPixmap()
+            qpixmap.loadFromData(bytes(image_data), "PPM")
+        else:
+            qpixmap = QPixmap()
+
         if qpixmap.isNull():
             return
         # 存入 PageCache
@@ -885,14 +922,14 @@ class DocumentEngine(BaseService):
 # =============================================================================
 
 class _PageRenderTask(QRunnable):
-    """在后台线程中渲染单个 PDF 页面为 QPixmap。
+    """在后台线程中渲染单个 PDF 页面为 PPM 字节。
 
     直接共享主线程已打开的 fitz.Document（PyMuPDF ≥ 1.18 允许多线程只读并发）。
-    渲染完成后通过信号将结果传回主线程。
+    渲染完成后通过信号传回主线程，并在主线程创建 QPixmap。
     """
 
     class _Signals(QObject):
-        result = Signal(int, int, int, QPixmap)  # generation, page_num, dpi, QPixmap
+        result = Signal(int, int, int, object)  # generation, page_num, dpi, PPM bytes
 
     def __init__(self, doc: fitz.Document, page_num: int, dpi: int, generation: int) -> None:
         super().__init__()
@@ -915,11 +952,11 @@ class _PageRenderTask(QRunnable):
             # 避免每次异步渲染重新解释 PDF 指令流（10-50x 加速）
             dl = page.get_displaylist()
             pix = dl.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-            qpixmap = QPixmap()
-            qpixmap.loadFromData(pix.tobytes("ppm"), "PPM")
-            self._signals.result.emit(self._generation, self._page_num, self._dpi, qpixmap)
+            self._signals.result.emit(
+                self._generation, self._page_num, self._dpi, pix.tobytes("ppm")
+            )
         except Exception:
-            self._signals.result.emit(self._generation, self._page_num, self._dpi, QPixmap())
+            self._signals.result.emit(self._generation, self._page_num, self._dpi, b"")
 
 
 class _PageBlockParseTask(QRunnable):
@@ -1038,6 +1075,7 @@ class _ParseThread(QThread):
             _log.getLogger("ParseThread").info("run: emit finished_parsing...")
             self.finished_parsing.emit(result)
             _log.getLogger("ParseThread").info("run: finished_parsing emitted")
+            self.msleep(100)
 
             import logging as _log2
             logger = _log2.getLogger("ParseThread")
@@ -1069,8 +1107,13 @@ class _ParseThread(QThread):
                 parsed_pages=list(range(page_count)),
             )
             self.completed_parsing.emit(completed)
+            self.msleep(100)
 
             # ── 阶段三：Pix2Text MFD 公式检测（后台，不阻塞阅读） ──
+            if self.isInterruptionRequested():
+                logger.info("run: 中断于 MFD 前, 退出")
+                doc.close()
+                return
             logger.info("run: 阶段三 MFD...")
             from src.core.formula_detector import Pix2TextMFDDetector
             try:
@@ -1080,11 +1123,17 @@ class _ParseThread(QThread):
                 for b in refined:
                     if (b.block_type.value == "formula"
                             and b.metadata.get("formula_detector") == "pix2text-mfd"):
-                        updated.append({
+                        info = {
                             "id": b.id,
+                            "page_num": b.page_num,
                             "block_type": b.block_type.value,
+                            "content": b.content,
+                            "bbox": b.bbox,
                             "metadata": b.metadata,
-                        })
+                        }
+                        if b.metadata.get("source") == "image_or_scan":
+                            info["is_new"] = True
+                        updated.append(info)
                 if updated and not self.isInterruptionRequested():
                     self.formula_blocks_updated.emit(updated)
                 logger.info(

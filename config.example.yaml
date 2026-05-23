@@ -4,9 +4,9 @@ model:
   embed_local: bge-m3
   ollama_host: http://localhost:11434
 routing:
-  translation: local_first
-  qa: local_first
-  summarization: local_first
+  translation: cloud_only
+  qa: cloud_only
+  summarization: cloud_only
   embed: local_only
   auto_upgrade_threshold: 2000
 ui:
