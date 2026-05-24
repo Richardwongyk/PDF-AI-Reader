@@ -993,8 +993,13 @@ def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> 
             return [r"\alpha"]
 
     class FakeExternalRunner:
-        def recognize_images(self, images: list[tuple[str, bytes]]) -> list[ExternalFormulaCandidate]:
+        def recognize_images(
+            self,
+            images: list[tuple[str, bytes]],
+            specs: object = None,
+        ) -> list[ExternalFormulaCandidate]:
             assert images == [("p0_b1", b"png-bytes")]
+            assert specs is None
             return [
                 ExternalFormulaCandidate(
                     candidate_id="p0_b1",

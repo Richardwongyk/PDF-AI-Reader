@@ -35,15 +35,19 @@
 
 1. 读 `docs/next_session_handoff.md`，确认问题清单、失败教训、文件地图和交接提示词。
 2. 用主环境跑轻量测试确认代码基线，再跑 Attention/Napkin 公式与性能审计。
-3. 继续完成多轮公式解析真实质量闭环：r0 born-digital 结构候选、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量都必须能落库和跳过。
+3. 继续完成多轮公式解析真实质量闭环：r0 born-digital 结构候选、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱已能按批落库；下一步重点是 Napkin 大样本、r5 知识库增量写回、accepted 门禁和性能优化。
 4. 继续验证外部工具：MinerU 新模型、Paddle Formula、Pix2Text 已有 smoke；PEK/UniMERNet 和旧 magic-pdf 仍要补齐或明确淘汰。
 5. 继续推进全文 RAG/GraphRAG：默认秒级 FTS/RAG 可用，DeepSeek 分析回答和图谱抽取异步增强。
 
 2026-05-24 最新实现检查点：
 
-- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`：完成异步公式轮次入队、公式识别候选表、accepted 唯一性、r0 born-digital 结构候选落库、r2 外部多工具候选 worker。
-- r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR；r2 通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
-- 相关测试基线：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 66 passed。
+- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`，并继续完成未提交的多轮流水线收口：异步公式轮次入队、公式识别候选表、accepted 唯一性、r0 born-digital 结构候选落库、r2 外部多工具候选 worker、r3 真实/模拟语义复核、r4 结构图谱批处理。
+- r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR；r2 只有低置信候选或显式 `--r2-sample-formulas` 精扫才通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
+- 新增 `tools/formula_multiround_pipeline.py`：可跑 r0-r4 状态、任务统计、识别结果统计、`--reuse-db` 跳过验证、显式 r2 多工具、可选 DeepSeek r3 smoke。
+- 多轮流水线已接入源 LaTeX 准确率复核：每个 stage/model 输出 exact/near/weak/average similarity 和低相似候选；Attention 前 6 页 r0 平均约 0.666，显式 r2 单样本最佳约 0.854，有提升但远未达到极高准确率。
+- 新增 `docs/formula_multitool_fusion_design.md`：明确多工具潜力要通过候选级 fusion、coverage-comparable 检查、accepted 门禁和 r5 增量写回挖掘；禁止手写硬编码公式解析规则。
+- 相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py` 为 65 passed。
+- Attention 前 6 页真实验证：默认 r0 约 1.0s 写入 7 个 born-digital 结构公式候选，r1/r2 正确跳过；`--reuse-db` 二次 r0 跳过 6 页；显式 r2 多工具单样本写入 `pix2text-mfr`、Paddle Formula、Pix2Text 三类候选但冷启动约 245s，复用后约 1.2s；真实 DeepSeek r3 单条约 60s。
 - Attention 多轮入库最新基准：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
 - 工具 smoke：MinerU 3.1.15 本地新模型 Attention 单页跑通；Paddle Formula/Pix2Text 单张公式图 worker 跑通但质量仍只能候选；magic-pdf 缺旧权重；PEK/UniMERNet 未跑通。
 

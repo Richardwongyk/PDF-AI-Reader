@@ -68,7 +68,9 @@
 4. Paddle、Pix2Text、MinerU、UniMERNet/PDF-Extract-Kit 等外部工具只作为隔离 worker 提供候选，不允许直接覆盖正文。
 5. 高置信公式和章节/定理/引用关系最终要增量进入全文知识库和 GraphRAG，让问答能引用真实证据，而不是普通聊天。
 
-当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。
+当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。2026-05-24 已新增 `tools/formula_multiround_pipeline.py`，可在 Attention 上验证 r0-r4 的落库、跳过、显式 r2 多工具和真实 r3 云端 smoke；仍未完成 Napkin 大样本质量门禁、r5 增量知识库写回和产品级 accepted 门禁。
+
+多工具配合的下一步必须按 `docs/formula_multitool_fusion_design.md` 推进：不手写硬编码公式解析规则，不靠样本正则修公式；自写部分只做 evidence/candidate/fusion schema、工具编排、源码准确率复核、候选排序、accepted 门禁和增量写回。
 
 ## 到大作业完成的路线
 
@@ -121,12 +123,15 @@
 
 最新实现状态：
 
-- 最新代码提交到 `9a02945 Add multi-tool formula candidate pipeline`。
+- 最新已提交代码到 `9a02945 Add multi-tool formula candidate pipeline`，后续继续补齐了多轮流水线 runner 和 r0/r2 跳过机制，待本轮提交。
 - r0 页面扫描已经改为 born-digital PDF 结构快扫：只用 MuPDF/现有审计事实写候选，不初始化 OCR/MFR。
 - `formula_recognition_results` 已保存每个模型/轮次/输入 hash 的公式候选，accepted 唯一性已测试。
 - r2 已有外部多工具候选 worker，当前 Paddle Formula 和 Pix2Text 单图 smoke 能返回候选；所有 r2 结果默认不覆盖正文。
+- `tools/formula_multiround_pipeline.py` 已把 r0/r1/r2/r3/r4 串成可审计命令行流水线；默认 born-digital 路径不 OCR，显式 `--r2-sample-formulas` 才抽样送 r2 多工具精扫，`--reuse-db` 可证明已完成输入跳过。
+- Attention 前 6 页验证：默认 r0 写 7 个结构公式候选，r1/r2 正确跳过；复用 DB 后 r0 跳过 6 页；显式 r2 单样本调用 `pix2text-mfr`、Paddle Formula、Pix2Text，首轮约 245s、复用约 1.2s；真实 DeepSeek r3 单条约 60s，只写候选 JSON。
+- 源 LaTeX 准确率复核已接入多轮报告：默认 r0/parsed blocks 平均 best similarity 约 0.666、near match rate 0.571；显式 r2 单样本最佳平均 similarity 约 0.854，证明有提升但还远未达到极高准确率或 exact-match accepted 门槛。
 - MinerU 3.1.15 本地新模型已跑通 Attention 单页离线解析；PEK/UniMERNet 未跑通，旧 magic-pdf 缺权重。
-- 最新相关测试：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 66 passed。
+- 最新相关测试：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py` 为 65 passed。
 
 ## 今晚执行边界
 
@@ -449,7 +454,7 @@ PDF 打开/滚动/缩放
 - Napkin 前 12 页：126 blocks，2 formula blocks，结构解析 0.9658s，持久化 0.0037s；`r0_pdf_structure:queued=12`、`r3_cloud_semantic_review:queued=2`。
 - 最新 `tools/formula_index_performance.py --case all`：Attention 15 页总 2.1970s、持久化 0.0046s；Napkin 前 16 页总 1.2997s、持久化 0.0306s。
 - r3 复核测试：`pytest tests/test_formula_semantic_review.py tests/test_formula_index_flow.py -q` 为 28 passed，包含真实 QThread smoke。
-- 最新相关测试：`pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q` 为 66 passed。
+- 旧组合测试记录：`pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q` 曾为 66 passed；当前应优先使用上方包含多轮流水线和 GraphRAG 的 65 passed 基线。
 
 仍未完成：
 

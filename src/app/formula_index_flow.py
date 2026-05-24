@@ -16,7 +16,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
-from src.core.external_formula_tools import ExternalFormulaToolRunner
+from src.core.external_formula_tools import ExternalFormulaToolRunner, ExternalFormulaToolSpec
 from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 _logger = logging.getLogger(__name__)
@@ -507,6 +507,12 @@ class FormulaIndexFlow(QObject):
                     block_type=BlockType.FORMULA,
                     content=str(item.get("text", "") or ""),
                     bbox=tuple(float(value) for value in item.get("bbox", (0, 0, 0, 0))),  # type: ignore[union-attr]
+                    metadata={
+                        "needs_ocr": True,
+                        "source": "born_digital_r0_review_candidate",
+                        "review_trigger": "low_confidence_born_digital_structure",
+                        "formula_score": self._optional_float(item.get("score")) or 0.0,
+                    },
                 )
             except Exception:
                 candidate_block = None
@@ -554,12 +560,11 @@ class FormulaIndexFlow(QObject):
                 },
             )
             if candidate_block is not None and self._needs_local_precision_review(item):
-                self._store.enqueue_round_records(
+                self._store.enqueue_blocks(
                     doc_hash,
                     filepath,
-                    FormulaScanRound.LOCAL_HIGH_PRECISION,
-                    "block",
                     [candidate_block],
+                    scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
                 )
         if detected:
             self.formula_blocks_detected.emit(detected)
@@ -675,6 +680,7 @@ class _FormulaOcrWorker(QThread):
         doc_hash: str = "",
         cache_only: bool = True,
         scan_round: str = FormulaScanRound.CACHED_RECOGNITION.value,
+        external_tool_specs: list[ExternalFormulaToolSpec] | None = None,
     ) -> None:
         super().__init__()
         self._filepath = filepath
@@ -682,6 +688,7 @@ class _FormulaOcrWorker(QThread):
         self._doc_hash = doc_hash
         self._cache_only = cache_only
         self._scan_round = scan_round
+        self._external_tool_specs = list(external_tool_specs) if external_tool_specs is not None else None
 
     def run(self) -> None:
         import fitz
@@ -811,7 +818,10 @@ class _FormulaOcrWorker(QThread):
         }
         started = time.perf_counter()
         try:
-            candidates = ExternalFormulaToolRunner().recognize_images(images)
+            candidates = ExternalFormulaToolRunner().recognize_images(
+                images,
+                specs=self._external_tool_specs,
+            )
         except Exception as exc:
             _logger.info("外部公式工具候选生成失败: %s", exc)
             return []

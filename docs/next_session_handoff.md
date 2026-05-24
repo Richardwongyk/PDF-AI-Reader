@@ -2,11 +2,11 @@
 
 本文件给新终端/新 AI 助手接手用。先读根目录 `AGENTS.md`，再读本文件，然后再看
 `TODO.md`、`docs/current_goal_and_next_steps.md`、`docs/async_formula_indexing_design.md`、
-`docs/formula_extraction_research.md`、`docs/e2e_test_plan.md`。
+`docs/formula_extraction_research.md`、`docs/formula_multitool_fusion_design.md`、`docs/e2e_test_plan.md`。
 
 ## 先读结论
 
-当前主线目标没有完成，不能宣称项目已达标。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、r3 语义复核候选写回、r0 born-digital 结构候选落库、r2 外部多工具候选 worker 第一版。没有完成的是：born-digital 公式高精度 LaTeX 还原、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4/r5 增量知识库和图谱闭环、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
+当前主线目标没有完成，不能宣称项目已达标。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、r0 born-digital 结构候选落库、r1 缓存优先队列、r2 显式本地多工具候选 worker、r3 语义复核候选写回、r4 结构图谱批处理第一版，以及 `tools/formula_multiround_pipeline.py` 对 r0-r4 的可审计流水线 smoke/benchmark。没有完成的是：born-digital 公式高精度 LaTeX 还原、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4 语义级图谱质量、r5 增量知识库写回、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
@@ -18,7 +18,7 @@
 - 2026-05-24 已重新按独立 worker 思路建立外部工具环境，当前 `conda env list` 显示：
   `pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`。
   这些都是隔离工具环境，不是主程序环境。
-- 最新代码提交到 `9a02945 Add multi-tool formula candidate pipeline`：r0 不走 OCR，只写 born-digital PDF 结构候选；r2 通过外部 worker 写 Paddle/Pix2Text 等未接受候选。
+- 当前代码在 `9a02945 Add multi-tool formula candidate pipeline` 后继续推进了多轮流水线：r0 不走 OCR，只写 born-digital PDF 结构候选；r2 通过显式精扫开关调用 Paddle/Pix2Text 等隔离 worker 写未接受候选；r3 可用 mock 或真实 DeepSeek；r4 写结构图谱任务和 artifact。
 - 防休眠脚本仍应检查，不要假设一定有效。脚本在 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`。
 - 当前工作树必须以 `git status --short` 为准。不要随手回退，也不要把 `测试资料/`、日志、缓存、临时 benchmark 输出提交。
 
@@ -85,8 +85,10 @@
 - 已有 accepted 唯一性：同一候选当前只允许一个 accepted 结果。
 - 导入后会把页级结构扫描、需要 OCR 的公式块、已解析公式块的 r3 复核任务写入队列。
 - r0 页面扫描当前只走 born-digital PDF 结构事实，使用 `BornDigitalFormulaExtractor` 写 `stage=pdf_structure` 的未接受候选，不初始化 OCR/MFR。
-- r0 低置信结构候选会排入 `r2_local_high_precision` 待复核 round；这只是持久化待办，不会在默认阅读路径启动重模型。
+- r0 低置信结构候选会排入 `r2_local_high_precision` 待复核任务；这只是持久化待办，不会在默认阅读路径启动重模型。
 - r2 本地高精度轮通过 `ExternalFormulaToolRunner` + `tools/formula_tool_worker.py` 调隔离工具环境；当前已有 Paddle Formula 和 Pix2Text 公式图候选接入，结果默认不 accepted。
+- `tools/formula_multiround_pipeline.py` 已把 r0/r1/r2/r3/r4 串到同一条可审计命令行流水线：每轮输出状态、耗时、任务统计、结果表统计；`--reuse-db` 可证明二次打开跳过已完成 r0/r2 输入；`--r2-sample-formulas` 是显式高精度精扫，不是默认 OCR。
+- 新增 `docs/formula_multitool_fusion_design.md`：明确下一步不是手写公式解析规则，而是统一 evidence/candidate/fusion schema、源码准确率复核、候选融合、accepted 门禁和 r5 增量写回。
 - `FormulaSemanticReviewService` 和 `FormulaSemanticReviewFlow` 已有第一版：批量调用分析模型，写回 JSON 候选，不覆盖正文。
 - UI 空闲时可小批量调度公式索引/语义复核，避免导入热路径同步等待。
 - 日志改为轮转并增加清理工具，避免日志无限膨胀。
@@ -99,7 +101,13 @@
 - 已有 `tools/formula_tool_comparison.py`，用于同一批公式图的外部工具候选对比，并把 r2 候选写入 `formula_recognition_results`。
 - 已有 `tools/formula_index_performance.py`，用于多轮公式索引任务入库性能检测。
 - 已有 `tools/test_log_audit.py`，用于清理和审计日志。
-- 最新相关测试基线：`tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 `70 passed`。
+- 最新相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py` 为 `65 passed`。
+- Attention 前 6 页真实多轮流水线验证：
+  - 默认 born-digital 路线：r0 处理 6 页约 1.0s，写入 7 个 `pdf_structure:pymupdf_born_digital_structure` 结果；因没有 `needs_ocr` 和低置信 r2 候选，r1/r2 正确跳过；r3 mock 写候选，r4 写结构图谱。
+  - `--reuse-db` 二次运行：r0 `processed_pages=0`、`skipped_completed_pages=6`，证明已完成页跳过。
+  - 显式 `--r2-sample-formulas 1 --auto-local-tools`：r2 对 1 个公式样本调用 `pix2text-mfr`、Paddle Formula、Pix2Text 隔离 worker，写入 3 条 `local_precise` 未接受候选；冷启动约 245s，后续 `--reuse-db` 约 1.2s 跳过同一输入。
+  - `--run-cloud-review`：DeepSeek `deepseek/deepseek-v4-pro` r3 单条真实 smoke 通过，约 60s，只写候选 JSON，不覆盖正文。
+  - 多轮流水线报告已接入源 LaTeX 准确率复核：默认 r0/parsed blocks 前 6 页平均 best similarity 约 0.666，near match rate 0.571，仍有低相似样本；显式 r2 单样本最佳平均 similarity 约 0.854，相对 r0 有提升但还没有达到极高准确率或 exact-match 门槛。
 - Attention 最新多轮入库性能：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
 - Attention born-digital 前 6 页结构审计：约 0.608s，17816 glyph，unknown glyph 为 0，display region 7 个；仍未达到完整 LaTeX 还原目标。
 
@@ -136,6 +144,7 @@
    - 当前结构事实层和审计工具可用，但 LaTeX 还原仍不足。
    - 关键难点：PDF 通常保存排版后的 glyph/bbox，不保存原 TeX AST。复杂二维结构、源码宏、字体编码、表格/列表误吸、页级源码对齐都未完全解决。
    - 方向：优先复用成熟 PDF/公式结构工具或源码；自写只做中间表示、审计、调度、缓存。
+   - 现在每轮必须看 `formula_accuracy.stage_metrics`，不能只看候选数量。r0/r1/r2/r3 必须证明 exact/near/weak/average similarity 逐步提升；未达到门槛的结果只能保留候选，不能写入 accepted 或知识库。
 
 2. **图片/扫描公式 OCR/MFR 仍只能作为候选层**
    - Pix2Text 和 Paddle Formula 已有独立 worker smoke，但 Attention 单图输出仍有明显归一化/字符问题，不能覆盖正文。
@@ -144,11 +153,11 @@
 
 3. **外部工具还缺大样本对比**
    - 当前只证明部分工具“能启动/能返回候选”，还没有证明 Attention/Napkin 大样本准确率、P95 耗时、内存和缓存命中。
-   - 下一步必须用同一批裁剪样本比较 Pix2Text、Paddle Formula、MinerU、UniMERNet/PDF-Extract-Kit，不能靠单图观感定方案。
+   - 下一步必须用同一批裁剪样本比较 Pix2Text、Paddle Formula、MinerU、UniMERNet/PDF-Extract-Kit，不能靠单图观感定方案。当前 r2 单样本多工具冷启动约 245s，必须重点优化 worker 常驻、批处理、模型缓存和超时策略。
 
 4. **RAG/GraphRAG 仍未达到产品级**
    - FTS/RAG 方向已有基础，但全文理解、证据链、公式/定理/引用图谱、问答 UI 还要继续打磨。
-   - GraphRAG 必须异步，不得阻塞基础阅读。
+   - r4 当前只是结构图谱第一版，证明异步入库和跳过机制；语义级公式/定理/概念/引用关系仍需模型或规则证据增强。GraphRAG 必须异步，不得阻塞基础阅读。
 
 5. **闭环 UI 验收未最终完成**
    - 滚动、跳转、双击翻译/隐藏/再次打开、缩放清晰度、长文档问答性能都需要真实 E2E 反复跑。
@@ -205,6 +214,7 @@
 - `docs/current_goal_and_next_steps.md`：当前总目标、约束、已完成检查点、今晚/下一阶段任务。
 - `docs/e2e_test_plan.md`：Attention/Napkin 闭环测试方案。
 - `docs/formula_extraction_research.md`：born-digital 公式解析与成熟工具边界。
+- `docs/formula_multitool_fusion_design.md`：多工具公式候选融合和高精度门禁细设计，明确禁止手写硬编码解析规则。
 - `docs/formula_ocr_performance_design.md`：图片/扫描公式 OCR/MFR 性能方案。
 - `docs/async_formula_indexing_design.md`：异步多轮公式和全文索引设计。
 - `docs/rag_graphrag_migration_plan.md`：RAG/GraphRAG 迁移方案。
@@ -221,6 +231,7 @@
 - `tools/formula_latex_audit.py`：公式与 LaTeX 源码对照审计。
 - `tools/formula_ocr_benchmark.py`：OCR/MFR 抽样性能测试。
 - `tools/formula_tool_comparison.py`：外部公式工具候选对比和 r2 落库审计。
+- `tools/formula_multiround_pipeline.py`：r0-r4 端到端多轮公式流水线 smoke/benchmark，支持默认 born-digital 路线、显式 r2 多工具精扫、真实/模拟 r3、r4 图谱批处理和 `--reuse-db` 跳过验证。
 - `tools/formula_index_performance.py`：多轮公式索引任务入库性能测试。
 - `tools/external_formula_tools_smoke.py`：外部公式工具烟测入口。
 - `tools/test_log_audit.py`：日志清理和审计。
@@ -260,7 +271,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\test_log_audit.py --
 5. 跑轻量测试：
 
 ```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py -q
 ```
 
 6. 跑公式多轮入库性能：
@@ -276,7 +287,14 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_latex_audit.
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_latex_audit.py --case napkin --max-pages 120 --quality-gate
 ```
 
-8. 跑 E2E 闭环测试：
+8. 跑多轮公式流水线 smoke：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_multiround_pipeline.py --case attention --max-pages 6 --r1-limit 4 --r2-limit 1 --r3-limit 2 --r4-limit 12
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_multiround_pipeline.py --case attention --max-pages 6 --r2-sample-formulas 1 --r2-limit 1 --auto-local-tools
+```
+
+9. 跑 E2E 闭环测试：
 
 ```powershell
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\e2e_pdf_workflow.py --case all
@@ -289,8 +307,8 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\e2e_pdf_workflow.py 
 P0：
 
 1. 重新验证当前代码基线，确认文档修改前后的测试状态。
-2. 补齐 r0/r1/r2/r3/r4/r5 的端到端测试：入队、跳过、失败重试、结果落库、二次打开复用。
-3. 用 Attention/Napkin 做真实公式质量门禁，记录失败样例和性能。
+2. 继续补齐 r0/r1/r2/r3/r4/r5 的端到端测试：失败重试、租约恢复、r5 增量写回、真实 UI 触发和二次打开复用。
+3. 用 Attention/Napkin 做真实公式质量门禁，记录每轮 exact/near/weak/average similarity、低相似样例和性能；准确率不递增时必须回退或标记失败。
 4. 修复或隔离任何正则/硬编码公式识别实验，不能进入默认路径。
 5. 继续外部工具大样本对比，优先把 PEK/UniMERNet 跑通或明确淘汰，再比较 Pix2Text/Paddle/MinerU 的 Attention/Napkin 质量和性能。
 
@@ -313,7 +331,7 @@ P2：
 把下面这段给下一个新会话：
 
 ```text
-你接手的是 D:\程设大作业 的 PDF AI Reader 项目。先读根目录 AGENTS.md，再读 docs/next_session_handoff.md、TODO.md、docs/current_goal_and_next_steps.md、docs/async_formula_indexing_design.md、docs/formula_extraction_research.md、docs/e2e_test_plan.md。
+你接手的是 D:\程设大作业 的 PDF AI Reader 项目。先读根目录 AGENTS.md，再读 docs/next_session_handoff.md、TODO.md、docs/current_goal_and_next_steps.md、docs/async_formula_indexing_design.md、docs/formula_extraction_research.md、docs/formula_multitool_fusion_design.md、docs/e2e_test_plan.md。
 
 当前主环境是 C:\Users\WYK\.conda\envs\pdf_ai_reader_314。不要动用户已有环境 base/cs231n/drawing/science/pdf_ai_reader/pdf_ai_reader_314 等。当前隔离工具环境包括 pdf_tool_paddle310、pdf_tool_mineru310、pdf_tool_pix2text310、pdf_tool_magic310、pdf_tool_pek310；不要混装进主环境，也不要未经确认删除。不要先装包，先确认 git status、conda env list、防休眠进程和测试基线。
 
@@ -323,5 +341,5 @@ P2：
 
 测试资料在 测试资料/：Attention 是小文件，Napkin 是大文件，两者 PDF、LaTeX 源码和图片资源都要用于公式质量和性能验收。闭环测试必须模拟滚动翻页、跳转、双击翻译/隐藏/再次双击打开、缩放、问答、日志审计。长文档性能、缩放清晰度、翻译和问答延迟必须作为门槛。
 
-下一步先跑轻量测试：C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q。然后跑 tools/formula_index_performance.py、tools/formula_latex_audit.py 的 Attention/Napkin 门禁，再用 tools/formula_tool_comparison.py --auto-local-tools 对比外部工具候选，最后跑 tools/e2e_pdf_workflow.py。外部工具要先确认现有环境和模型缓存，再逐个真实 PDF 小页烟测和大样本对比。所有提交不得带额外署名、来源标记或生成工具署名，不提交测试资料、日志、缓存、临时产物。
+下一步先跑轻量测试：C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py -q。然后跑 tools/formula_multiround_pipeline.py 的默认 born-digital、--reuse-db 跳过、显式 --r2-sample-formulas 多工具、可选 --run-cloud-review smoke，再跑 tools/formula_index_performance.py、tools/formula_latex_audit.py 的 Attention/Napkin 门禁，最后跑 tools/e2e_pdf_workflow.py。外部工具要先确认现有环境和模型缓存，再逐个真实 PDF 小页烟测和大样本对比。所有提交不得带额外署名、来源标记或生成工具署名，不提交测试资料、日志、缓存、临时产物。
 ```

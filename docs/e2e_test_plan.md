@@ -51,6 +51,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case napkin --max-pages 120 --output test_artifacts/formula_audit_napkin_120.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --quality-gate --output test_artifacts/formula_audit_gate.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_tool_comparison.py --case attention --max-pages 6 --sample-limit 2 --auto-local-tools --output test_artifacts/formula_tool_comparison/attention_report.json --db test_artifacts/formula_tool_comparison/attention_jobs.db
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_multiround_pipeline.py --case attention --max-pages 6 --r1-limit 4 --r2-limit 1 --r3-limit 2 --r4-limit 12 --output test_artifacts/formula_multiround/attention_default.json --formula-db test_artifacts/formula_multiround/attention_default_formula.db --graph-db test_artifacts/formula_multiround/attention_default_graph.db
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_multiround_pipeline.py --case attention --max-pages 6 --r2-sample-formulas 1 --r2-limit 1 --r3-limit 1 --r4-limit 4 --auto-local-tools --output test_artifacts/formula_multiround/attention_forced_r2_tools.json --formula-db test_artifacts/formula_multiround/attention_forced_r2_formula.db --graph-db test_artifacts/formula_multiround/attention_forced_r2_graph.db
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_multiround_pipeline.py --case attention --max-pages 6 --r3-limit 1 --r4-limit 1 --run-cloud-review --output test_artifacts/formula_multiround/attention_cloud_r3.json --formula-db test_artifacts/formula_multiround/attention_cloud_r3_formula.db --graph-db test_artifacts/formula_multiround/attention_cloud_r3_graph.db
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case attention --max-pages 8 --output test_artifacts/formula_index_performance/attention_report.json --db test_artifacts/formula_index_performance/attention_jobs.db
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case napkin --max-pages 12 --output test_artifacts/formula_index_performance/napkin_report.json --db test_artifacts/formula_index_performance/napkin_jobs.db
 ```
@@ -69,6 +72,8 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 当前公式质量未过门禁时，E2E 总体应失败并写明 `expected_quality_gate_failure`，不能把低质量公式识别当作通过。
 - 多轮公式索引性能报告必须证明导入热路径不加载 OCR/MFR 模型，并输出 `r0_pdf_structure`、`r1_cached_recognition`、`r3_cloud_semantic_review` 等轮次任务统计。
 - 多轮公式解析必须覆盖 r0/r1/r2/r3/r4/r5 的设计边界：每轮落库、输入 hash 跳过、低置信只写候选、r3 不覆盖正文、GraphRAG 不阻塞阅读。
+- `tools/formula_multiround_pipeline.py` 默认路径必须证明 born-digital PDF 不进入 OCR/MFR；显式 r2 样本路径必须证明多工具候选只写 `local_precise` 未接受结果；`--reuse-db` 必须证明同一输入跳过。
+- 多轮公式流水线必须输出 `formula_accuracy.stage_metrics`，按源 LaTeX 对照每个 stage/model 的 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 的准确率应递增，否则本轮只能算候选探索，不能 accepted。
 - r3 语义复核测试必须证明云端修正只写候选 JSON，不覆盖原始公式块；后台 QThread smoke 必须通过；真实 DeepSeek 调用作为可选 smoke test 单独运行，不能进入默认导入热路径。
 
 公式审计门槛：
@@ -130,4 +135,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - `formula_recognition_results` 已记录结构候选、本地工具候选和 accepted 状态；同一候选 accepted 唯一性已有测试。
 - r2 已通过外部 JSON worker 接 Paddle Formula 与 Pix2Text，输出默认未接受；后续 E2E/审计必须验证这些候选不会覆盖正文。
 - `tools/formula_tool_comparison.py` 已能对同一批公式图运行隔离工具、计算源码相似度、记录耗时/warnings，并把 r2 候选落库；`--auto-local-tools` 可显式发现当前机器上的 Paddle/Pix2Text 隔离环境。
-- 最新相关单元测试组合为 70 passed；正式交付前必须重跑 Attention/Napkin 闭环。
+- `tools/formula_multiround_pipeline.py` 已能在 Attention 前 6 页跑通 r0/r1/r2/r3/r4：默认 born-digital 路线 r1/r2 正确跳过，显式 r2 单样本调用 `pix2text-mfr`、Paddle Formula、Pix2Text 三类候选，真实 DeepSeek r3 单条 smoke 通过。
+- 当前源 LaTeX 准确率复核显示：Attention 前 6 页 r0/parsed blocks 平均 best similarity 约 0.666、near match rate 0.571；显式 r2 单样本最佳平均 similarity 约 0.854，有提升但远未达到极高准确率或 exact-match 目标。
+- 显式 r2 单样本首轮冷启动约 245s，复用 DB 后约 1.2s 跳过；后续必须优化批处理、常驻 worker、模型缓存和超时。
+- 最新相关单元测试组合为 65 passed；正式交付前必须重跑 Attention/Napkin 闭环。

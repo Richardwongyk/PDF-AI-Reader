@@ -239,8 +239,20 @@ class FormulaIndexStore:
                 content_hash = self.content_hash(block)
                 priority = self.priority_for_block(block, priority_pages)
                 bbox_json = json.dumps(list(block.bbox), separators=(",", ":"))
+                round_row = self._conn.execute(
+                    """SELECT status, result_json FROM formula_round_jobs
+                       WHERE doc_hash=? AND scan_round=? AND target_type='block' AND target_id=?""",
+                    (doc_hash, round_name, block.id),
+                ).fetchone()
+                if round_row and str(round_row[0]) == "done":
+                    try:
+                        round_payload = json.loads(str(round_row[1] or "{}"))
+                    except json.JSONDecodeError:
+                        round_payload = {}
+                    if isinstance(round_payload, dict) and round_payload.get("content_hash") == content_hash:
+                        continue
                 row = self._conn.execute(
-                    """SELECT status, content_hash FROM formula_index_jobs
+                    """SELECT status, content_hash, scan_round FROM formula_index_jobs
                        WHERE doc_hash=? AND block_id=?""",
                     (doc_hash, block.id),
                 ).fetchone()
@@ -248,7 +260,7 @@ class FormulaIndexStore:
                     row
                     and row[0] == "done"
                     and row[1] == content_hash
-                    and round_name == FormulaScanRound.CACHED_RECOGNITION.value
+                    and row[2] == round_name
                 ):
                     self._enqueue_round_job_locked(
                         doc_hash=doc_hash,
@@ -275,7 +287,7 @@ class FormulaIndexStore:
                          status=CASE
                            WHEN formula_index_jobs.status='done'
                             AND formula_index_jobs.content_hash=excluded.content_hash
-                            AND excluded.scan_round='r1_cached_recognition'
+                            AND formula_index_jobs.scan_round=excluded.scan_round
                            THEN 'done'
                            ELSE 'queued'
                          END,
@@ -1115,7 +1127,7 @@ class FormulaIndexStore:
         increment_attempts: bool = False,
     ) -> None:
         row = self._conn.execute(
-            """SELECT filepath, page_num, priority, scan_round
+            """SELECT filepath, page_num, priority, scan_round, content_hash
                FROM formula_index_jobs
                WHERE doc_hash=? AND block_id=?""",
             (doc_hash, block_id),
@@ -1124,7 +1136,9 @@ class FormulaIndexStore:
             return
         round_name = _round_value(scan_round) if scan_round is not None else str(row[3])
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
-        payload = json.dumps(result_json or {}, ensure_ascii=False, separators=(",", ":"))
+        payload_dict = dict(result_json or {})
+        payload_dict.setdefault("content_hash", str(row[4]))
+        payload = json.dumps(payload_dict, ensure_ascii=False, separators=(",", ":"))
         self._conn.execute(
             f"""INSERT INTO formula_round_jobs
                (doc_hash, filepath, scan_round, target_type, target_id, page_num,

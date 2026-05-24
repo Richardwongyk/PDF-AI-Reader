@@ -52,7 +52,7 @@ PDF 导入
 
 所有轮次都必须持久化。不能只把结果留在内存，也不能每次打开文档重新扫描。
 
-### 当前落地状态（2026-05-24，最新提交到 9a02945）
+### 当前落地状态（2026-05-24）
 
 已在现有 `FormulaIndexStore` 上完成第一版多轮任务持久化，而不是另起一个同步扫描器：
 
@@ -78,9 +78,13 @@ PDF 导入
 - r0 页面 worker 当前调用 `BornDigitalFormulaExtractor`，只消费 MuPDF born-digital 结构证据，
   写入 `stage=pdf_structure` 的未接受候选；r0 不初始化 MFD/OCR。
 - r0 低置信、空 LaTeX 或需要复核的结构候选会额外排入 `r2_local_high_precision`
-  generic round，作为后续显式精扫/多工具对比的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
+  任务，作为后续显式精扫/多工具对比的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
 - r2 当前通过 `ExternalFormulaToolRunner` 和 `tools/formula_tool_worker.py` 调独立工具环境，
   已支持 Paddle Formula 与 Pix2Text 公式图候选；所有 r2 结果默认 `accepted=false`。
+- `formula_round_jobs.result_json` 和 `formula_recognition_results` 已记录输入 hash、模型和预处理版本；同一轮次同一输入完成后，二次打开或 `--reuse-db` 会跳过已完成 r0/r2 重任务。
+- 新增 `tools/formula_multiround_pipeline.py`，用于 r0-r4 端到端 smoke/benchmark：默认 born-digital 路线不 OCR，显式 `--r2-sample-formulas` 才把现有公式块送入 r2 多工具候选复核，`--run-cloud-review` 可跑真实 DeepSeek r3。
+- 多轮报告已接入源 LaTeX 对照准确率复核：每个 stage/model 都输出 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 必须证明准确率逐轮递增，未达门槛的结果不能 accepted。
+- 多工具协同细设计见 `docs/formula_multitool_fusion_design.md`：下一步实现候选级 fusion table、coverage-comparable 检查、accepted 门禁和 r5 增量写回；自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
 
 这一步已完成多轮调度、存储闭环和 r3 候选写回的第一版：
 
@@ -88,7 +92,7 @@ PDF 导入
 - `FormulaSemanticReviewFlow` 已把 r3 消费接入后台 QThread；MainWindow 空闲调度会小批量启动语义复核，导入热路径只负责入队。
 - r3 结果写入 `formula_round_jobs.result_json`，保留 `suggested_latex`、`confidence`、`reason`、`risks` 和原始响应。
 - r3 不覆盖 `DocumentBlock.content`，也不改 accepted 公式；低置信或未通过门禁的结果只能作为候选证据保存。
-- 当前仍未完成真实 DeepSeek r3 生产门禁、accepted revision 表、r4/r5 增量写回闭环；
+- 真实 DeepSeek r3 单条 smoke 已跑通，但生产门禁、accepted revision 表、r4 语义级图谱质量和 r5 增量写回闭环仍未完成；
   这些必须作为后续独立闭环完成。
 
 ### 文档块
