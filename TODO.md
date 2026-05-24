@@ -41,6 +41,14 @@
 
 2026-05-25 最新实现检查点：
 
+- 最新待提交实现：r0-r5 命令行流水线已完整显示 `r5_knowledge_incremental_update`；新增 `formula_fusion_records` 持久化表，fusion 记录包含 `fusion_version`、`input_hash`、best/ranked result ids、coverage、agreement、risk flags、decision 和完整 result JSON；同 input hash 二次运行跳过 fusion 派生 r2/r3/r5 队列。
+- 新增 `FormulaKnowledgeUpdateService`：消费 r5 round jobs，只有 accepted 结果变化后才把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文；UI idle 调度已接入 r5。
+- r3 语义复核 prompt 已增强为读取同一 candidate 的 `formula_recognition_results` 和 `formula_fusion_records`，云端只写 `suggested_latex/confidence/reason/risks/raw_response` 候选，不覆盖正文。
+- r2 外部工具统一 worker 已扩展：Paddle Formula、Pix2Text、MinerU 3.1.15 页级后端、PEK/UniMERNet 后端都能作为独立工具 spec；不可用或空输出也按工具身份写 failed/warning 候选，不能互相覆盖。当前 PEK 环境仍缺 `unimernet`，MinerU 能启动但单页/单候选耗时很高。
+- 行内公式已纳入审计和多轮报告：段落中的 `\(...\)`/`$...$` 候选进入 `inline_spans:document_chunker` 指标和 fusion；纯脚注/装饰符号不再包成公式；纯 inline 候选默认不进入 OCR/MFR，只进入候选审计/r3 复核。
+- 最新相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 `157 passed`。
+- Attention 前 6 页最新真实基线：默认 r0/r1/r3/r4/r5 pipeline 约 14s；fusion 34 个候选区域，`ready_for_manual_accept=0`，`needs_more_evidence=34`，`missing_or_insufficient_r2=6`，`inline_candidate_only_needs_review=10`；r2 队列只派发结构/display 候选，不默认 OCR inline。inline 审计从原先几乎 0 提升到 `pdf_inline_formula_snippets=115`、`inline_source_weak_match_rate=0.299`、`inline_source_unmatched_count=54`，仍远未达 99.9%。
+- Attention 单公式多工具 targeted r2：`--auto-local-tools --run-targeted-r2-after-fusion --r2-limit 1` 跑通 Paddle/Pix2Text/Pix2Text-MFR，PEK 写 unavailable warning；MinerU 后端参与会显著拉长耗时，当前更适合离线页级对照。
 - 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`、`6cb0860`，并继续完成候选融合、facts-only r0、行内公式指标和反硬编码测试，待本轮提交。
 - r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR，不默认调用自写 LaTeX 重建器；r2 只有低置信候选或显式 `--r2-sample-formulas` 精扫才通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
 - 新增 `tools/formula_multiround_pipeline.py`：可跑 r0-r4 状态、任务统计、识别结果统计、`--reuse-db` 跳过验证、显式 r2 多工具、可选 DeepSeek r3 smoke。

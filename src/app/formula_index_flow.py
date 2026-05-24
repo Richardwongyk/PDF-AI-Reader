@@ -58,6 +58,11 @@ class FormulaIndexFlow(QObject):
             or (self._page_thread and self._page_thread.isRunning())
         )
 
+    @property
+    def store(self) -> FormulaIndexStore:
+        """Return the persistent formula index store shared by formula services."""
+        return self._store
+
     def persist_plan(
         self,
         filepath: str,
@@ -772,7 +777,18 @@ class _FormulaOcrWorker(QThread):
             if self._scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value:
                 done.extend(
                     self._external_tool_candidates(
-                        [(block.id, image) for block, image in zip(image_blocks, images, strict=False)],
+                        [
+                            (
+                                block.id,
+                                image,
+                                {
+                                    "pdf_path": self._filepath,
+                                    "page_num": block.page_num,
+                                    "bbox": list(block.bbox),
+                                },
+                            )
+                            for block, image in zip(image_blocks, images, strict=False)
+                        ],
                         image_hashes,
                     )
                 )
@@ -807,14 +823,14 @@ class _FormulaOcrWorker(QThread):
 
     def _external_tool_candidates(
         self,
-        images: list[tuple[str, bytes]],
+        images: list[tuple[str, bytes, dict[str, object]]],
         image_hashes: list[str],
     ) -> list[dict[str, object]]:
         if not images:
             return []
         hash_by_id = {
             candidate_id: image_hash
-            for (candidate_id, _), image_hash in zip(images, image_hashes, strict=False)
+            for (candidate_id, _, _), image_hash in zip(images, image_hashes, strict=False)
         }
         started = time.perf_counter()
         try:
@@ -830,6 +846,8 @@ class _FormulaOcrWorker(QThread):
         for candidate in candidates:
             image_hash = hash_by_id.get(candidate.candidate_id, "")
             if not image_hash:
+                continue
+            if not candidate.latex and not candidate.warnings:
                 continue
             done.append({
                 "block_id": candidate.candidate_id,

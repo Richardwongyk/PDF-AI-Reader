@@ -139,7 +139,11 @@ class FormulaSemanticReviewService:
         record: FormulaRoundRecord,
         block: DocumentBlock,
     ) -> FormulaSemanticReviewResult:
-        messages = self._build_messages(block)
+        messages = self._build_messages(
+            block,
+            candidates=self._candidate_records_for_block(record.doc_hash, record.target_id),
+            fusion_records=self._fusion_records_for_block(record.doc_hash, record.target_id),
+        )
         raw = self._client.generate(
             messages,
             temperature=0,
@@ -162,8 +166,61 @@ class FormulaSemanticReviewService:
             raw_response=raw,
         )
 
-    @staticmethod
-    def _build_messages(block: DocumentBlock) -> list[dict[str, str]]:
+    def _candidate_records_for_block(self, doc_hash: str, candidate_id: str) -> list[dict[str, object]]:
+        records = self._store.list_recognition_results(
+            doc_hash,
+            candidate_id=candidate_id,
+            limit=20,
+        )
+        return [
+            {
+                "result_id": record.result_id,
+                "stage": record.stage,
+                "model": record.model,
+                "model_version": record.model_version,
+                "preprocess_version": record.preprocess_version,
+                "input_hash": record.input_hash,
+                "latex": record.latex,
+                "score": record.score,
+                "warnings": list(record.warnings),
+                "accepted": record.accepted,
+                "evidence": record.evidence,
+            }
+            for record in records
+        ]
+
+    def _fusion_records_for_block(self, doc_hash: str, candidate_id: str) -> list[dict[str, object]]:
+        records = self._store.list_fusion_records(
+            doc_hash,
+            candidate_id=candidate_id,
+            limit=5,
+        )
+        return [
+            {
+                "fusion_id": record.fusion_id,
+                "fusion_version": record.fusion_version,
+                "input_hash": record.input_hash,
+                "best_result_id": record.best_result_id,
+                "ranked_result_ids": list(record.ranked_result_ids),
+                "coverage": record.coverage,
+                "agreement_score": record.agreement_score,
+                "source_similarity": record.source_similarity,
+                "syntax_valid": record.syntax_valid,
+                "risk_flags": list(record.risk_flags),
+                "accepted_gate": record.accepted_gate,
+                "decision": record.decision,
+                "result_json": record.result_json,
+            }
+            for record in records
+        ]
+
+    def _build_messages(
+        self,
+        block: DocumentBlock,
+        *,
+        candidates: list[dict[str, object]] | None = None,
+        fusion_records: list[dict[str, object]] | None = None,
+    ) -> list[dict[str, str]]:
         context = {
             "block_id": block.id,
             "page": block.page_num + 1,
@@ -171,6 +228,8 @@ class FormulaSemanticReviewService:
             "bbox": list(block.bbox),
             "section_title": block.section_title,
             "metadata": block.metadata,
+            "recognition_candidates": candidates or [],
+            "fusion_records": fusion_records or [],
         }
         return [
             {

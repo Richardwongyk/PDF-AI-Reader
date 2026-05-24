@@ -425,7 +425,10 @@ class DocumentChunker:
             raw = "".join(math_buffer).strip()
             math_buffer.clear()
             if raw:
-                parts.append(wrap_math_text(raw, display=False))
+                if cls._is_inline_math_candidate(raw):
+                    parts.append(wrap_math_text(raw, display=False))
+                else:
+                    parts.append(raw)
 
         for span in spans:
             text = str(span.get("text", ""))
@@ -450,6 +453,18 @@ class DocumentChunker:
             return False
         lowered = font.lower()
         return any(keyword.lower() in lowered for keyword in DocumentChunker._MATH_FONT_KEYWORDS)
+
+    @staticmethod
+    def _is_inline_math_candidate(text: str) -> bool:
+        compact = "".join(str(text or "").split())
+        if not compact:
+            return False
+        footnote_marks = set("*∗†‡§¶")
+        if all(char in footnote_marks for char in compact):
+            return False
+        if len(compact) == 1 and compact in {",", ".", ";", ":", "(", ")", "[", "]"}:
+            return False
+        return True
 
     @staticmethod
     def _detect_columns(blocks: list[DocumentBlock]) -> list[list[DocumentBlock]]:

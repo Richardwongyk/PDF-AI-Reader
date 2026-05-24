@@ -70,7 +70,7 @@
 
 今晚目标是持续运行到基础目标真正达成：公式扫描最终准确度高于 99.9%，RAG/知识系统完整可用，并继续全线优化。当前还没有完成这个目标，不能标记 goal 完成。LaTeX 源码只用于测试、审计和验收；真实用户运行路径不能假设有源码。
 
-当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。2026-05-24 已新增 `tools/formula_multiround_pipeline.py`，可在 Attention 上验证 r0-r4 的落库、跳过、显式 r2 多工具和真实 r3 云端 smoke；本轮又补了 facts-only r0、候选融合、行内公式指标和反硬编码测试。仍未完成 Napkin 大样本质量门禁、r5 增量知识库写回和产品级 accepted 门禁。
+当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。2026-05-25 已能在 `tools/formula_multiround_pipeline.py` 中验证 r0-r5 的落库、跳过、fusion 持久化、定向 r2、候选证据增强 r3、结构图谱 r4 和 accepted r5 增量写回 service；仍未完成 Napkin 大样本质量门禁、产品级 accepted/rejected/revision 门禁、GraphRAG 高质量语义抽取和最终 99.9% 公式准确率。
 
 多工具配合的下一步必须按 `docs/formula_multitool_fusion_design.md` 推进：不手写硬编码公式解析规则，不靠样本正则修公式；自写部分只做 evidence/candidate/fusion schema、工具编排、源码准确率复核、候选排序、accepted 门禁和增量写回。
 
@@ -123,7 +123,7 @@
 - r2：本地高精度多工具复核，独立 worker，只写候选。
 - r3：DeepSeek 等分析模型语义复核，写候选 JSON，不覆盖正文。
 - r4：公式/章节/定理/引用/概念关系异步写 GraphRAG。
-- r5：`r5_knowledge_incremental_update` 枚举已存在；accepted 高置信修正应增量写回全文索引，按 hash 跳过未变内容，具体 upsert 接线尚未完成。
+- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued。仍缺产品级 accepted/rejected/revision UI 和 GraphRAG 同步更新。
 
 最新实现状态：
 
@@ -133,10 +133,10 @@
 - r2 已有外部多工具候选 worker，当前 Paddle Formula 和 Pix2Text 单图 smoke 能返回候选；所有 r2 结果默认不覆盖正文。
 - `tools/formula_multiround_pipeline.py` 已把 r0/r1/r2/r3/r4 串成可审计命令行流水线；默认 born-digital 路径不 OCR，显式 `--r2-sample-formulas` 才抽样送 r2 多工具精扫，`--reuse-db` 可证明已完成输入跳过。
 - Attention 前 6 页验证：facts-only 默认 r0 写 7 个结构公式候选，r1/r2 正确跳过；复用 DB 后 r0 `processed_pages=0`、`skipped_completed_pages=6`；显式 r2 单样本调用 `pix2text-mfr`、Paddle Formula、Pix2Text，首轮约 245s、复用约 1.2s；真实 DeepSeek r3 单条约 60s，只写候选 JSON。
-- 源 LaTeX 准确率复核已接入多轮报告：facts-only r0/parsed blocks 平均 best similarity 约 0.668、near match rate 0.429；inline 公式 `inline_weak_match_rate=0.026`、`inline_unmatched_count=75`，说明行内公式远未达标；显式 r2 单样本最佳平均 similarity 约 0.854，证明有提升但还远未达到极高准确率或 exact-match accepted 门槛。
-- `formula_fusion` 已按 bbox/candidate_id 合并 parsed/r0/r2/r3 候选，输出 per-candidate 排名、accepted gate 和 `targeted_r2_queue`；当前 Attention 前 6 页 7 个区域 0 个 ready，全部 `needs_more_evidence`。
+- 源 LaTeX 准确率复核已接入多轮报告：facts-only r0/parsed blocks 平均 best similarity 约 0.668、near match rate 0.429；行内候选接入后 Attention 前 6 页 `pdf_inline_formula_snippets=115`，`inline_source_weak_match_rate=0.299`，`inline_source_unmatched_count=54`，明显好于此前 0.026/75，但仍远未达标；显式 r2 单样本最佳平均 similarity 约 0.854，证明有提升但还远未达到极高准确率或 exact-match accepted 门槛。
+- `formula_fusion` 已按 bbox/candidate_id 合并 parsed/r0/r2/r3/inline 候选，输出 per-candidate 排名、accepted gate、持久化 input hash 和定向 r2/r3/r5 派生统计；当前 Attention 前 6 页 34 个候选区域 0 个 ready，全部 `needs_more_evidence`，其中结构/display 低证据 r2 队列 6 个，纯 inline 只进入候选审计/r3 复核，不默认 OCR。
 - MinerU 3.1.15 本地新模型已跑通 Attention 单页离线解析；PEK/UniMERNet 未跑通，旧 magic-pdf 缺权重。
-- 最新相关测试：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 142 passed。
+- 最新相关测试：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 157 passed。
 
 ## 今晚执行边界
 

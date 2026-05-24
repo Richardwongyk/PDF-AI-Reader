@@ -8,6 +8,7 @@ timing, skips/failures, and candidate counts.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -24,6 +25,7 @@ if str(ROOT) not in sys.path:
 from src.app.formula_index_flow import FormulaIndexFlow, _FormulaPageScanWorker, _FormulaOcrWorker
 from src.app.formula_index_scheduler import FormulaIndexScheduler, FormulaScanTrigger
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
+from src.app.formula_knowledge_update import FormulaKnowledgeUpdateService
 from src.app.formula_semantic_review import FormulaSemanticReviewService
 from src.app.graph_index_flow import run_graph_index_batch
 from src.app.graph_index_store import GraphIndexStore
@@ -40,8 +42,12 @@ from tools.formula_latex_audit import (
     _cases,
     _extract_source_formulas_detailed,
     _formula_similarity,
+    _inline_formula_snippets_from_text,
     _normalize_formula_for_match,
 )
+
+
+FUSION_VERSION = "formula_candidate_fusion_v1"
 
 
 @dataclass
@@ -67,6 +73,7 @@ class MultiRoundPipelineReport:
     formula_round_jobs: dict[str, int]
     formula_jobs: dict[str, int]
     page_jobs: dict[str, int]
+    formula_fusion_jobs: dict[str, int]
     graph_jobs: dict[str, int]
     recognition_results: dict[str, int]
     formula_accuracy: dict[str, object]
@@ -100,6 +107,20 @@ class _MockReviewClient(BaseLLMClient):
 
     def check_availability(self) -> bool:
         return True
+
+
+class _PipelineKnowledgeStub:
+    """Synchronous r5 smoke backend; real app uses KnowledgeEngine."""
+
+    def __init__(self, exists: bool = True) -> None:
+        self._exists = exists
+        self.upserted_blocks: list[DocumentBlock] = []
+
+    def check_exists(self, doc_hash: str) -> bool:
+        return self._exists
+
+    def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
+        self.upserted_blocks.extend(block.model_copy(deep=True) for block in blocks)
 
 
 def _select_cases(case_name: str) -> list[Any]:
@@ -138,9 +159,11 @@ def run_pipeline_case(
     r2_limit: int = 2,
     r3_limit: int = 2,
     r4_limit: int = 16,
+    r5_limit: int = 8,
     r2_sample_formulas: int = 0,
     auto_local_tools: bool = False,
     run_cloud_review: bool = False,
+    run_targeted_r2_after_fusion: bool = False,
 ) -> MultiRoundPipelineReport:
     started_total = time.perf_counter()
     pages_scanned, blocks = _parse_blocks(case.pdf, max_pages=max_pages, start_page=start_page)
@@ -170,18 +193,44 @@ def run_pipeline_case(
     rounds.append(_run_r3(formula_store, filepath, doc_hash, formula_blocks, limit=r3_limit, run_cloud_review=run_cloud_review))
     rounds.append(_run_r4(graph_store, filepath, doc_hash, blocks, limit=r4_limit))
 
+    formula_fusion = _formula_fusion_report(
+        case,
+        formula_store,
+        doc_hash,
+        blocks,
+        formula_blocks,
+        max_pages=max_pages,
+        filepath=filepath,
+    )
+    if run_targeted_r2_after_fusion:
+        rounds.append(
+            _run_r2(
+                formula_store,
+                filepath,
+                doc_hash,
+                blocks,
+                formula_blocks=formula_blocks,
+                limit=r2_limit,
+                sample_formulas=0,
+                auto_local_tools=auto_local_tools,
+            )
+        )
+        formula_fusion = _formula_fusion_report(
+            case,
+            formula_store,
+            doc_hash,
+            blocks,
+            formula_blocks,
+            max_pages=max_pages,
+            filepath=filepath,
+        )
+    rounds.append(_run_r5(formula_store, filepath, doc_hash, formula_blocks, limit=r5_limit))
     recognition_results = _recognition_result_counts(formula_store, doc_hash)
     formula_accuracy = _formula_accuracy_report(
         case,
         formula_store,
         doc_hash,
-        formula_blocks,
-        max_pages=max_pages,
-    )
-    formula_fusion = _formula_fusion_report(
-        case,
-        formula_store,
-        doc_hash,
+        blocks,
         formula_blocks,
         max_pages=max_pages,
     )
@@ -200,6 +249,7 @@ def run_pipeline_case(
         formula_round_jobs=formula_store.round_counts(doc_hash),
         formula_jobs=formula_store.counts(doc_hash),
         page_jobs=formula_store.page_counts(doc_hash),
+        formula_fusion_jobs=formula_store.fusion_counts(doc_hash),
         graph_jobs=graph_store.counts(doc_hash),
         recognition_results=recognition_results,
         formula_accuracy=formula_accuracy,
@@ -497,6 +547,34 @@ def _run_r4(
     )
 
 
+def _run_r5(
+    store: FormulaIndexStore,
+    filepath: str,
+    doc_hash: str,
+    formula_blocks: list[DocumentBlock],
+    limit: int,
+) -> RoundReport:
+    started = time.perf_counter()
+    service = FormulaKnowledgeUpdateService(
+        store,
+        _PipelineKnowledgeStub(exists=True),
+        batch_size=max(1, limit),
+    )
+    result = service.run_batch(doc_hash, formula_blocks, limit=max(0, limit))
+    processed_total = result.done + result.failed + result.skipped
+    return RoundReport(
+        round=FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE.value,
+        status="done" if processed_total > 0 else ("queued" if result.pending else "skipped"),
+        elapsed_sec=round(time.perf_counter() - started, 3),
+        counts=store.round_counts(doc_hash, FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE),
+        details={
+            **result.to_json(),
+            "filepath": filepath,
+            "note": "Pipeline uses a synchronous stub; the application wires r5 to KnowledgeEngine.upsert_blocks.",
+        },
+    )
+
+
 def _cloud_review_client() -> LiteLLMClient:
     manager = ConfigManager(str(ROOT / "config.yaml"))
     config = manager.get()
@@ -515,10 +593,39 @@ def _recognition_result_counts(store: FormulaIndexStore, doc_hash: str) -> dict[
     return counts
 
 
+def _inline_formula_candidates_from_blocks(blocks: list[DocumentBlock]) -> list[str]:
+    candidates: list[str] = []
+    for item in _inline_formula_candidate_items(blocks):
+        candidates.append(str(item["latex"]))
+    return candidates
+
+
+def _inline_formula_candidate_items(blocks: list[DocumentBlock]) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for block in blocks:
+        if block.block_type == BlockType.FORMULA:
+            continue
+        content = str(block.content or "")
+        if not content:
+            continue
+        for index, latex in enumerate(_inline_formula_snippets_from_text(content)):
+            candidates.append(
+                {
+                    "candidate_id": f"{block.id}_inline_{index}",
+                    "latex": latex,
+                    "page_num": block.page_num,
+                    "bbox": list(block.bbox),
+                    "block_id": block.id,
+                }
+            )
+    return candidates
+
+
 def _formula_accuracy_report(
     case: Any,
     store: FormulaIndexStore,
     doc_hash: str,
+    blocks: list[DocumentBlock],
     formula_blocks: list[DocumentBlock],
     max_pages: int,
 ) -> dict[str, object]:
@@ -560,6 +667,9 @@ def _formula_accuracy_report(
             for block in formula_blocks
             if str(block.content or "").strip()
         ]
+    inline_candidates = _inline_formula_candidates_from_blocks(blocks)
+    if inline_candidates:
+        groups["inline_spans:document_chunker"] = inline_candidates
     for record in store.list_recognition_results(doc_hash, limit=10000):
         latex = str(record.latex or "").strip()
         if not latex:
@@ -607,8 +717,10 @@ def _formula_fusion_report(
     case: Any,
     store: FormulaIndexStore,
     doc_hash: str,
+    blocks: list[DocumentBlock],
     formula_blocks: list[DocumentBlock],
     max_pages: int,
+    filepath: str = "",
 ) -> dict[str, object]:
     raw_latex_root = getattr(case, "latex_root", None)
     source_formulas: list[str] = []
@@ -630,14 +742,58 @@ def _formula_fusion_report(
             candidates_by_id,
             _fusion_candidate(
                 candidate_id=block.id,
+                result_id=_synthetic_result_id(
+                    doc_hash,
+                    block.id,
+                    "parsed_blocks",
+                    "document_chunker",
+                    _block_input_hash(block),
+                ),
                 stage="parsed_blocks",
                 model="document_chunker",
+                model_version="document_chunker",
+                preprocess_version="parsed-block",
+                input_hash=_block_input_hash(block),
                 latex=latex,
                 source_formulas=source_formulas,
                 score=None,
                 warnings=[],
                 accepted=False,
                 evidence={"page_num": block.page_num, "bbox": list(block.bbox)},
+            )
+        )
+
+    for item in _inline_formula_candidate_items(blocks):
+        candidate_id = str(item["candidate_id"])
+        inline_latex = str(item["latex"])
+        input_hash = _json_hash(item)
+        _add_fusion_candidate(
+            candidates_by_id,
+            _fusion_candidate(
+                candidate_id=candidate_id,
+                result_id=_synthetic_result_id(
+                    doc_hash,
+                    candidate_id,
+                    "inline_spans",
+                    "document_chunker",
+                    input_hash,
+                ),
+                stage="inline_spans",
+                model="document_chunker",
+                model_version="document_chunker",
+                preprocess_version="math-font-inline",
+                input_hash=input_hash,
+                latex=inline_latex,
+                source_formulas=source_formulas,
+                score=None,
+                warnings=[],
+                accepted=False,
+                evidence={
+                    "source": "paragraph_inline_math",
+                    "page_num": item.get("page_num"),
+                    "bbox": item.get("bbox"),
+                    "block_id": item.get("block_id"),
+                },
             )
         )
 
@@ -648,8 +804,12 @@ def _formula_fusion_report(
             candidates_by_id,
             _fusion_candidate(
                 candidate_id=record.candidate_id,
+                result_id=record.result_id,
                 stage=record.stage,
                 model=record.model,
+                model_version=record.model_version,
+                preprocess_version=record.preprocess_version,
+                input_hash=record.input_hash,
                 latex=record.latex,
                 source_formulas=source_formulas,
                 score=record.score,
@@ -672,8 +832,18 @@ def _formula_fusion_report(
             candidates_by_id,
             _fusion_candidate(
                 candidate_id=record.target_id,
+                result_id=_synthetic_result_id(
+                    doc_hash,
+                    record.target_id,
+                    "cloud_semantic",
+                    "suggested_latex",
+                    _round_record_input_hash(record.result_json),
+                ),
                 stage="cloud_semantic",
                 model="suggested_latex",
+                model_version=str(record.result_json.get("model", "semantic_review") or "semantic_review"),
+                preprocess_version="r3-review-json",
+                input_hash=_round_record_input_hash(record.result_json),
                 latex=latex,
                 source_formulas=source_formulas,
                 score=_optional_float(record.result_json.get("confidence")),
@@ -690,13 +860,15 @@ def _formula_fusion_report(
         for candidate_id, candidates in sorted(candidates_by_id.items())
     ]
     rows = [row for row in rows if row["candidate_count"] > 0]
+    persisted = _persist_fusion_rows(store, doc_hash, filepath, rows, formula_blocks)
     accepted_ready = [row for row in rows if row["decision"] == "ready_for_manual_accept"]
     needs_more = [row for row in rows if row["decision"] == "needs_more_evidence"]
-    insufficient_r2 = [
+    insufficient_evidence = [
         row for row in rows
         if row["decision"] != "ready_for_manual_accept"
         and float(row["best_similarity"]) < 0.90
     ]
+    targeted_r2_rows = [row for row in insufficient_evidence if _row_needs_targeted_r2(row)]
     return {
         "available": bool(rows),
         "source_available": source_available,
@@ -705,7 +877,9 @@ def _formula_fusion_report(
             "candidate_count": len(rows),
             "ready_for_manual_accept": len(accepted_ready),
             "needs_more_evidence": len(needs_more),
-            "missing_or_insufficient_r2": len(insufficient_r2),
+            "missing_or_insufficient_r2": len(targeted_r2_rows),
+            "inline_candidate_only_needs_review": len(insufficient_evidence) - len(targeted_r2_rows),
+            "persisted": persisted,
             "average_best_similarity": round(
                 sum(float(row["best_similarity"]) for row in rows) / len(rows),
                 3,
@@ -722,7 +896,7 @@ def _formula_fusion_report(
                 "best_similarity": row["best_similarity"],
                 "best_stage": row["best_stage"],
             }
-            for row in insufficient_r2[:20]
+            for row in targeted_r2_rows[:20]
         ],
         "note": (
             "Fusion ranks existing candidates only. It does not rewrite LaTeX. "
@@ -768,8 +942,12 @@ def _matching_fusion_group(
 def _fusion_candidate(
     *,
     candidate_id: str,
+    result_id: str,
     stage: str,
     model: str,
+    model_version: str,
+    preprocess_version: str,
+    input_hash: str,
     latex: str,
     source_formulas: list[str],
     score: float | None,
@@ -780,8 +958,12 @@ def _fusion_candidate(
     similarity, best_source = _best_source_similarity(latex, source_formulas)
     return {
         "candidate_id": candidate_id,
+        "result_id": result_id,
         "stage": stage,
         "model": model,
+        "model_version": model_version,
+        "preprocess_version": preprocess_version,
+        "input_hash": input_hash,
         "latex": " ".join(str(latex or "").split())[:260],
         "source_similarity": similarity,
         "best_source": best_source,
@@ -812,6 +994,11 @@ def _fusion_row(candidate_id: str, candidates: list[dict[str, object]]) -> dict[
         f"{item.get('stage')}:{item.get('model')}": str(item.get("latex", ""))
         for item in candidates
     }
+    result_ids = [
+        str(item.get("result_id", ""))
+        for item in ranked
+        if str(item.get("result_id", ""))
+    ]
     agreement = _candidate_agreement([str(item.get("latex", "")) for item in candidates])
     best_similarity = float(best.get("source_similarity", 0.0) or 0.0)
     warnings = [
@@ -820,6 +1007,7 @@ def _fusion_row(candidate_id: str, candidates: list[dict[str, object]]) -> dict[
         for warning in item.get("warnings", [])
         if str(warning)
     ]
+    risk_flags = _fusion_risk_flags(warnings)
     gate = _fusion_gate(
         best_similarity=best_similarity,
         agreement=agreement,
@@ -835,6 +1023,11 @@ def _fusion_row(candidate_id: str, candidates: list[dict[str, object]]) -> dict[
     return {
         "candidate_id": candidate_id,
         "member_candidate_ids": member_candidate_ids,
+        "fusion_version": FUSION_VERSION,
+        "fusion_input_hash": _fusion_input_hash(candidates),
+        "best_result_id": str(best.get("result_id", "")),
+        "ranked_result_ids": result_ids,
+        "coverage": _fusion_coverage(candidates),
         "candidate_count": len(candidates),
         "stages": stages,
         "models": sorted(model_outputs),
@@ -845,6 +1038,8 @@ def _fusion_row(candidate_id: str, candidates: list[dict[str, object]]) -> dict[
         "best_source": str(best.get("best_source", "")),
         "agreement_score": agreement,
         "has_local_precise": bool(local_precise),
+        "syntax_valid": _looks_like_latex_candidate(str(best.get("latex", ""))),
+        "risk_flags": risk_flags,
         "accepted_gate": gate,
         "decision": decision,
         "ranked_candidates": ranked[:6],
@@ -880,6 +1075,343 @@ def _fusion_gate(
             "requires_local_precise": True,
         },
     }
+
+
+def _persist_fusion_rows(
+    store: FormulaIndexStore,
+    doc_hash: str,
+    filepath: str,
+    rows: list[dict[str, object]],
+    formula_blocks: list[DocumentBlock],
+) -> dict[str, int]:
+    if not doc_hash or not rows:
+        return {
+            "fusion_records_upserted": 0,
+            "r2_queued": 0,
+            "r3_queued": 0,
+            "r5_queued": 0,
+            "already_done_same_input": 0,
+        }
+    block_map = {block.id: block for block in formula_blocks}
+    fusion_upserted = 0
+    same_input = 0
+    r2_targets: list[DocumentBlock] = []
+    r3_targets: list[DocumentBlock] = []
+    r5_targets: list[DocumentBlock] = []
+    r5_payloads: dict[str, dict[str, object]] = {}
+    for row in rows:
+        candidate_id = str(row.get("candidate_id", "") or "")
+        input_hash = str(row.get("fusion_input_hash", "") or "")
+        if not candidate_id or not input_hash:
+            continue
+        existing = store.get_fusion_record(
+            doc_hash=doc_hash,
+            candidate_id=candidate_id,
+            fusion_version=FUSION_VERSION,
+            input_hash=input_hash,
+        )
+        if existing is not None:
+            same_input += 1
+            continue
+        store.put_fusion_record(
+            doc_hash=doc_hash,
+            candidate_id=candidate_id,
+            fusion_version=FUSION_VERSION,
+            input_hash=input_hash,
+            best_result_id=str(row.get("best_result_id", "") or ""),
+            ranked_result_ids=[
+                str(item)
+                for item in row.get("ranked_result_ids", [])
+                if str(item)
+            ] if isinstance(row.get("ranked_result_ids"), list) else [],
+            coverage=float(row.get("coverage", 0.0) or 0.0),
+            agreement_score=float(row.get("agreement_score", 0.0) or 0.0),
+            source_similarity=float(row.get("best_similarity", 0.0) or 0.0),
+            syntax_valid=bool(row.get("syntax_valid")),
+            risk_flags=[
+                str(item)
+                for item in row.get("risk_flags", [])
+                if str(item)
+            ] if isinstance(row.get("risk_flags"), list) else [],
+            accepted_gate=row.get("accepted_gate") if isinstance(row.get("accepted_gate"), dict) else {},
+            decision=str(row.get("decision", "candidate_only") or "candidate_only"),
+            result_json=row,
+        )
+        fusion_upserted += 1
+        if _row_needs_targeted_r2(row):
+            target = _fusion_target_block(row, block_map)
+            if target is not None:
+                r2_targets.append(target)
+        if str(row.get("decision", "")) in {"needs_more_evidence", "ready_for_manual_accept"}:
+            target = _fusion_review_block(row, block_map)
+            if target is not None:
+                r3_targets.append(target)
+        if _row_has_accepted_result(row):
+            target = _accepted_knowledge_block(row, block_map)
+            if target is not None:
+                r5_targets.append(target)
+                r5_payloads[target.id] = {
+                    "input_hash": input_hash,
+                    "fusion_version": FUSION_VERSION,
+                    "best_result_id": str(row.get("best_result_id", "") or ""),
+                    "decision": str(row.get("decision", "") or ""),
+                    "accepted_latex": target.content,
+                }
+    r2_queued = store.enqueue_blocks(
+        doc_hash,
+        filepath,
+        _dedupe_blocks(r2_targets),
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    ) if filepath and r2_targets else 0
+    r3_queued = store.enqueue_round_records(
+        doc_hash,
+        filepath,
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        _dedupe_blocks(r3_targets),
+    ) if filepath and r3_targets else 0
+    r5_queued = store.enqueue_round_records(
+        doc_hash,
+        filepath,
+        FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+        "block",
+        _dedupe_blocks(r5_targets),
+        result_json_by_target=r5_payloads,
+    ) if filepath and r5_targets else 0
+    return {
+        "fusion_records_upserted": fusion_upserted,
+        "r2_queued": r2_queued,
+        "r3_queued": r3_queued,
+        "r5_queued": r5_queued,
+        "already_done_same_input": same_input,
+    }
+
+
+def _row_needs_targeted_r2(row: dict[str, object]) -> bool:
+    if str(row.get("decision", "")) != "needs_more_evidence":
+        return False
+    stages = {
+        str(stage)
+        for stage in row.get("stages", [])
+        if str(stage)
+    } if isinstance(row.get("stages"), list) else set()
+    if stages and stages <= {"inline_spans"}:
+        return False
+    if bool(row.get("has_local_precise")) and float(row.get("best_similarity", 0.0) or 0.0) >= 0.90:
+        return False
+    return True
+
+
+def _row_has_accepted_result(row: dict[str, object]) -> bool:
+    return any(
+        isinstance(item, dict) and bool(item.get("accepted"))
+        for item in row.get("ranked_candidates", [])
+        if isinstance(item, dict)
+    )
+
+
+def _fusion_target_block(
+    row: dict[str, object],
+    block_map: dict[str, DocumentBlock],
+) -> DocumentBlock | None:
+    candidate_id = str(row.get("candidate_id", "") or "")
+    block = block_map.get(candidate_id)
+    if block is not None:
+        return block.model_copy(
+            update={
+                "metadata": {
+                    **block.metadata,
+                    "needs_ocr": True,
+                    "source": block.metadata.get("source", "formula_fusion_targeted_r2"),
+                    "review_trigger": "formula_fusion_needs_more_evidence",
+                    "fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
+                }
+            },
+            deep=True,
+        )
+    candidate = _best_candidate_with_bbox(row)
+    if candidate is None:
+        return None
+    bbox = _candidate_bbox(candidate)
+    page_num = _candidate_page(candidate)
+    if bbox is None or page_num is None:
+        return None
+    return DocumentBlock(
+        id=candidate_id,
+        page_num=page_num,
+        block_type=BlockType.FORMULA,
+        content=str(candidate.get("latex", "") or ""),
+        bbox=bbox,
+        metadata={
+            "needs_ocr": True,
+            "source": "formula_fusion_targeted_r2",
+            "review_trigger": "formula_fusion_needs_more_evidence",
+            "formula_score": float(row.get("best_similarity", 0.0) or 0.0),
+            "fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
+        },
+    )
+
+
+def _accepted_knowledge_block(
+    row: dict[str, object],
+    block_map: dict[str, DocumentBlock],
+) -> DocumentBlock | None:
+    candidate_id = str(row.get("candidate_id", "") or "")
+    block = block_map.get(candidate_id)
+    if block is None:
+        return None
+    accepted = next(
+        (
+            item for item in row.get("ranked_candidates", [])
+            if isinstance(item, dict) and bool(item.get("accepted")) and str(item.get("latex", "")).strip()
+        ),
+        None,
+    )
+    if accepted is None:
+        return None
+    return block.model_copy(
+        update={
+            "content": str(accepted.get("latex", "") or ""),
+            "metadata": {
+                **block.metadata,
+                "formula_fusion_accepted": True,
+                "formula_fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
+                "formula_fusion_best_result_id": str(row.get("best_result_id", "") or ""),
+            },
+        },
+        deep=True,
+    )
+
+
+def _fusion_review_block(
+    row: dict[str, object],
+    block_map: dict[str, DocumentBlock],
+) -> DocumentBlock | None:
+    candidate_id = str(row.get("candidate_id", "") or "")
+    block = block_map.get(candidate_id)
+    if block is not None:
+        return block.model_copy(
+            update={
+                "metadata": {
+                    **block.metadata,
+                    "fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
+                    "fusion_decision": str(row.get("decision", "") or ""),
+                }
+            },
+            deep=True,
+        )
+    target = _fusion_target_block(row, block_map)
+    if target is None:
+        return None
+    target.metadata["fusion_decision"] = str(row.get("decision", "") or "")
+    return target
+
+
+def _best_candidate_with_bbox(row: dict[str, object]) -> dict[str, object] | None:
+    ranked = row.get("ranked_candidates", [])
+    if not isinstance(ranked, list):
+        return None
+    for item in ranked:
+        if isinstance(item, dict) and _candidate_bbox(item) is not None and _candidate_page(item) is not None:
+            return item
+    return None
+
+
+def _dedupe_blocks(blocks: list[DocumentBlock]) -> list[DocumentBlock]:
+    deduped: dict[str, DocumentBlock] = {}
+    for block in blocks:
+        deduped.setdefault(block.id, block)
+    return list(deduped.values())
+
+
+def _fusion_input_hash(candidates: list[dict[str, object]]) -> str:
+    payload = [
+        {
+            "candidate_id": str(item.get("candidate_id", "")),
+            "result_id": str(item.get("result_id", "")),
+            "stage": str(item.get("stage", "")),
+            "model": str(item.get("model", "")),
+            "model_version": str(item.get("model_version", "")),
+            "preprocess_version": str(item.get("preprocess_version", "")),
+            "input_hash": str(item.get("input_hash", "")),
+            "latex": str(item.get("latex", "")),
+            "warnings": [str(value) for value in item.get("warnings", []) if str(value)]
+            if isinstance(item.get("warnings"), list) else [],
+        }
+        for item in sorted(
+            candidates,
+            key=lambda value: (
+                str(value.get("candidate_id", "")),
+                str(value.get("stage", "")),
+                str(value.get("model", "")),
+                str(value.get("input_hash", "")),
+            ),
+        )
+    ]
+    return _json_hash(payload)
+
+
+def _block_input_hash(block: DocumentBlock) -> str:
+    return _json_hash(
+        {
+            "id": block.id,
+            "page_num": block.page_num,
+            "bbox": [round(float(value), 3) for value in block.bbox],
+            "content": block.content,
+        }
+    )
+
+
+def _round_record_input_hash(payload: dict[str, object]) -> str:
+    return _json_hash(payload)
+
+
+def _synthetic_result_id(
+    doc_hash: str,
+    candidate_id: str,
+    stage: str,
+    model: str,
+    input_hash: str,
+) -> str:
+    return _json_hash(
+        {
+            "doc_hash": doc_hash,
+            "candidate_id": candidate_id,
+            "stage": stage,
+            "model": model,
+            "input_hash": input_hash,
+        }
+    )
+
+
+def _json_hash(value: object) -> str:
+    data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _fusion_coverage(candidates: list[dict[str, object]]) -> float:
+    stages = {str(item.get("stage", "")) for item in candidates if str(item.get("stage", ""))}
+    expected = {"parsed_blocks", "pdf_structure", "local_precise", "cloud_semantic"}
+    if not expected:
+        return 0.0
+    return round(len(stages.intersection(expected)) / len(expected), 3)
+
+
+def _fusion_risk_flags(warnings: list[str]) -> list[str]:
+    flags: list[str] = []
+    for warning in warnings:
+        text = str(warning)
+        lower = text.lower()
+        if any(marker in lower for marker in ("failed", "empty", "low_confidence", "prose_like", "table")):
+            flags.append(text)
+    return sorted(set(flags))
+
+
+def _looks_like_latex_candidate(latex: str) -> bool:
+    text = str(latex or "").strip()
+    if not text:
+        return False
+    return text.count("{") == text.count("}") and text.count("[") == text.count("]")
 
 
 def _candidate_agreement(latex_values: list[str]) -> float:
@@ -1128,7 +1660,7 @@ def _unique_nonempty(values: list[str]) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run r0-r4 formula parsing pipeline.")
+    parser = argparse.ArgumentParser(description="Run r0-r5 formula parsing pipeline.")
     parser.add_argument("--case", choices=["attention", "napkin", "all"], default="attention")
     parser.add_argument("--start-page", type=int, default=0)
     parser.add_argument("--max-pages", type=int, default=6)
@@ -1142,8 +1674,14 @@ def main() -> int:
     )
     parser.add_argument("--r3-limit", type=int, default=2)
     parser.add_argument("--r4-limit", type=int, default=16)
+    parser.add_argument("--r5-limit", type=int, default=8)
     parser.add_argument("--auto-local-tools", action="store_true")
     parser.add_argument("--run-cloud-review", action="store_true")
+    parser.add_argument(
+        "--run-targeted-r2-after-fusion",
+        action="store_true",
+        help="After fusion queues low-evidence candidates, immediately run one bounded r2 batch.",
+    )
     parser.add_argument(
         "--reuse-db",
         action="store_true",
@@ -1172,9 +1710,11 @@ def main() -> int:
             r2_limit=max(0, args.r2_limit),
             r3_limit=max(0, args.r3_limit),
             r4_limit=max(1, args.r4_limit),
+            r5_limit=max(0, args.r5_limit),
             r2_sample_formulas=max(0, args.r2_sample_formulas),
             auto_local_tools=bool(args.auto_local_tools),
             run_cloud_review=bool(args.run_cloud_review),
+            run_targeted_r2_after_fusion=bool(args.run_targeted_r2_after_fusion),
         )
         for case in _select_cases(args.case)
     ]

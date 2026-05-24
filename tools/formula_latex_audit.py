@@ -80,6 +80,8 @@ class FormulaReport:
     source_top_commands: list[tuple[str, int]]
     pdf_blocks: int
     pdf_formula_blocks: int
+    pdf_inline_formula_snippets: int
+    pdf_formula_candidate_snippets: int
     pdf_image_blocks: int
     pdf_scanned_formula_blocks: int
     pdf_ocr_formula_blocks: int
@@ -101,6 +103,7 @@ class FormulaReport:
     low_similarity_pdf_formula_count: int
     sample_source_formulas: list[str]
     sample_pdf_formulas: list[str]
+    sample_pdf_inline_formulas: list[str]
     sample_source_unmatched: list[dict[str, Any]]
     sample_pdf_low_similarity: list[dict[str, Any]]
     sample_needs_ocr_blocks: list[dict[str, Any]]
@@ -779,6 +782,33 @@ def _sample(items: list[str], limit: int = 8) -> list[str]:
     return [item[:240] for item in compact[:limit]]
 
 
+def _inline_formula_snippets_from_blocks(blocks: list[Any]) -> list[str]:
+    snippets: list[str] = []
+    for block in blocks:
+        if getattr(block, "block_type", None) == BlockType.FORMULA:
+            continue
+        content = str(getattr(block, "content", "") or "")
+        if not content:
+            continue
+        snippets.extend(_inline_formula_snippets_from_text(content))
+    return snippets
+
+
+def _inline_formula_snippets_from_text(text: str) -> list[str]:
+    snippets: list[str] = []
+    patterns = [
+        re.compile(r"\\\((.+?)\\\)"),
+        re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)"),
+    ]
+    for pattern in patterns:
+        snippets.extend(
+            match.group(1).strip()
+            for match in pattern.finditer(text)
+            if match.group(1).strip()
+        )
+    return snippets
+
+
 def _audit_case(
     case: CasePaths,
     run_mfd: bool,
@@ -838,16 +868,18 @@ def _audit_case(
         if b.metadata.get("needs_ocr")
     ]
     born_digital_diagnostics = _born_digital_diagnostics(formula_blocks)
-    pdf_commands = _command_counts([b.content for b in formula_blocks])
+    pdf_inline_formula_texts = _inline_formula_snippets_from_blocks(blocks)
     pdf_formula_texts = [b.content for b in formula_blocks]
+    pdf_formula_candidate_texts = pdf_formula_texts + pdf_inline_formula_texts
+    pdf_commands = _command_counts(pdf_formula_candidate_texts)
     similarity_matches, low_similarity_pdf, similarity_metrics = _best_formula_matches(
         source_formulas,
-        pdf_formula_texts,
+        pdf_formula_candidate_texts,
         max_candidates_per_source=max_match_candidates,
     )
     _, _, inline_similarity_metrics = _best_formula_matches(
         source_inline,
-        pdf_formula_texts,
+        pdf_inline_formula_texts,
         max_candidates_per_source=max_match_candidates,
     )
     source_common = {
@@ -858,7 +890,10 @@ def _audit_case(
     missing = sorted(cmd for cmd in source_common if cmd not in pdf_commands)[:40]
     recall = len(recovered) / len(source_common) if source_common else 1.0
     weak_rate = float(similarity_metrics["weak_rate"])
-    low_similarity_pdf_rate = len(low_similarity_pdf) / len(pdf_formula_texts) if pdf_formula_texts else 0.0
+    low_similarity_pdf_rate = (
+        len(low_similarity_pdf) / len(pdf_formula_candidate_texts)
+        if pdf_formula_candidate_texts else 0.0
+    )
     violations: list[str] = []
     if recall < min_command_recall:
         violations.append(
@@ -889,6 +924,8 @@ def _audit_case(
         source_top_commands=source_commands.most_common(25),
         pdf_blocks=len(blocks),
         pdf_formula_blocks=len(formula_blocks),
+        pdf_inline_formula_snippets=len(pdf_inline_formula_texts),
+        pdf_formula_candidate_snippets=len(pdf_formula_candidate_texts),
         pdf_image_blocks=len(image_blocks),
         pdf_scanned_formula_blocks=len(scanned_blocks),
         pdf_ocr_formula_blocks=len(ocr_blocks),
@@ -909,7 +946,8 @@ def _audit_case(
         average_best_similarity=round(float(similarity_metrics["average"]), 3),
         low_similarity_pdf_formula_count=len(low_similarity_pdf),
         sample_source_formulas=_sample(source_formulas),
-        sample_pdf_formulas=_sample([b.content for b in formula_blocks]),
+        sample_pdf_formulas=_sample(pdf_formula_texts),
+        sample_pdf_inline_formulas=_sample(pdf_inline_formula_texts),
         sample_source_unmatched=[
             item for item in similarity_matches
             if item["similarity"] < 0.55

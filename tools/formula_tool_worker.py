@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -125,15 +128,191 @@ def _run_pix2text(items: list[dict[str, str]]) -> list[dict[str, Any]]:
     return results
 
 
-def main() -> int:
+def _run_mineru_pdf_page(
+    items: list[dict[str, str]],
+    model: str,
+    output_root: Path,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    groups: dict[tuple[str, int], list[dict[str, str]]] = {}
+    for item in items:
+        pdf_path = str(item.get("pdf_path", "") or "")
+        try:
+            page_num = int(item.get("page_num", -1))
+        except (TypeError, ValueError):
+            page_num = -1
+        if not pdf_path or page_num < 0:
+            results.append(
+                _failed_item(
+                    item,
+                    "mineru_missing_pdf_page_context",
+                    model="mineru_hybrid_formula",
+                    model_version=model or "hybrid-auto-engine",
+                    preprocess_version="pdf-page-txt-v1",
+                )
+            )
+            continue
+        groups.setdefault((pdf_path, page_num), []).append(item)
+
+    for (pdf_path, page_num), group_items in groups.items():
+        page_out = output_root / f"mineru_p{page_num}"
+        page_out.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
+        cmd = [
+            sys.executable,
+            "-m",
+            "mineru.cli.client",
+            "-p",
+            pdf_path,
+            "-o",
+            str(page_out),
+            "-b",
+            model or "hybrid-auto-engine",
+            "-m",
+            "txt",
+            "-s",
+            str(page_num),
+            "-e",
+            str(page_num),
+            "-f",
+            "true",
+            "-t",
+            "false",
+            "--image-analysis",
+            "false",
+        ]
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=900,
+        )
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        if proc.returncode != 0:
+            warning = (proc.stderr or proc.stdout or "mineru_failed")[:240]
+            results.extend(
+                _failed_item(
+                    item,
+                    f"mineru_failed:{warning}",
+                    model="mineru_hybrid_formula",
+                    model_version=model or "hybrid-auto-engine",
+                    preprocess_version="pdf-page-txt-v1",
+                )
+                for item in group_items
+            )
+            continue
+        candidates = _extract_mineru_formulas(page_out)
+        for index, item in enumerate(group_items):
+            latex = candidates[index] if index < len(candidates) else (candidates[0] if candidates else "")
+            results.append(
+                {
+                    "candidate_id": item["candidate_id"],
+                    "latex": latex,
+                    "score": None,
+                    "model": "mineru_hybrid_formula",
+                    "model_version": model or "hybrid-auto-engine",
+                    "preprocess_version": "pdf-page-txt-v1",
+                    "duration_ms": duration_ms,
+                    "warnings": [] if latex else ["mineru_no_formula_candidate"],
+                    "raw": {
+                        "output_dir": str(page_out),
+                        "candidate_count": len(candidates),
+                    },
+                }
+            )
+    return results
+
+
+def _run_pek_unimernet(items: list[dict[str, str]]) -> list[dict[str, Any]]:
+    try:
+        import unimernet  # type: ignore  # noqa: F401
+    except Exception as exc:
+        return [
+            _failed_item(
+                item,
+                f"pek_unimernet_unavailable:{str(exc)[:180]}",
+                model="pek_unimernet",
+                model_version="pdf-extract-kit",
+            )
+            for item in items
+        ]
+    return [
+        _failed_item(
+            item,
+            "pek_unimernet_worker_not_implemented",
+            model="pek_unimernet",
+            model_version="pdf-extract-kit",
+        )
+        for item in items
+    ]
+
+
+def _extract_mineru_formulas(output_dir: Path) -> list[str]:
+    formulas: list[str] = []
+    for path in sorted(output_dir.rglob("*")):
+        if path.suffix.lower() not in {".md", ".json"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        formulas.extend(_formula_snippets_from_text(text))
+    unique: dict[str, str] = {}
+    for formula in formulas:
+        compact = " ".join(str(formula or "").split())
+        if compact:
+            unique.setdefault(compact, compact)
+    return list(unique.values())
+
+
+def _formula_snippets_from_text(text: str) -> list[str]:
+    snippets: list[str] = []
+    patterns = [
+        r"\$\$(.+?)\$\$",
+        r"\\\[(.+?)\\\]",
+        r"\\\((.+?)\\\)",
+        r"<formula[^>]*>(.+?)</formula>",
+    ]
+    for pattern in patterns:
+        snippets.extend(
+            match.strip()
+            for match in re.findall(pattern, text, flags=re.DOTALL)
+            if match.strip()
+        )
+    return snippets
+
+
+def _failed_item(
+    item: dict[str, str],
+    warning: str,
+    *,
+    model: str = "external_formula_tool",
+    model_version: str = "",
+    preprocess_version: str = "png-v1",
+) -> dict[str, Any]:
+    return {
+        "candidate_id": item.get("candidate_id", ""),
+        "latex": "",
+        "score": None,
+        "model": model,
+        "model_version": model_version,
+        "preprocess_version": preprocess_version,
+        "duration_ms": 0,
+        "warnings": [f"tool_failed:{warning}"],
+        "raw": {},
+    }
+
+
+def main_with_args_for_test(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", default="")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    payload = json.loads(Path(args.input).read_text(encoding="utf-8-sig"))
     raw_items = payload.get("items", [])
     items = [
         {
@@ -147,6 +326,10 @@ def main() -> int:
         results = _run_paddle(items, args.model)
     elif args.backend == "pix2text_formula":
         results = _run_pix2text(items)
+    elif args.backend == "mineru_pdf_page":
+        results = _run_mineru_pdf_page(items, args.model, Path(args.output).parent)
+    elif args.backend == "pek_unimernet":
+        results = _run_pek_unimernet(items)
     else:
         raise ValueError(f"unsupported backend: {args.backend}")
     Path(args.output).write_text(
@@ -154,6 +337,10 @@ def main() -> int:
         encoding="utf-8",
     )
     return 0
+
+
+def main() -> int:
+    return main_with_args_for_test()
 
 
 if __name__ == "__main__":

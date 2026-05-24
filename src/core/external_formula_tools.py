@@ -180,6 +180,39 @@ class ExternalFormulaToolRunner:
                     )
                 )
 
+            mineru_python = resolved_root / "pdf_tool_mineru310" / "python.exe"
+            if mineru_python.exists():
+                specs.append(
+                    ExternalFormulaToolSpec(
+                        name="mineru_hybrid_formula",
+                        backend="mineru_pdf_page",
+                        python=str(mineru_python),
+                        model="hybrid-auto-engine",
+                        model_version="mineru-3.1.15",
+                        preprocess_version="pdf-page-txt-v1",
+                        timeout_sec=900,
+                        env={
+                            "MINERU_MODEL_SOURCE": "local",
+                            "HF_HOME": str(Path("C:/pdf_ai_reader_tool_models/huggingface")),
+                            "MODELSCOPE_CACHE": str(Path("C:/pdf_ai_reader_tool_models/modelscope")),
+                        },
+                    )
+                )
+
+            pek_python = resolved_root / "pdf_tool_pek310" / "python.exe"
+            if pek_python.exists():
+                specs.append(
+                    ExternalFormulaToolSpec(
+                        name="pek_unimernet",
+                        backend="pek_unimernet",
+                        python=str(pek_python),
+                        model="UniMERNet",
+                        model_version="pdf-extract-kit",
+                        preprocess_version="png-v1",
+                        timeout_sec=300,
+                    )
+                )
+
         unique: dict[tuple[str, str, str], ExternalFormulaToolSpec] = {}
         for spec in specs:
             if spec.enabled:
@@ -213,7 +246,7 @@ class ExternalFormulaToolRunner:
 
     def recognize_images(
         self,
-        images: list[tuple[str, bytes]],
+        images: list[tuple[str, bytes]] | list[tuple[str, bytes, dict[str, Any]]],
         specs: list[ExternalFormulaToolSpec] | None = None,
     ) -> list[ExternalFormulaCandidate]:
         if not images:
@@ -226,12 +259,25 @@ class ExternalFormulaToolRunner:
         with tempfile.TemporaryDirectory(prefix="pdf_ai_formula_tools_") as tmp:
             tmp_dir = Path(tmp)
             items = []
-            for index, (candidate_id, image_bytes) in enumerate(images):
+            for index, raw_item in enumerate(images):
+                if len(raw_item) == 2:
+                    candidate_id, image_bytes = raw_item  # type: ignore[misc]
+                    metadata: dict[str, Any] = {}
+                else:
+                    candidate_id, image_bytes, metadata = raw_item  # type: ignore[misc]
                 if not image_bytes:
                     continue
                 path = tmp_dir / f"{index:04d}.png"
                 path.write_bytes(image_bytes)
-                items.append({"candidate_id": candidate_id, "image_path": str(path)})
+                items.append({
+                    "candidate_id": candidate_id,
+                    "image_path": str(path),
+                    **{
+                        str(key): value
+                        for key, value in dict(metadata).items()
+                        if key in {"pdf_path", "page_num", "bbox"}
+                    },
+                })
             if not items:
                 return []
 

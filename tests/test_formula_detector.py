@@ -397,6 +397,24 @@ def test_document_chunker_wraps_broad_math_font_families_inline() -> None:
     assert r"\(y\)" in wrapped
 
 
+def test_document_chunker_does_not_wrap_pure_inline_footnote_marks() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    spans = [
+        {"text": "Authors", "font": "NimbusRomNo9L-Regu"},
+        {"text": "∗†", "font": "CMSY10"},
+        {"text": " used", "font": "NimbusRomNo9L-Regu"},
+        {"text": " x", "font": "CMMI10"},
+        {"text": ".", "font": "NimbusRomNo9L-Regu"},
+    ]
+
+    wrapped = DocumentChunker._text_with_inline_math_spans(spans)
+
+    assert r"\(∗†\)" not in wrapped
+    assert "∗†" in wrapped
+    assert r"\(x\)" in wrapped
+
+
 def test_existing_formula_ocr_rejects_long_prose_with_math_symbols() -> None:
     detector = Pix2TextMFDDetector(max_existing_ocr_blocks=2)
     block = DocumentBlock(
@@ -554,6 +572,38 @@ def test_formula_latex_audit_can_match_display_scope(monkeypatch, tmp_path) -> N
 
     assert display_report.source_formula_snippets == 1
     assert all_report.source_formula_snippets == 2
+    assert all_report.pdf_inline_formula_snippets == 0
+
+
+def test_formula_latex_audit_counts_inline_pdf_candidates(monkeypatch, tmp_path) -> None:
+    from tools import formula_latex_audit as audit
+
+    case = audit.CasePaths(
+        name="sample",
+        pdf=tmp_path / "paper.pdf",
+        latex_root=tmp_path / "latex",
+    )
+    case.pdf.write_bytes(b"%PDF-placeholder")
+    case.latex_root.mkdir()
+    (case.latex_root / "main.tex").write_text(r"inline \(z_n\)", encoding="utf-8")
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.PARAGRAPH,
+            content=r"inline \(z_n\)",
+            bbox=(0, 0, 100, 20),
+        )
+    ]
+    monkeypatch.setattr(audit, "_parse_pdf_blocks_limited", lambda *args, **kwargs: (1, blocks))
+
+    report = audit._audit_case(case, run_mfd=False, mfd_pages=None)
+
+    assert report.pdf_formula_blocks == 0
+    assert report.pdf_inline_formula_snippets == 1
+    assert report.pdf_formula_candidate_snippets == 1
+    assert report.inline_source_near_match_rate >= 0.99
+    assert report.sample_pdf_inline_formulas == ["z_n"]
 
 
 def test_formula_audit_limited_parse_uses_page_budget(monkeypatch, tmp_path) -> None:

@@ -279,12 +279,26 @@ r5：
 
 ## 下一步实现顺序
 
-1. 扩展 `tools/formula_multiround_pipeline.py`：
-   - 从 `formula_accuracy.sample_low_similarity` 自动生成 r2 定向复核队列。
-   - 输出 per-candidate fusion table，而不是只输出 stage 平均分。
-   - 明确 `accuracy_non_decreasing` 和 `coverage_comparable`。
-2. 新增 `FormulaFusionRecord` 持久化或先写入 `formula_round_jobs.result_json`。
-3. 接入 MinerU 页级候选和 UniMERNet/PDF-Extract-Kit 候选，仍作为 candidate-only。
-4. 建立 accepted/rejected/revision 表。
-5. r5 accepted 变化后增量写回知识库和 GraphRAG。
-6. 用 Attention/Napkin 大样本跑质量门禁和性能门禁。
+1. 已扩展 `tools/formula_multiround_pipeline.py`：
+   - 输出 per-candidate fusion table、accepted gate、targeted r2 队列、inline candidate-only review 统计。
+   - `--reuse-db` 可证明同一 fusion input hash 不重复派生 r2/r3/r5。
+   - `--run-targeted-r2-after-fusion` 可在同次运行中立即消费一批 fusion 派生 r2。
+2. 已新增 `formula_fusion_records` 持久化：
+   - 记录 `fusion_version`、`input_hash`、best/ranked result ids、coverage、agreement、source similarity、risk flags、accepted gate、decision 和完整 result JSON。
+3. 已接入 MinerU 页级候选、PEK/UniMERNet 后端 spec：
+   - Paddle/Pix2Text/Pix2Text-MFR 可返回候选。
+   - PEK 当前环境缺 `unimernet`，以 `pek_unimernet` warning 候选落库。
+   - MinerU 3.1.15 走 `mineru_pdf_page` 后端，适合离线页级结构对照，当前耗时高。
+4. 已新增 r5 accepted 增量写回 service：
+   - 只消费 accepted 结果变化。
+   - 知识库未就绪时保持 queued。
+   - 当前仍缺 accepted/rejected/revision 的产品级审核 UI 和 GraphRAG 同步更新。
+5. 行内公式已纳入候选与质量门禁：
+   - `inline_spans:document_chunker` 参与 accuracy/fusion。
+   - 纯脚注/装饰符号不再包成公式。
+   - 纯 inline 候选默认不进入 OCR/MFR，只进入审计和 r3 复核。
+6. 下一步仍必须完成：
+   - 建立 accepted/rejected/revision 表与 UI。
+   - r5 accepted 变化后同步 GraphRAG artifact。
+   - 用 Attention/Napkin 大样本跑质量门禁和性能门禁。
+   - 优化 r2 常驻 worker/批处理，降低多工具冷启动。

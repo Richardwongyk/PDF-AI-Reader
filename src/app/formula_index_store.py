@@ -115,6 +115,29 @@ class FormulaRecognitionRecord:
     created_at: str = ""
 
 
+@dataclass(frozen=True)
+class FormulaFusionRecord:
+    """Persisted candidate-fusion gate for one formula region."""
+
+    fusion_id: str
+    doc_hash: str
+    candidate_id: str
+    fusion_version: str
+    input_hash: str
+    best_result_id: str
+    ranked_result_ids: tuple[str, ...]
+    coverage: float
+    agreement_score: float
+    source_similarity: float
+    syntax_valid: bool
+    risk_flags: tuple[str, ...]
+    accepted_gate: dict[str, object]
+    decision: str
+    result_json: dict[str, object]
+    created_at: str = ""
+    updated_at: str = ""
+
+
 class FormulaIndexStore:
     """Persist pending formula OCR jobs in SQLite."""
 
@@ -214,6 +237,32 @@ class FormulaIndexStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_formula_recognition_lookup "
             "ON formula_recognition_results(doc_hash, candidate_id, stage, accepted, created_at DESC)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS formula_fusion_records (
+                fusion_id           TEXT PRIMARY KEY,
+                doc_hash            TEXT NOT NULL,
+                candidate_id        TEXT NOT NULL,
+                fusion_version      TEXT NOT NULL,
+                input_hash          TEXT NOT NULL,
+                best_result_id      TEXT NOT NULL DEFAULT '',
+                ranked_result_ids_json TEXT NOT NULL DEFAULT '[]',
+                coverage            REAL NOT NULL DEFAULT 0,
+                agreement_score     REAL NOT NULL DEFAULT 0,
+                source_similarity   REAL NOT NULL DEFAULT 0,
+                syntax_valid        INTEGER NOT NULL DEFAULT 0,
+                risk_flags_json     TEXT NOT NULL DEFAULT '[]',
+                accepted_gate_json  TEXT NOT NULL DEFAULT '{}',
+                decision            TEXT NOT NULL DEFAULT 'candidate_only',
+                result_json         TEXT NOT NULL DEFAULT '{}',
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL,
+                UNIQUE(doc_hash, candidate_id, fusion_version, input_hash)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_fusion_lookup "
+            "ON formula_fusion_records(doc_hash, decision, updated_at DESC)"
         )
         self._migrate_schema()
         self._conn.commit()
@@ -400,11 +449,13 @@ class FormulaIndexStore:
         targets: list[DocumentBlock] | list[int],
         priority_pages: set[int] | None = None,
         status: FormulaTaskStatus = "queued",
+        result_json_by_target: dict[str, dict[str, object]] | None = None,
     ) -> int:
         """Persist non-OCR round work such as semantic review or graph updates."""
         if not doc_hash or not filepath or not targets:
             return 0
         priority_pages = priority_pages or set()
+        result_json_by_target = result_json_by_target or {}
         round_name = _round_value(scan_round)
         now = _now()
         inserted = 0
@@ -425,13 +476,23 @@ class FormulaIndexStore:
                         continue
                     target_id = str(page_num)
                     priority = self.priority_for_page(page_num, priority_pages)
+                result_payload = result_json_by_target.get(target_id)
                 row = self._conn.execute(
-                    """SELECT status FROM formula_round_jobs
+                    """SELECT status, result_json FROM formula_round_jobs
                        WHERE doc_hash=? AND scan_round=? AND target_type=? AND target_id=?""",
                     (doc_hash, round_name, target_type, target_id),
                 ).fetchone()
                 if row and str(row[0]) == "done":
-                    continue
+                    if not result_payload:
+                        continue
+                    try:
+                        existing_payload = json.loads(str(row[1] or "{}"))
+                    except json.JSONDecodeError:
+                        existing_payload = {}
+                    if not isinstance(existing_payload, dict):
+                        existing_payload = {}
+                    if existing_payload.get("input_hash") == result_payload.get("input_hash"):
+                        continue
                 self._enqueue_round_job_locked(
                     doc_hash=doc_hash,
                     filepath=filepath,
@@ -442,6 +503,7 @@ class FormulaIndexStore:
                     priority=priority,
                     status=status,
                     now=now,
+                    result_json=result_payload,
                 )
                 inserted += 1
             self._conn.commit()
@@ -985,6 +1047,153 @@ class FormulaIndexStore:
             ).fetchall()
         return [self._row_to_recognition_record(row) for row in rows]
 
+    def put_fusion_record(
+        self,
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        fusion_version: str,
+        input_hash: str,
+        best_result_id: str = "",
+        ranked_result_ids: list[str] | tuple[str, ...] | None = None,
+        coverage: float = 0.0,
+        agreement_score: float = 0.0,
+        source_similarity: float = 0.0,
+        syntax_valid: bool = False,
+        risk_flags: list[str] | tuple[str, ...] | None = None,
+        accepted_gate: dict[str, object] | None = None,
+        decision: str = "candidate_only",
+        result_json: dict[str, object] | None = None,
+    ) -> str:
+        """Persist one candidate-fusion gate and return its stable id."""
+        if not doc_hash or not candidate_id or not fusion_version or not input_hash:
+            raise ValueError("doc_hash, candidate_id, fusion_version, and input_hash are required")
+        now = _now()
+        fusion_id = self.fusion_record_id(
+            doc_hash=doc_hash,
+            candidate_id=candidate_id,
+            fusion_version=fusion_version,
+            input_hash=input_hash,
+        )
+        ranked_ids = [str(item) for item in (ranked_result_ids or ()) if str(item)]
+        risks = [str(item) for item in (risk_flags or ()) if str(item)]
+        accepted_payload = accepted_gate or {}
+        result_payload = result_json or {}
+        with self._lock:
+            existing = self._conn.execute(
+                """SELECT created_at FROM formula_fusion_records
+                   WHERE doc_hash=? AND candidate_id=? AND fusion_version=? AND input_hash=?""",
+                (doc_hash, candidate_id, fusion_version, input_hash),
+            ).fetchone()
+            created_at = str(existing[0]) if existing else now
+            self._conn.execute(
+                """INSERT INTO formula_fusion_records
+                   (fusion_id, doc_hash, candidate_id, fusion_version, input_hash,
+                    best_result_id, ranked_result_ids_json, coverage,
+                    agreement_score, source_similarity, syntax_valid,
+                    risk_flags_json, accepted_gate_json, decision, result_json,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(doc_hash, candidate_id, fusion_version, input_hash)
+                   DO UPDATE SET
+                     best_result_id=excluded.best_result_id,
+                     ranked_result_ids_json=excluded.ranked_result_ids_json,
+                     coverage=excluded.coverage,
+                     agreement_score=excluded.agreement_score,
+                     source_similarity=excluded.source_similarity,
+                     syntax_valid=excluded.syntax_valid,
+                     risk_flags_json=excluded.risk_flags_json,
+                     accepted_gate_json=excluded.accepted_gate_json,
+                     decision=excluded.decision,
+                     result_json=excluded.result_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    fusion_id,
+                    doc_hash,
+                    candidate_id,
+                    fusion_version,
+                    input_hash,
+                    best_result_id,
+                    json.dumps(ranked_ids, ensure_ascii=False, separators=(",", ":")),
+                    float(coverage),
+                    float(agreement_score),
+                    float(source_similarity),
+                    1 if syntax_valid else 0,
+                    json.dumps(risks, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(accepted_payload, ensure_ascii=False, separators=(",", ":")),
+                    str(decision or "candidate_only"),
+                    json.dumps(result_payload, ensure_ascii=False, separators=(",", ":")),
+                    created_at,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        return fusion_id
+
+    def get_fusion_record(
+        self,
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        fusion_version: str,
+        input_hash: str,
+    ) -> FormulaFusionRecord | None:
+        """Return a cached fusion gate for the exact candidate input."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT fusion_id, doc_hash, candidate_id, fusion_version,
+                          input_hash, best_result_id, ranked_result_ids_json,
+                          coverage, agreement_score, source_similarity,
+                          syntax_valid, risk_flags_json, accepted_gate_json,
+                          decision, result_json, created_at, updated_at
+                   FROM formula_fusion_records
+                   WHERE doc_hash=? AND candidate_id=? AND fusion_version=? AND input_hash=?""",
+                (doc_hash, candidate_id, fusion_version, input_hash),
+            ).fetchone()
+        return self._row_to_fusion_record(row) if row else None
+
+    def list_fusion_records(
+        self,
+        doc_hash: str,
+        candidate_id: str | None = None,
+        decision: str | None = None,
+        limit: int = 100,
+    ) -> list[FormulaFusionRecord]:
+        """List persisted formula fusion gates for audit and skip checks."""
+        params: list[object] = [doc_hash]
+        where = "doc_hash=?"
+        if candidate_id is not None:
+            where += " AND candidate_id=?"
+            params.append(candidate_id)
+        if decision is not None:
+            where += " AND decision=?"
+            params.append(decision)
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT fusion_id, doc_hash, candidate_id, fusion_version,
+                          input_hash, best_result_id, ranked_result_ids_json,
+                          coverage, agreement_score, source_similarity,
+                          syntax_valid, risk_flags_json, accepted_gate_json,
+                          decision, result_json, created_at, updated_at
+                   FROM formula_fusion_records
+                   WHERE {where}
+                   ORDER BY updated_at DESC
+                   LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._row_to_fusion_record(row) for row in rows]
+
+    def fusion_counts(self, doc_hash: str) -> dict[str, int]:
+        """Return decision counts for persisted fusion gates."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT decision, COUNT(*) FROM formula_fusion_records
+                   WHERE doc_hash=? GROUP BY decision""",
+                (doc_hash,),
+            ).fetchall()
+        return {str(decision): int(count) for decision, count in rows}
+
     def _update_status(
         self,
         doc_hash: str,
@@ -1260,6 +1469,25 @@ class FormulaIndexStore:
         return digest.hexdigest()
 
     @staticmethod
+    def fusion_record_id(
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        fusion_version: str,
+        input_hash: str,
+    ) -> str:
+        digest = hashlib.sha256()
+        for value in (
+            doc_hash,
+            candidate_id,
+            fusion_version,
+            input_hash,
+        ):
+            digest.update(str(value).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @staticmethod
     def priority_for_block(block: DocumentBlock, priority_pages: set[int]) -> float:
         page_boost = 1000.0 if block.page_num in priority_pages else 0.0
         score = float(block.metadata.get("formula_score", 0.0) or 0.0)
@@ -1351,6 +1579,52 @@ class FormulaIndexStore:
             evidence=evidence_json,
             accepted=bool(row[15]),
             created_at=str(row[16]),
+        )
+
+    @staticmethod
+    def _row_to_fusion_record(row: tuple[object, ...]) -> FormulaFusionRecord:
+        try:
+            ranked_ids = json.loads(str(row[6] or "[]"))
+        except json.JSONDecodeError:
+            ranked_ids = []
+        if not isinstance(ranked_ids, list):
+            ranked_ids = []
+        try:
+            risk_flags = json.loads(str(row[11] or "[]"))
+        except json.JSONDecodeError:
+            risk_flags = []
+        if not isinstance(risk_flags, list):
+            risk_flags = []
+        try:
+            accepted_gate = json.loads(str(row[12] or "{}"))
+        except json.JSONDecodeError:
+            accepted_gate = {}
+        if not isinstance(accepted_gate, dict):
+            accepted_gate = {}
+        try:
+            result_json = json.loads(str(row[14] or "{}"))
+        except json.JSONDecodeError:
+            result_json = {}
+        if not isinstance(result_json, dict):
+            result_json = {}
+        return FormulaFusionRecord(
+            fusion_id=str(row[0]),
+            doc_hash=str(row[1]),
+            candidate_id=str(row[2]),
+            fusion_version=str(row[3]),
+            input_hash=str(row[4]),
+            best_result_id=str(row[5]),
+            ranked_result_ids=tuple(str(item) for item in ranked_ids if str(item)),
+            coverage=float(row[7]),
+            agreement_score=float(row[8]),
+            source_similarity=float(row[9]),
+            syntax_valid=bool(row[10]),
+            risk_flags=tuple(str(item) for item in risk_flags if str(item)),
+            accepted_gate=accepted_gate,
+            decision=str(row[13]),
+            result_json=result_json,
+            created_at=str(row[15]),
+            updated_at=str(row[16]),
         )
 
 

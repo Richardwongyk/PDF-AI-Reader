@@ -92,6 +92,57 @@ def test_formula_semantic_review_writes_candidate_without_overwriting_block(tmp_
     assert "公式块证据" in client.messages[0][1]["content"]
 
 
+def test_formula_semantic_review_prompt_includes_candidate_and_fusion_evidence(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [block],
+    )
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake_tool",
+        model_version="v1",
+        preprocess_version="png",
+        input_hash="image-hash",
+        latex=r"\alpha+\beta",
+        normalized_latex=r"\alpha+\beta",
+        score=0.98,
+        warnings=["candidate_only"],
+        evidence={"page_num": 0, "bbox": [10, 20, 100, 40]},
+    )
+    store.put_fusion_record(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        fusion_version="formula_candidate_fusion_v1",
+        input_hash="fusion-hash",
+        best_result_id=result_id,
+        ranked_result_ids=[result_id],
+        agreement_score=1.0,
+        source_similarity=0.99,
+        syntax_valid=True,
+        decision="ready_for_manual_accept",
+        result_json={"best_latex": r"\alpha+\beta"},
+    )
+    client = _ReviewClient(
+        '{"suggested_latex":"","should_replace":false,"confidence":0,"reason":"evidence","risks":[]}'
+    )
+    service = FormulaSemanticReviewService(store, client, batch_size=1)
+
+    service.run_batch("doc-1", [block])
+
+    prompt = client.messages[0][1]["content"]
+    assert "recognition_candidates" in prompt
+    assert "fusion_records" in prompt
+    assert result_id in prompt
+    assert "ready_for_manual_accept" in prompt
+
+
 def test_formula_semantic_review_skips_missing_block(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula("p0_missing")

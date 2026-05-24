@@ -111,12 +111,17 @@ class MainWindow(QMainWindow):
         # 公式索引流程：异步补扫图片/扫描公式，并增量写回知识库
         from src.app.formula_index_flow import FormulaIndexFlow
         from src.app.formula_index_scheduler import FormulaIndexScheduler
+        from src.app.formula_knowledge_update import FormulaKnowledgeUpdateService
         from src.app.formula_semantic_review import FormulaSemanticReviewFlow
         self._formula_index_flow = FormulaIndexFlow(self)
         self._formula_index_scheduler = FormulaIndexScheduler()
         self._formula_semantic_review_flow = FormulaSemanticReviewFlow(
             lambda: services.get("formula_semantic_review"),
             self,
+        )
+        self._formula_knowledge_update_service = FormulaKnowledgeUpdateService(
+            self._formula_index_flow.store,
+            self._knowledge_engine,
         )
 
         # 当前文档状态
@@ -753,7 +758,8 @@ class MainWindow(QMainWindow):
         ):
             self._schedule_formula_scan(pages=set(), trigger=FormulaScanTrigger.BACKGROUND)
         elif not self._start_formula_semantic_review_batch():
-            self._start_import_page_scan_batch()
+            if not self._run_formula_knowledge_update_batch():
+                self._start_import_page_scan_batch()
         if self._pending_formula_work_count() > 0:
             self._formula_idle_timer.start(8000)
 
@@ -904,6 +910,31 @@ class MainWindow(QMainWindow):
             self.logger.info("公式语义复核启动: batch=4")
         return started
 
+    def _run_formula_knowledge_update_batch(self) -> bool:
+        if not self._current_doc_hash:
+            return False
+        service = self._formula_knowledge_update_service
+        if service.pending_count(self._current_doc_hash) <= 0:
+            return False
+        result = service.run_batch(
+            self._current_doc_hash,
+            self._current_blocks,
+            limit=8,
+        )
+        if result.deferred:
+            self.logger.info("公式 r5 增量知识更新等待知识库就绪: %d", result.deferred)
+            return False
+        if result.done or result.failed or result.skipped:
+            self.logger.info(
+                "公式 r5 增量知识更新: done=%d failed=%d skipped=%d pending=%d",
+                result.done,
+                result.failed,
+                result.skipped,
+                result.pending,
+            )
+            return True
+        return False
+
     def _pending_formula_block_count(self) -> int:
         return sum(
             1 for block in self._current_blocks
@@ -921,6 +952,7 @@ class MainWindow(QMainWindow):
             + self._formula_index_flow.page_pending_count(self._current_doc_hash)
             + self._formula_index_flow.round_pending_count(self._current_doc_hash)
             + self._formula_semantic_review_flow.pending_count(self._current_doc_hash)
+            + self._formula_knowledge_update_service.pending_count(self._current_doc_hash)
         )
 
     # =========================================================================
