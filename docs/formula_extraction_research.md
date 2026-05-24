@@ -280,6 +280,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - Attention 全量、纯 born-digital display + semantic v1：耗时约 2.276s，公式块 11 个，`common_source_command_recall=0.353`，`source_weak_match_rate=0.069`，`low_similarity_pdf_rate=0.455`。公式 1 可恢复 `\frac{Q K^{T}}{\sqrt{d_{k}}}` 结构。
 - Napkin 前 120 页、semantic v1：耗时约 21.017s，公式块 116 个，`common_source_command_recall=0.019`，`source_weak_match_rate=0.035`，`low_similarity_pdf_rate=0.319`。教材混排仍会吸入正文词，不能默认启用。
 - 公式 LaTeX 审计新增 `match_scope`：born-digital display 路线先对齐源码 display 公式，行内公式另走 inline 审计，避免用混合指标掩盖具体失败面。Attention 全量 display-scope 审计约 2.204s，8 个源码 display snippets、11 个 PDF display 候选，`source_weak_match_rate=0.625`，`low_similarity_pdf_rate=0.545`，但 `common_source_command_recall=0.333` 仍略低于 0.35 门槛，主要缺口是 `\dmodel`、`\sum`、`\text`、`\vec` 等命令恢复。
+- 未提交的 LaTeX 宏解析和额外 glyph 规则实验已撤回，不进入主线。原因是这类轻量自写解析会继续扩大维护风险；源码宏、公式 AST 和二维结构恢复应优先接入成熟 LaTeX/PDF 解析库或经过验证的开源实现，再用 Attention/Napkin 源码对照证明收益。
+- 当前正式策略保持两层：born-digital PDF 继续走 MuPDF/Poppler 的 glyph、font、bbox、vector 事实层；图片/扫描公式继续使用 Pix2Text MFD/MFR 后台补救。Pix2Text 是可用后端，但不应替代 born-digital 结构解析，也不能同步进入打开、滚动、缩放、翻译热路径。
+- 下一轮公式精度提升不再扩大字符规则；重点改为 Pix2Text 候选/裁剪基准、region 级类型判别、表格/列表/正文混排隔离、矩阵/对齐环境建模和 LaTeX 源码页级对齐审计。
 
 当前边界：
 

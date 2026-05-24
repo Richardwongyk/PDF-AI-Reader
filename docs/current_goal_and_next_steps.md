@@ -185,6 +185,7 @@
 - 新增 born-digital display region 诊断层：记录 `formula_candidate/review` 分类、`prose_like_region`、`tabular_alignment`、`table_or_text_like_region` 等风险，不提升置信、不生成 LaTeX，只为默认策略和审计提供可量化过滤依据。
 - 最新诊断审计：Attention 全量约 2.254s，11 个候选中 10 个 `formula_candidate`、1 个 `review`；Napkin 前 120 页约 21.002s，116 个候选中 101 个 `formula_candidate`、15 个 `review`。
 - 公式 LaTeX 审计新增 display / inline / all 匹配范围。E2E 的 born-digital display 门禁现在只对齐源码 display 公式，行内公式后续单独验收；Attention display-scope 最新结果约 2.204s，`source_weak_match_rate=0.625`、`low_similarity_pdf_rate=0.545` 已过对应门槛，但 `common_source_command_recall=0.333` 仍未过 0.35，因此公式质量仍按失败处理。
+- 撤回未提交的轻量 LaTeX 宏解析和额外 glyph 规则实验：这类代码只能作为审计原型，不进入主线。后续若要处理源码宏、公式 AST 或二维结构恢复，必须优先复用成熟解析库/源码，并先用 Attention/Napkin 源码对照和性能门槛证明收益。
 - 下一步必须做 region 级类型判别、表格/列表过滤、矩阵/对齐环境建模和 LaTeX 源码页级对齐；当前可选入口不能默认进入阅读热路径。
 
 ### 全文问答与证据
@@ -284,6 +285,8 @@
 - 显式精扫场景可以传入 `max_mfd_pages>0`，候选页已按图片、已有公式块、LaTeX/数学符号密度排序。
 - 扫描版/图片公式的 MFR 已按页、置信度、面积做优先级排序；默认只走缓存回填，不对未命中图片即时推理。
 - 未进入预算或识别失败的公式仍写入 `DocumentBlock`，标记 `needs_ocr=True`，为后台公式索引继续补扫保留稳定位置。
+- Pix2Text 当前是正式默认的图片/扫描公式 MFD/MFR 后端。它不应被误解为不能用；限制只在于不能把它同步放进打开、滚动、缩放、翻译热路径，也不能用 OCR 替代 born-digital PDF 的结构解析。
+- 对 born-digital PDF：优先 MuPDF/Poppler glyph、font、bbox、vector 事实层；Pix2Text 只在文本层缺失、图片公式、扫描页、用户主动精扫或后台补救时运行。
 - 新增 `FormulaIndexFlow`，对 `needs_ocr=True` 的公式块做后台预算式 OCR。
 - 新增 `FormulaIndexStore`，使用 SQLite 持久化 `doc_hash/block_id/page/bbox/priority/status/latex/image_hash/model/error/attempts`，支持 queued / running / done / failed / skipped 状态。
 - `FormulaIndexStore` 同时持久化页面级 MFD 任务，导入 PDF 时把全文页码入队，用于发现图片/扫描版公式。
