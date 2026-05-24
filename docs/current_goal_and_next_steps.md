@@ -375,6 +375,7 @@
 - 新增 `formula_recognition_results` 统一保存结构解析、本地工具和云端语义修正候选；同一候选的 accepted 结果已保证唯一。
 - 导入时所有页进入 `r0_pdf_structure`，`needs_ocr=True` 公式进入 `r1_cached_recognition`，所有已解析公式进入 `r3_cloud_semantic_review` 复核记录。
 - r0 页面 worker 当前只执行 born-digital 结构快扫并写 `pdf_structure` 候选，不初始化 MFD/OCR。
+- r0 低置信结构候选会排入 `r2_local_high_precision` 待复核 round，但不会默认启动重模型，也不会覆盖正文。
 - r2 本地高精度轮当前通过外部 JSON worker 接入 Paddle Formula 和 Pix2Text 候选，后续扩展 MinerU/PEK/UniMERNet。
 - 新增 `FormulaSemanticReviewService`，用于消费 r3 队列并把云端语义修正写成候选 JSON；它不会覆盖原始公式块，也不会自动 accepted。
 - 新增 `FormulaSemanticReviewFlow`，用于在 UI 空闲时通过后台 QThread 小批量消费 r3 队列，避免导入、滚动、缩放等待云端复核。
@@ -437,7 +438,7 @@ PDF 打开/滚动/缩放
 - `src/app/formula_semantic_review.py`：r3 语义复核服务和后台 flow，按批读取已持久化任务，调用分析模型后只写候选结果。
 - `src/ui/main_window.py`：空闲调度已纳入 r3 pending 计数；后台顺序为 OCR/缓存任务优先、r3 小批量语义复核、页面级检测兜底。
 - `tools/formula_index_performance.py`：真实 Attention/Napkin 资料的轻量性能基准。
-- `tools/formula_tool_comparison.py`：同一批公式图的外部工具候选对比，计算源码相似度并把 r2 候选写入 `formula_recognition_results`。
+- `tools/formula_tool_comparison.py`：同一批公式图的外部工具候选对比，计算源码相似度并把 r2 候选写入 `formula_recognition_results`；`--auto-local-tools` 可显式发现 Paddle/Pix2Text 隔离环境。
 - `tests/test_formula_index_flow.py`、`tests/test_formula_index_scheduler.py`、`tests/test_formula_index_performance.py`：覆盖多轮不互相覆盖、导入轮次统计、性能报告字段。
 - `tests/test_external_formula_tools.py`、`tests/test_formula_tool_comparison.py`：覆盖外部公式工具 JSON runner、失败候选、环境变量配置、多工具候选落库和无工具跳过路径。
 

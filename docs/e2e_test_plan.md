@@ -50,7 +50,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/test_log_audit.py --
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --output test_artifacts/formula_audit_attention.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case napkin --max-pages 120 --output test_artifacts/formula_audit_napkin_120.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --quality-gate --output test_artifacts/formula_audit_gate.json
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_tool_comparison.py --case attention --max-pages 6 --sample-limit 2 --output test_artifacts/formula_tool_comparison/attention_report.json --db test_artifacts/formula_tool_comparison/attention_jobs.db
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_tool_comparison.py --case attention --max-pages 6 --sample-limit 2 --auto-local-tools --output test_artifacts/formula_tool_comparison/attention_report.json --db test_artifacts/formula_tool_comparison/attention_jobs.db
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case attention --max-pages 8 --output test_artifacts/formula_index_performance/attention_report.json --db test_artifacts/formula_index_performance/attention_jobs.db
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case napkin --max-pages 12 --output test_artifacts/formula_index_performance/napkin_report.json --db test_artifacts/formula_index_performance/napkin_jobs.db
 ```
@@ -129,5 +129,5 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - r0 born-digital 页面扫描已经只写 PDF 结构候选，不加载 OCR/MFR。
 - `formula_recognition_results` 已记录结构候选、本地工具候选和 accepted 状态；同一候选 accepted 唯一性已有测试。
 - r2 已通过外部 JSON worker 接 Paddle Formula 与 Pix2Text，输出默认未接受；后续 E2E/审计必须验证这些候选不会覆盖正文。
-- `tools/formula_tool_comparison.py` 已能对同一批公式图运行隔离工具、计算源码相似度、记录耗时/warnings，并把 r2 候选落库。
-- 最新相关单元测试组合为 66 passed；文档变更后如未改代码可不重复全量跑，但正式交付前必须重跑 Attention/Napkin 闭环。
+- `tools/formula_tool_comparison.py` 已能对同一批公式图运行隔离工具、计算源码相似度、记录耗时/warnings，并把 r2 候选落库；`--auto-local-tools` 可显式发现当前机器上的 Paddle/Pix2Text 隔离环境。
+- 最新相关单元测试组合为 70 passed；正式交付前必须重跑 Attention/Napkin 闭环。

@@ -121,6 +121,71 @@ class ExternalFormulaToolRunner:
                 unique[(spec.name, spec.backend, spec.python)] = spec
         return list(unique.values())
 
+    @classmethod
+    def known_local_specs(
+        cls,
+        env_root: str | Path | None = None,
+    ) -> list[ExternalFormulaToolSpec]:
+        """Return specs for known isolated conda tool envs if they exist.
+
+        This is intentionally not part of ``default_specs`` so the main app
+        will not discover or run heavy tools unless a caller explicitly asks.
+        """
+        roots: list[Path] = []
+        if env_root:
+            roots.append(Path(env_root))
+        else:
+            roots.append(Path.home() / ".conda" / "envs")
+            conda_prefix = os.getenv("CONDA_PREFIX", "").strip()
+            if conda_prefix:
+                roots.append(Path(conda_prefix).parent)
+            roots.append(Path("C:/ProgramData/anaconda3/envs"))
+
+        specs: list[ExternalFormulaToolSpec] = []
+        seen_roots: set[Path] = set()
+        for root in roots:
+            try:
+                resolved_root = root.resolve()
+            except OSError:
+                continue
+            if resolved_root in seen_roots:
+                continue
+            seen_roots.add(resolved_root)
+            paddle_python = resolved_root / "pdf_tool_paddle310" / "python.exe"
+            if paddle_python.exists():
+                env = {
+                    "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+                }
+                paddle_cache = Path("C:/pdf_ai_reader_tool_models/paddlex_cache")
+                if paddle_cache.exists():
+                    env["PADDLE_PDX_CACHE_HOME"] = str(paddle_cache)
+                specs.append(
+                    ExternalFormulaToolSpec(
+                        name="paddle_formula",
+                        backend="paddle_formula",
+                        python=str(paddle_python),
+                        model="PP-FormulaNet_plus-S",
+                        env=env,
+                    )
+                )
+
+            pix2text_python = resolved_root / "pdf_tool_pix2text310" / "python.exe"
+            if pix2text_python.exists():
+                specs.append(
+                    ExternalFormulaToolSpec(
+                        name="pix2text_formula",
+                        backend="pix2text_formula",
+                        python=str(pix2text_python),
+                        model="pix2text",
+                    )
+                )
+
+        unique: dict[tuple[str, str, str], ExternalFormulaToolSpec] = {}
+        for spec in specs:
+            if spec.enabled:
+                unique[(spec.name, spec.backend, spec.python)] = spec
+        return list(unique.values())
+
     @staticmethod
     def _parse_specs(payload: object) -> list[ExternalFormulaToolSpec]:
         if isinstance(payload, dict):

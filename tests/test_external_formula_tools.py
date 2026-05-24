@@ -107,3 +107,22 @@ def test_external_formula_runner_loads_specs_from_env(monkeypatch, tmp_path) -> 
     assert specs[0].backend == "paddle_formula"
     assert specs[0].model == "PP-FormulaNet_plus-S"
     assert specs[0].env == {"PADDLE_PDX_CACHE_HOME": "C:/models"}
+
+
+def test_external_formula_runner_discovers_known_local_envs(tmp_path) -> None:
+    env_root = tmp_path / "envs"
+    paddle = env_root / "pdf_tool_paddle310" / "python.exe"
+    pix2text = env_root / "pdf_tool_pix2text310" / "python.exe"
+    paddle.parent.mkdir(parents=True)
+    pix2text.parent.mkdir(parents=True)
+    paddle.write_text("", encoding="utf-8")
+    pix2text.write_text("", encoding="utf-8")
+
+    specs = ExternalFormulaToolRunner.known_local_specs(env_root)
+
+    names = {spec.name for spec in specs}
+    assert names == {"paddle_formula", "pix2text_formula"}
+    by_name = {spec.name: spec for spec in specs}
+    assert by_name["paddle_formula"].backend == "paddle_formula"
+    assert by_name["paddle_formula"].model == "PP-FormulaNet_plus-S"
+    assert by_name["pix2text_formula"].backend == "pix2text_formula"

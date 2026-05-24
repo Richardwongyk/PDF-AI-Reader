@@ -919,6 +919,7 @@ class MainWindow(QMainWindow):
             self._pending_formula_block_count()
             + self._formula_index_flow.pending_count(self._current_doc_hash)
             + self._formula_index_flow.page_pending_count(self._current_doc_hash)
+            + self._formula_index_flow.round_pending_count(self._current_doc_hash)
             + self._formula_semantic_review_flow.pending_count(self._current_doc_hash)
         )
 

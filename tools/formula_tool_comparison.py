@@ -232,6 +232,7 @@ def compare_case(
     dpi: int = 300,
     match_scope: str = "display",
     specs: list[ExternalFormulaToolSpec] | None = None,
+    auto_local_tools: bool = False,
     runner: ExternalFormulaToolRunner | None = None,
     source_formulas: list[str] | None = None,
 ) -> FormulaToolComparisonReport:
@@ -248,7 +249,12 @@ def compare_case(
     )
     sample_ids = {sample.candidate_id for sample in samples}
     sampled_blocks = [block for block in blocks if block.id in sample_ids]
-    active_specs = specs if specs is not None else ExternalFormulaToolRunner.default_specs()
+    if specs is not None:
+        active_specs = specs
+    elif auto_local_tools:
+        active_specs = ExternalFormulaToolRunner.known_local_specs()
+    else:
+        active_specs = ExternalFormulaToolRunner.default_specs()
     tool_names = [spec.name for spec in active_specs if spec.enabled]
     doc_hash = compute_sha256(str(case.pdf))[:16]
     store = FormulaIndexStore(str(db_path))
@@ -448,6 +454,11 @@ def main() -> int:
     parser.add_argument("--match-scope", choices=["display", "inline", "all"], default="display")
     parser.add_argument("--specs", default="", help="JSON list/path of external tool specs.")
     parser.add_argument(
+        "--auto-local-tools",
+        action="store_true",
+        help="Discover known isolated conda tool envs such as pdf_tool_paddle310 and pdf_tool_pix2text310.",
+    )
+    parser.add_argument(
         "--db",
         default="test_artifacts/formula_tool_comparison/formula_jobs.db",
     )
@@ -472,6 +483,7 @@ def main() -> int:
             dpi=args.dpi,
             match_scope=args.match_scope,
             specs=specs,
+            auto_local_tools=bool(args.auto_local_tools),
         )
         for case in _select_cases(args.case)
     ]

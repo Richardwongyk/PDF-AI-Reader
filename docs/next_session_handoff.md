@@ -85,6 +85,7 @@
 - 已有 accepted 唯一性：同一候选当前只允许一个 accepted 结果。
 - 导入后会把页级结构扫描、需要 OCR 的公式块、已解析公式块的 r3 复核任务写入队列。
 - r0 页面扫描当前只走 born-digital PDF 结构事实，使用 `BornDigitalFormulaExtractor` 写 `stage=pdf_structure` 的未接受候选，不初始化 OCR/MFR。
+- r0 低置信结构候选会排入 `r2_local_high_precision` 待复核 round；这只是持久化待办，不会在默认阅读路径启动重模型。
 - r2 本地高精度轮通过 `ExternalFormulaToolRunner` + `tools/formula_tool_worker.py` 调隔离工具环境；当前已有 Paddle Formula 和 Pix2Text 公式图候选接入，结果默认不 accepted。
 - `FormulaSemanticReviewService` 和 `FormulaSemanticReviewFlow` 已有第一版：批量调用分析模型，写回 JSON 候选，不覆盖正文。
 - UI 空闲时可小批量调度公式索引/语义复核，避免导入热路径同步等待。
@@ -98,7 +99,7 @@
 - 已有 `tools/formula_tool_comparison.py`，用于同一批公式图的外部工具候选对比，并把 r2 候选写入 `formula_recognition_results`。
 - 已有 `tools/formula_index_performance.py`，用于多轮公式索引任务入库性能检测。
 - 已有 `tools/test_log_audit.py`，用于清理和审计日志。
-- 最新相关测试基线：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 `66 passed`。
+- 最新相关测试基线：`tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 `70 passed`。
 - Attention 最新多轮入库性能：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
 - Attention born-digital 前 6 页结构审计：约 0.608s，17816 glyph，unknown glyph 为 0，display region 7 个；仍未达到完整 LaTeX 还原目标。
 
@@ -322,5 +323,5 @@ P2：
 
 测试资料在 测试资料/：Attention 是小文件，Napkin 是大文件，两者 PDF、LaTeX 源码和图片资源都要用于公式质量和性能验收。闭环测试必须模拟滚动翻页、跳转、双击翻译/隐藏/再次双击打开、缩放、问答、日志审计。长文档性能、缩放清晰度、翻译和问答延迟必须作为门槛。
 
-下一步先跑轻量测试：C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q。然后跑 tools/formula_index_performance.py、tools/formula_latex_audit.py 的 Attention/Napkin 门禁，再跑 tools/e2e_pdf_workflow.py。外部工具要先确认现有环境和模型缓存，再逐个真实 PDF 小页烟测和大样本对比。所有提交不得带额外署名、来源标记或生成工具署名，不提交测试资料、日志、缓存、临时产物。
+下一步先跑轻量测试：C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q。然后跑 tools/formula_index_performance.py、tools/formula_latex_audit.py 的 Attention/Napkin 门禁，再用 tools/formula_tool_comparison.py --auto-local-tools 对比外部工具候选，最后跑 tools/e2e_pdf_workflow.py。外部工具要先确认现有环境和模型缓存，再逐个真实 PDF 小页烟测和大样本对比。所有提交不得带额外署名、来源标记或生成工具署名，不提交测试资料、日志、缓存、临时产物。
 ```

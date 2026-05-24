@@ -281,6 +281,13 @@ class FormulaIndexFlow(QObject):
     def page_pending_count(self, doc_hash: str) -> int:
         return self._store.page_pending_count(doc_hash)
 
+    def round_pending_count(
+        self,
+        doc_hash: str,
+        scan_round: str | FormulaScanRound = FormulaScanRound.LOCAL_HIGH_PRECISION,
+    ) -> int:
+        return self._store.round_pending_count(doc_hash, scan_round=scan_round)
+
     def enqueue_semantic_review_blocks(
         self,
         filepath: str,
@@ -546,6 +553,14 @@ class FormulaIndexFlow(QObject):
                     "warnings": self._string_list(item.get("warnings")),
                 },
             )
+            if candidate_block is not None and self._needs_local_precision_review(item):
+                self._store.enqueue_round_records(
+                    doc_hash,
+                    filepath,
+                    FormulaScanRound.LOCAL_HIGH_PRECISION,
+                    "block",
+                    [candidate_block],
+                )
         if detected:
             self.formula_blocks_detected.emit(detected)
         pending = len(self._queued_blocks) + len(self._queued_page_nums)
@@ -601,6 +616,32 @@ class FormulaIndexFlow(QObject):
         if scan_round == FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE.value:
             return "knowledge_incremental_update"
         return "local_fast"
+
+    @classmethod
+    def _needs_local_precision_review(cls, item: dict[str, object]) -> bool:
+        warnings = {
+            warning.lower()
+            for warning in cls._string_list(item.get("warnings"))
+        }
+        if warnings.intersection(
+            {
+                "low_confidence",
+                "empty_latex",
+                "review",
+                "review_only",
+                "needs_review",
+                "unknown_glyph",
+                "missing_tounicode",
+                "table_or_text_like_region",
+                "tabular_alignment",
+            }
+        ):
+            return True
+        try:
+            score = float(item.get("score", 1.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 1.0
+        return score < 0.65
 
     @staticmethod
     def _optional_float(value: object) -> float | None:

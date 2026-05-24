@@ -77,6 +77,8 @@ PDF 导入
 - 显式高精度扫描使用 `r2_local_high_precision`，不会被 `r1_cached_recognition` 的 done 状态吞掉。
 - r0 页面 worker 当前调用 `BornDigitalFormulaExtractor`，只消费 MuPDF born-digital 结构证据，
   写入 `stage=pdf_structure` 的未接受候选；r0 不初始化 MFD/OCR。
+- r0 低置信、空 LaTeX 或需要复核的结构候选会额外排入 `r2_local_high_precision`
+  generic round，作为后续显式精扫/多工具对比的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
 - r2 当前通过 `ExternalFormulaToolRunner` 和 `tools/formula_tool_worker.py` 调独立工具环境，
   已支持 Paddle Formula 与 Pix2Text 公式图候选；所有 r2 结果默认 `accepted=false`。
 

@@ -397,6 +397,50 @@ def test_formula_index_flow_persists_born_digital_structure_candidates(tmp_path)
         and record.result_json["input_hash"] == "glyph-hash-1"
         for record in records
     )
+    assert store.round_pending_count(
+        "doc-1",
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    ) == 1
+
+
+def test_formula_index_flow_keeps_high_confidence_structure_candidates_out_of_r2(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0])
+    flow = FormulaIndexFlow(store=store)
+
+    flow._on_page_scan_finished(
+        {
+            "doc_hash": "doc-1",
+            "scan_round": FormulaScanRound.PDF_STRUCTURE.value,
+            "done_pages": [0],
+            "failed": [],
+            "detected": [],
+            "structure_candidates": [
+                {
+                    "candidate_id": "p0_r0_0",
+                    "page_num": 0,
+                    "bbox": (10, 20, 110, 40),
+                    "text": "x+y",
+                    "latex": r"x+y",
+                    "score": 0.92,
+                    "input_hash": "glyph-hash-1",
+                    "model": "pymupdf_born_digital_structure",
+                    "model_version": "pymupdf_rawdict_layout_v1",
+                    "preprocess_version": "glyph-vector-json-v1",
+                    "warnings": [],
+                    "evidence": {"source": "pdf_structure_display_region"},
+                }
+            ],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    assert store.round_counts("doc-1") == {"r0_pdf_structure:done": 2}
+    assert store.round_pending_count(
+        "doc-1",
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    ) == 0
 
 
 def test_formula_index_flow_does_not_auto_retry_failed_page_scans(tmp_path) -> None:
