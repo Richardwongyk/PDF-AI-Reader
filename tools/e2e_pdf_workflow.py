@@ -42,6 +42,9 @@ COMMAND_FILE = ARTIFACT_DIR / "commands.jsonl"
 EVENT_FILE = ARTIFACT_DIR / "events.jsonl"
 FORMULA_ARTIFACT_DIR = ROOT / "test_artifacts" / "formula_audit"
 
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0.03
+
 
 @dataclass
 class PdfCase:
@@ -466,6 +469,18 @@ def _content_point(window: Any, x_ratio: float = 0.48, y_ratio: float = 0.48) ->
     return x, y
 
 
+def _safe_move_to_window(window: Any) -> tuple[int, int]:
+    x, y = _content_point(window, 0.50, 0.50)
+    try:
+        screen_width, screen_height = pyautogui.size()
+        x = max(8, min(int(screen_width) - 8, x))
+        y = max(8, min(int(screen_height) - 8, y))
+    except Exception:
+        pass
+    pyautogui.moveTo(x, y, duration=0.05)
+    return x, y
+
+
 def _first_block_point(window: Any) -> tuple[int, int] | None:
     try:
         blocks = window.descendants(control_type="Pane")
@@ -738,6 +753,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
         proc, window, launched_sec = _launch(case)
         window.maximize()
         time.sleep(1.0)
+        _safe_move_to_window(window)
         screenshots.append(_screenshot(case_dir, "00_launched"))
 
         t_open = time.perf_counter()
@@ -745,8 +761,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
         opened_sec = time.perf_counter() - t_open
         screenshots.append(_screenshot(case_dir, "01_document_loaded"))
 
-        x, y = _content_point(window)
-        pyautogui.moveTo(x, y, duration=0.1)
+        x, y = _safe_move_to_window(window)
 
         for i in range(case.scroll_steps):
             t = time.perf_counter()
