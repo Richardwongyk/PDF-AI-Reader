@@ -854,6 +854,58 @@ def test_math_ocr_limits_uncached_model_calls(monkeypatch, tmp_path) -> None:
     assert results == [r"\frac{a}{b}", r"\sqrt{x}", ""]
 
 
+def test_math_ocr_deduplicates_uncached_images_within_batch(monkeypatch, tmp_path) -> None:
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    ocr = MathOCR()
+    ocr._cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    called_batches: list[list[bytes]] = []
+
+    monkeypatch.setattr(type(ocr), "is_available", property(lambda self: True))
+    monkeypatch.setattr(ocr, "_ensure_model", lambda: None)
+
+    def fake_recognize_batch_impl(images: list[bytes]) -> list[str]:
+        called_batches.append(images)
+        return [r"\alpha", r"\beta"]
+
+    monkeypatch.setattr(ocr, "_recognize_batch_impl", fake_recognize_batch_impl)
+
+    results = ocr.recognize_batch(
+        [b"same-image", b"same-image", b"other-image", b"same-image"],
+        max_uncached=4,
+    )
+
+    assert called_batches == [[b"same-image", b"other-image"]]
+    assert results == [r"\alpha", r"\alpha", r"\beta", r"\alpha"]
+
+
+def test_math_ocr_uncached_budget_counts_duplicate_images_once(monkeypatch, tmp_path) -> None:
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    ocr = MathOCR()
+    ocr._cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    called_batches: list[list[bytes]] = []
+
+    monkeypatch.setattr(type(ocr), "is_available", property(lambda self: True))
+    monkeypatch.setattr(ocr, "_ensure_model", lambda: None)
+
+    def fake_recognize_batch_impl(images: list[bytes]) -> list[str]:
+        called_batches.append(images)
+        return [r"\alpha"]
+
+    monkeypatch.setattr(ocr, "_recognize_batch_impl", fake_recognize_batch_impl)
+
+    results = ocr.recognize_batch(
+        [b"same-image", b"same-image", b"other-image"],
+        max_uncached=1,
+    )
+
+    assert called_batches == [[b"same-image"]]
+    assert results == [r"\alpha", r"\alpha", ""]
+
+
 def test_math_ocr_zero_uncached_budget_uses_cache_only(monkeypatch, tmp_path) -> None:
     from src.core.math_ocr import MathOCR, _FormulaOcrCache
 

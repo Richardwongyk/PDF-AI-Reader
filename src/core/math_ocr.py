@@ -233,18 +233,31 @@ class MathOCR:
             return [""] * len(images)
 
         cached_results, misses = self._read_cache(images)
+        unique_misses: list[tuple[int, str]] = []
+        seen_hashes: set[str] = set()
+        for original_index, image_hash in misses:
+            if image_hash in seen_hashes:
+                continue
+            seen_hashes.add(image_hash)
+            unique_misses.append((original_index, image_hash))
+        if len(unique_misses) < len(misses):
+            _logger.info(
+                "MFR OCR 批内去重: %d -> %d",
+                len(misses),
+                len(unique_misses),
+            )
         if max_uncached is not None:
             allowed = max(0, int(max_uncached))
-            if allowed < len(misses):
-                skipped = len(misses) - allowed
+            if allowed < len(unique_misses):
+                skipped = len(unique_misses) - allowed
                 _logger.info(
                     "MFR OCR 预算限制: 推理 %d 张未命中图片，延后 %d 张",
                     allowed,
                     skipped,
                 )
-                misses = misses[:allowed]
+                unique_misses = unique_misses[:allowed]
 
-        if not misses:
+        if not unique_misses:
             return cached_results
 
         if not self.is_available:
@@ -252,14 +265,19 @@ class MathOCR:
 
         try:
             self._ensure_model()
-            miss_images = [images[i] for i, _ in misses]
+            miss_images = [images[i] for i, _ in unique_misses]
             miss_results = self._recognize_batch_impl(miss_images)
             cache_namespace = self._cache_namespace()
-            for (original_index, image_hash), latex in zip(misses, miss_results, strict=False):
+            recognized_by_hash: dict[str, str] = {}
+            for (original_index, image_hash), latex in zip(unique_misses, miss_results, strict=False):
                 cleaned = str(latex or "").strip()
                 cached_results[original_index] = cleaned
+                recognized_by_hash[image_hash] = cleaned
                 if cleaned:
                     self._cache.put(image_hash, cleaned, cache_namespace)
+            for original_index, image_hash in misses:
+                if original_index < len(cached_results) and not cached_results[original_index]:
+                    cached_results[original_index] = recognized_by_hash.get(image_hash, "")
             return cached_results
         except Exception as e:
             _logger.warning("MFR 批量识别失败: %s", e)
