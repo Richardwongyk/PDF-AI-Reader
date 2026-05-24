@@ -408,6 +408,48 @@ def test_formula_semantic_reconstructor_recovers_fraction_sqrt_and_scripts() -> 
     assert result.warnings == ()
 
 
+def test_born_digital_formula_structure_extractor_emits_hashed_candidates() -> None:
+    from src.core.born_digital_formula_extractor import BornDigitalFormulaStructureExtractor
+
+    page = BornDigitalPage(
+        page_num=0,
+        page_size=(612, 792),
+        warnings=(),
+        regions=(
+            _text_region([
+                PdfGlyph("A", "CMR10", 10, (220, 473, 228, 483)),
+                PdfGlyph("(", "CMR10", 10, (228, 473, 232, 483)),
+                PdfGlyph("Q", "CMMI10", 10, (232, 473, 240, 483)),
+                PdfGlyph(",", "CMMI10", 10, (240, 473, 244, 483)),
+                PdfGlyph("K", "CMMI10", 10, (246, 473, 254, 483)),
+                PdfGlyph(")", "CMR10", 10, (254, 473, 258, 483)),
+                PdfGlyph("=", "CMR10", 10, (262, 473, 270, 483)),
+                PdfGlyph("Q", "CMMI10", 10, (286, 466, 294, 476)),
+                PdfGlyph("K", "CMMI10", 10, (294, 466, 302, 476)),
+                PdfGlyph("T", "CMMI7", 7, (303, 465, 308, 472)),
+            ]),
+            _text_region([
+                PdfGlyph("√", "CMSY10", 10, (286, 473, 294, 483)),
+                PdfGlyph("d", "CMMI10", 10, (296, 480, 304, 490)),
+                PdfGlyph("k", "CMMI7", 7, (304, 484, 309, 491)),
+            ]),
+            PdfRegion(page_num=0, kind="vector", bbox=(286, 478, 310, 479)),
+        ),
+    )
+
+    candidates = BornDigitalFormulaStructureExtractor(
+        min_confidence=0.0,
+    ).extract_candidates_from_page_facts(page)
+
+    assert candidates
+    candidate = candidates[0]
+    assert candidate.candidate_id.startswith("p0_r0_")
+    assert candidate.input_hash
+    assert candidate.model == "pymupdf_born_digital_structure"
+    assert candidate.preprocess_version == "glyph-vector-json-v1"
+    assert candidate.evidence["source"] == "pdf_structure_display_region"
+
+
 def test_region_diagnostics_marks_structured_formula_candidate() -> None:
     page = BornDigitalPage(
         page_num=0,

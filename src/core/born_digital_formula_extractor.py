@@ -1,0 +1,115 @@
+"""Born-digital formula candidates from PDF structure facts.
+
+This module reuses the MuPDF glyph/span/vector evidence layer.  It does not
+invoke OCR/MFR and does not infer formulas from sample-specific text patterns.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+from typing import Any
+
+import fitz
+
+from src.core.born_digital_math import (
+    BornDigitalMathAuditor,
+    BornDigitalPage,
+    MuPDFBornDigitalExtractor,
+    PdfFormulaSemanticReconstructor,
+)
+
+
+@dataclass(frozen=True)
+class BornDigitalFormulaCandidate:
+    """One structure-backed formula candidate."""
+
+    candidate_id: str
+    page_num: int
+    bbox: tuple[float, float, float, float]
+    text: str
+    latex: str
+    confidence: float
+    input_hash: str
+    evidence: dict[str, Any]
+    warnings: tuple[str, ...]
+    model: str = "pymupdf_born_digital_structure"
+    model_version: str = "pymupdf_rawdict_layout_v1"
+    preprocess_version: str = "glyph-vector-json-v1"
+
+
+class BornDigitalFormulaStructureExtractor:
+    """Extract r0 formula candidates from born-digital PDF structure."""
+
+    def __init__(self, min_confidence: float = 0.5) -> None:
+        self._min_confidence = float(min_confidence)
+        self._extractor = MuPDFBornDigitalExtractor()
+        self._auditor = BornDigitalMathAuditor()
+        self._reconstructor = PdfFormulaSemanticReconstructor()
+
+    def extract_page(
+        self,
+        page: fitz.Page,
+        page_num: int,
+        existing_ids: set[str] | None = None,
+    ) -> list[BornDigitalFormulaCandidate]:
+        page_facts = self._extractor.extract_page(page, page_num)
+        return self.extract_candidates_from_page_facts(page_facts, existing_ids=existing_ids)
+
+    def extract_candidates_from_page_facts(
+        self,
+        page_facts: BornDigitalPage,
+        existing_ids: set[str] | None = None,
+    ) -> list[BornDigitalFormulaCandidate]:
+        regions = self._auditor.display_formula_regions(page_facts)
+        try:
+            diagnostics = {
+                diagnostic.bbox: diagnostic.to_json()
+                for diagnostic in self._auditor.region_diagnostics(page_facts, regions)
+            }
+        except Exception:
+            diagnostics = {}
+        existing_ids = set(existing_ids or set())
+        candidates: list[BornDigitalFormulaCandidate] = []
+        for index, region in enumerate(regions):
+            semantic = self._reconstructor.reconstruct(page_facts, region)
+            warnings = set(semantic.warnings)
+            if semantic.confidence < self._min_confidence:
+                warnings.add("low_confidence")
+            if not semantic.latex:
+                warnings.add("empty_latex")
+            candidate_id = f"p{page_facts.page_num}_r0_{index}"
+            suffix = 1
+            while candidate_id in existing_ids:
+                candidate_id = f"p{page_facts.page_num}_r0_{index}_{suffix}"
+                suffix += 1
+            existing_ids.add(candidate_id)
+            evidence = {
+                "page_num": page_facts.page_num,
+                "bbox": region.bbox,
+                "source": region.source,
+                "region": region.to_json(),
+                "semantic": semantic.to_json(),
+                "diagnostics": diagnostics.get(region.bbox, {}),
+            }
+            input_hash = self._input_hash(evidence)
+            candidates.append(
+                BornDigitalFormulaCandidate(
+                    candidate_id=candidate_id,
+                    page_num=page_facts.page_num,
+                    bbox=region.bbox,
+                    text=region.text,
+                    latex=semantic.latex,
+                    confidence=semantic.confidence,
+                    input_hash=input_hash,
+                    evidence=evidence,
+                    warnings=tuple(sorted(warnings)),
+                )
+            )
+        return candidates
+
+    @staticmethod
+    def _input_hash(evidence: dict[str, Any]) -> str:
+        payload = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()

@@ -340,6 +340,65 @@ def test_formula_index_flow_records_page_scan_result(tmp_path) -> None:
     assert detected == [[{"id": "p0_b2", "page_num": 0, "block_type": "formula"}]]
 
 
+def test_formula_index_flow_persists_born_digital_structure_candidates(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0])
+    flow = FormulaIndexFlow(store=store)
+
+    flow._on_page_scan_finished(
+        {
+            "doc_hash": "doc-1",
+            "scan_round": FormulaScanRound.PDF_STRUCTURE.value,
+            "done_pages": [0],
+            "failed": [],
+            "detected": [],
+            "structure_candidates": [
+                {
+                    "candidate_id": "p0_r0_0",
+                    "page_num": 0,
+                    "bbox": (10, 20, 110, 40),
+                    "text": "QKT",
+                    "latex": r"Q K^{T}",
+                    "score": 0.87,
+                    "input_hash": "glyph-hash-1",
+                    "model": "pymupdf_born_digital_structure",
+                    "model_version": "pymupdf_rawdict_layout_v1",
+                    "preprocess_version": "glyph-vector-json-v1",
+                    "warnings": ["review_only"],
+                    "evidence": {"source": "pdf_structure_display_region"},
+                }
+            ],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    result = store.get_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_r0_0",
+        stage="pdf_structure",
+        model="pymupdf_born_digital_structure",
+        model_version="pymupdf_rawdict_layout_v1",
+        preprocess_version="glyph-vector-json-v1",
+        input_hash="glyph-hash-1",
+    )
+    assert result is not None
+    assert result.latex == r"Q K^{T}"
+    assert result.accepted is False
+    assert result.score == 0.87
+    assert result.warnings == ("review_only",)
+    records = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.PDF_STRUCTURE,
+    )
+    assert any(
+        record.target_id == "p0_r0_0"
+        and record.status == "done"
+        and record.result_json["input_hash"] == "glyph-hash-1"
+        for record in records
+    )
+
+
 def test_formula_index_flow_does_not_auto_retry_failed_page_scans(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     store.enqueue_pages("doc-1", "paper.pdf", [0])
@@ -385,6 +444,107 @@ def test_formula_page_scan_worker_maps_new_and_existing_formula_infos() -> None:
     assert infos[1]["metadata"]["needs_ocr"] is True
     assert infos[2]["id"] == "p0_b2"
     assert infos[2]["is_new"] is True
+
+
+def test_pdf_structure_page_worker_does_not_load_mfd(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    import src.app.formula_index_flow as module
+
+    worker = module._FormulaPageScanWorker(
+        "paper.pdf",
+        [0],
+        [],
+        doc_hash="doc-1",
+        scan_round=FormulaScanRound.PDF_STRUCTURE.value,
+    )
+    emitted: list[dict[str, object]] = []
+    worker.finished_signal.connect(lambda payload: emitted.append(payload))
+
+    class FakeDoc:
+        page_count = 1
+
+        def __getitem__(self, index: int) -> object:
+            return object()
+
+        def close(self) -> None:
+            pass
+
+    class FakeStructureExtractor:
+        def extract_page(self, page: object, page_num: int, existing_ids: set[str] | None = None) -> list[object]:
+            return []
+
+    class ForbiddenDetector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("r0 must not initialize MFD")
+
+    fake_fitz = ModuleType("fitz")
+    fake_fitz.open = lambda path: FakeDoc()  # type: ignore[attr-defined]
+    fake_structure_module = ModuleType("src.core.born_digital_formula_extractor")
+    fake_structure_module.BornDigitalFormulaStructureExtractor = FakeStructureExtractor  # type: ignore[attr-defined]
+    fake_detector_module = ModuleType("src.core.formula_detector")
+    fake_detector_module.Pix2TextMFDDetector = ForbiddenDetector  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
+    monkeypatch.setitem(sys.modules, "src.core.born_digital_formula_extractor", fake_structure_module)
+    monkeypatch.setitem(sys.modules, "src.core.formula_detector", fake_detector_module)
+
+    worker.run()
+
+    assert emitted[0]["done_pages"] == [0]
+    assert emitted[0]["detected"] == []
+
+
+def test_non_structure_page_worker_can_run_mfd(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    import src.app.formula_index_flow as module
+
+    worker = module._FormulaPageScanWorker(
+        "paper.pdf",
+        [0],
+        [],
+        doc_hash="doc-1",
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+    )
+    emitted: list[dict[str, object]] = []
+    worker.finished_signal.connect(lambda payload: emitted.append(payload))
+
+    class FakeDoc:
+        page_count = 1
+
+        def __getitem__(self, index: int) -> object:
+            return object()
+
+        def close(self) -> None:
+            pass
+
+    class FakeStructureExtractor:
+        def extract_page(self, page: object, page_num: int, existing_ids: set[str] | None = None) -> list[object]:
+            return []
+
+    class FakeDetector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def detect_specific_pages(self, doc: object, pages: list[int]) -> list[dict[str, object]]:
+            return [{"bbox": (10, 10, 30, 20), "score": 0.8}]
+
+    fake_fitz = ModuleType("fitz")
+    fake_fitz.open = lambda path: FakeDoc()  # type: ignore[attr-defined]
+    fake_structure_module = ModuleType("src.core.born_digital_formula_extractor")
+    fake_structure_module.BornDigitalFormulaStructureExtractor = FakeStructureExtractor  # type: ignore[attr-defined]
+    fake_detector_module = ModuleType("src.core.formula_detector")
+    fake_detector_module.Pix2TextMFDDetector = FakeDetector  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
+    monkeypatch.setitem(sys.modules, "src.core.born_digital_formula_extractor", fake_structure_module)
+    monkeypatch.setitem(sys.modules, "src.core.formula_detector", fake_detector_module)
+
+    worker.run()
+
+    assert emitted[0]["done_pages"] == [0]
+    assert emitted[0]["detected"][0]["metadata"]["mfd_page_scan"] is True
 
 
 def test_formula_index_store_persists_status_transitions(tmp_path) -> None:
@@ -750,6 +910,180 @@ def test_high_precision_worker_outputs_candidate_only(monkeypatch, tmp_path) -> 
         "model": "pix2text-mfr",
         "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
     }]
+
+
+def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> None:
+    import hashlib
+    import sys
+    from types import ModuleType
+
+    import src.app.formula_index_flow as module
+    from src.core.external_formula_tools import ExternalFormulaCandidate
+
+    block = _formula("p0_b1", 0)
+    worker = module._FormulaOcrWorker(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        cache_only=False,
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+    )
+    emitted: list[dict[str, object]] = []
+    worker.finished_signal.connect(lambda payload: emitted.append(payload))
+
+    class FakeDoc:
+        def close(self) -> None:
+            pass
+
+    class FakeDetector:
+        @staticmethod
+        def _crop_bbox_image(doc: object, page_num: int, bbox: tuple[float, float, float, float], dpi: int, pad: float) -> bytes:
+            return b"png-bytes"
+
+        @staticmethod
+        def _normalize_latex(latex: str) -> str:
+            return latex.strip()
+
+    class FakeMathOCR:
+        def recognize_batch(self, images: list[bytes], max_uncached: int = 0) -> list[str]:
+            return [r"\alpha"]
+
+    class FakeExternalRunner:
+        def recognize_images(self, images: list[tuple[str, bytes]]) -> list[ExternalFormulaCandidate]:
+            assert images == [("p0_b1", b"png-bytes")]
+            return [
+                ExternalFormulaCandidate(
+                    candidate_id="p0_b1",
+                    latex=r"\beta",
+                    model="paddle_formula",
+                    model_version="PP-FormulaNet_plus-S",
+                    preprocess_version="png-v1",
+                    score=0.42,
+                    duration_ms=123,
+                    warnings=("candidate_only",),
+                ),
+                ExternalFormulaCandidate(
+                    candidate_id="p0_b1",
+                    latex=r"\gamma",
+                    model="pix2text_formula",
+                    model_version="pix2text",
+                    preprocess_version="png-v1",
+                    score=0.91,
+                    duration_ms=456,
+                ),
+            ]
+
+    fake_fitz = ModuleType("fitz")
+    fake_fitz.open = lambda path: FakeDoc()  # type: ignore[attr-defined]
+    fake_detector_module = ModuleType("src.core.formula_detector")
+    fake_detector_module.Pix2TextMFDDetector = FakeDetector  # type: ignore[attr-defined]
+    fake_math_ocr_module = ModuleType("src.core.math_ocr")
+    fake_math_ocr_module.MathOCR = FakeMathOCR  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
+    monkeypatch.setitem(sys.modules, "src.core.formula_detector", fake_detector_module)
+    monkeypatch.setitem(sys.modules, "src.core.math_ocr", fake_math_ocr_module)
+    monkeypatch.setattr(module, "ExternalFormulaToolRunner", FakeExternalRunner)
+
+    worker.run()
+
+    image_hash = hashlib.sha256(b"png-bytes").hexdigest()
+    assert emitted[0]["updated"] == []
+    assert emitted[0]["done"] == [
+        {
+            "block_id": "p0_b1",
+            "latex": r"\alpha",
+            "image_hash": image_hash,
+            "model": "pix2text-mfr",
+            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+        },
+        {
+            "block_id": "p0_b1",
+            "latex": r"\beta",
+            "normalized_latex": r"\beta",
+            "image_hash": image_hash,
+            "model": "paddle_formula",
+            "model_version": "PP-FormulaNet_plus-S",
+            "preprocess_version": "png-v1",
+            "score": 0.42,
+            "duration_ms": 123,
+            "warnings": ["candidate_only"],
+            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+        },
+        {
+            "block_id": "p0_b1",
+            "latex": r"\gamma",
+            "normalized_latex": r"\gamma",
+            "image_hash": image_hash,
+            "model": "pix2text_formula",
+            "model_version": "pix2text",
+            "preprocess_version": "png-v1",
+            "score": 0.91,
+            "duration_ms": 456,
+            "warnings": [],
+            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+        },
+    ]
+
+
+def test_high_precision_external_candidates_are_persisted_unaccepted(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    block = _formula("p0_b1", 0)
+    flow.enqueue_blocks(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        batch_budget=0,
+        cache_only=False,
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+    )
+
+    flow._on_worker_finished(
+        {
+            "doc_hash": "doc-1",
+            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+            "updated": [],
+            "pending": 1,
+            "done": [
+                {
+                    "block_id": "p0_b1",
+                    "latex": r"\alpha",
+                    "image_hash": "hash-1",
+                    "model": "pix2text-mfr",
+                    "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+                },
+                {
+                    "block_id": "p0_b1",
+                    "latex": r"\beta",
+                    "normalized_latex": r"\beta",
+                    "image_hash": "hash-1",
+                    "model": "paddle_formula",
+                    "model_version": "PP-FormulaNet_plus-S",
+                    "preprocess_version": "png-v1",
+                    "score": 0.42,
+                    "duration_ms": 123,
+                    "warnings": ["candidate_only"],
+                    "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+                },
+            ],
+            "skipped": [],
+            "failed": [],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    results = store.list_recognition_results(
+        "doc-1",
+        candidate_id="p0_b1",
+        stage="local_precise",
+    )
+    by_model = {result.model: result for result in results}
+    assert set(by_model) == {"pix2text-mfr", "paddle_formula"}
+    assert by_model["paddle_formula"].accepted is False
+    assert by_model["paddle_formula"].score == 0.42
+    assert by_model["paddle_formula"].duration_ms == 123
+    assert by_model["paddle_formula"].warnings == ("candidate_only",)
 
 
 class _Signal:

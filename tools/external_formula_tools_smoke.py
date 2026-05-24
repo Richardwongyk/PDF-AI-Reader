@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PDF = ROOT / "测试资料" / "Attention is all you need.pdf"
+DEFAULT_FORMULA_IMAGE = ROOT / "test_artifacts" / "pix2text_smoke" / "attention_formula_p3_b6.png"
 
 
 @dataclass
@@ -56,6 +57,54 @@ def _paddle_formula_smoke() -> ToolSmokeResult:
             name="paddle_formula",
             available=False,
             status="import_failed",
+            elapsed_sec=round(time.perf_counter() - started, 3),
+            error=str(exc),
+        )
+
+
+def _paddle_formula_image_smoke(image: Path) -> ToolSmokeResult:
+    started = time.perf_counter()
+    try:
+        from paddleocr import FormulaRecognition
+
+        model = FormulaRecognition(model_name="PP-FormulaNet_plus-S", device="cpu")
+        outputs = list(model.predict(input=str(image), batch_size=1))
+        return ToolSmokeResult(
+            name="paddle_formula_image",
+            available=True,
+            status="ok",
+            elapsed_sec=round(time.perf_counter() - started, 3),
+            output=json.dumps([str(item) for item in outputs], ensure_ascii=False),
+        )
+    except Exception as exc:
+        return ToolSmokeResult(
+            name="paddle_formula_image",
+            available=False,
+            status="failed",
+            elapsed_sec=round(time.perf_counter() - started, 3),
+            error=str(exc),
+        )
+
+
+def _pix2text_formula_image_smoke(image: Path) -> ToolSmokeResult:
+    started = time.perf_counter()
+    try:
+        from pix2text import Pix2Text
+
+        p2t = Pix2Text(enable_formula=True, enable_table=False, device="cpu")
+        output = p2t.recognize_formula(str(image), return_text=False)
+        return ToolSmokeResult(
+            name="pix2text_formula_image",
+            available=True,
+            status="ok",
+            elapsed_sec=round(time.perf_counter() - started, 3),
+            output=str(output),
+        )
+    except Exception as exc:
+        return ToolSmokeResult(
+            name="pix2text_formula_image",
+            available=False,
+            status="failed",
             elapsed_sec=round(time.perf_counter() - started, 3),
             error=str(exc),
         )
@@ -156,22 +205,51 @@ def _magic_pdf_smoke(pdf: Path, output_dir: Path, run_parse: bool) -> ToolSmokeR
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pdf", default=str(DEFAULT_PDF))
+    parser.add_argument("--formula-image", default=str(DEFAULT_FORMULA_IMAGE))
     parser.add_argument("--output", default="test_artifacts/external_formula_tools_smoke/report.json")
+    parser.add_argument(
+        "--only",
+        action="append",
+        choices=["paddle", "pix2text", "unimernet", "magic_pdf"],
+        help="Limit checks to one or more tools for isolated env validation.",
+    )
+    parser.add_argument("--run-formula-image", action="store_true")
     parser.add_argument("--run-magic-pdf", action="store_true")
     args = parser.parse_args()
 
     pdf = Path(args.pdf)
+    formula_image = Path(args.formula_image)
     output = ROOT / args.output
     magic_output = output.parent / "magic_pdf"
-    results = [
-        _paddle_formula_smoke(),
-        _unimernet_smoke(),
-        _magic_pdf_smoke(pdf, magic_output, run_parse=args.run_magic_pdf),
-    ]
+    selected = set(args.only or ["paddle", "pix2text", "unimernet", "magic_pdf"])
+    results = []
+    if "paddle" in selected:
+        results.append(_paddle_formula_smoke())
+    if "unimernet" in selected:
+        results.append(_unimernet_smoke())
+    if "magic_pdf" in selected:
+        results.append(_magic_pdf_smoke(pdf, magic_output, run_parse=args.run_magic_pdf))
+    if args.run_formula_image:
+        if formula_image.exists():
+            if "paddle" in selected:
+                results.append(_paddle_formula_image_smoke(formula_image))
+            if "pix2text" in selected:
+                results.append(_pix2text_formula_image_smoke(formula_image))
+        else:
+            results.append(
+                ToolSmokeResult(
+                    name="formula_image",
+                    available=False,
+                    status="missing",
+                    elapsed_sec=0.0,
+                    error=str(formula_image),
+                )
+            )
     payload = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "python": sys.executable,
         "pdf": str(pdf),
+        "formula_image": str(formula_image),
         "results": [asdict(result) for result in results],
     }
     output.parent.mkdir(parents=True, exist_ok=True)

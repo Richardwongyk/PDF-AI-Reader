@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import time
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
+from src.core.external_formula_tools import ExternalFormulaToolRunner
 from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 _logger = logging.getLogger(__name__)
@@ -484,6 +486,66 @@ class FormulaIndexFlow(QObject):
             item for item in result.get("detected", [])
             if isinstance(item, dict)
         ]
+        for item in result.get("structure_candidates", []):
+            if not isinstance(item, dict):
+                continue
+            candidate_id = str(item.get("candidate_id", "") or "")
+            input_hash = str(item.get("input_hash", "") or "")
+            if not doc_hash or not candidate_id or not input_hash:
+                continue
+            try:
+                candidate_block = DocumentBlock(
+                    id=candidate_id,
+                    page_num=int(item.get("page_num", -1) or -1),
+                    block_type=BlockType.FORMULA,
+                    content=str(item.get("text", "") or ""),
+                    bbox=tuple(float(value) for value in item.get("bbox", (0, 0, 0, 0))),  # type: ignore[union-attr]
+                )
+            except Exception:
+                candidate_block = None
+            if candidate_block is not None:
+                self._store.enqueue_round_records(
+                    doc_hash,
+                    filepath,
+                    scan_round,
+                    "block",
+                    [candidate_block],
+                )
+            self._store.put_recognition_result(
+                doc_hash=doc_hash,
+                candidate_id=candidate_id,
+                stage="pdf_structure",
+                model=str(item.get("model", "pymupdf_born_digital_structure") or "pymupdf_born_digital_structure"),
+                model_version=str(item.get("model_version", "pymupdf_rawdict_layout_v1") or "pymupdf_rawdict_layout_v1"),
+                preprocess_version=str(item.get("preprocess_version", "glyph-vector-json-v1") or "glyph-vector-json-v1"),
+                input_hash=input_hash,
+                latex=str(item.get("latex", "") or ""),
+                normalized_latex=str(item.get("latex", "") or ""),
+                score=self._optional_float(item.get("score")),
+                warnings=self._string_list(item.get("warnings")),
+                evidence={
+                    "scan_round": scan_round,
+                    "source": "born_digital_pdf_structure",
+                    "page_num": item.get("page_num"),
+                    "bbox": item.get("bbox"),
+                    "text": item.get("text"),
+                    "details": item.get("evidence", {}),
+                },
+                accepted=False,
+            )
+            self._store.mark_round_done(
+                doc_hash,
+                scan_round,
+                "block",
+                candidate_id,
+                {
+                    "stage": "pdf_structure",
+                    "latex": str(item.get("latex", "") or ""),
+                    "input_hash": input_hash,
+                    "model": str(item.get("model", "pymupdf_born_digital_structure") or "pymupdf_born_digital_structure"),
+                    "warnings": self._string_list(item.get("warnings")),
+                },
+            )
         if detected:
             self.formula_blocks_detected.emit(detected)
         pending = len(self._queued_blocks) + len(self._queued_page_nums)
@@ -659,6 +721,13 @@ class _FormulaOcrWorker(QThread):
                     "model": "pix2text-mfr",
                     "scan_round": self._scan_round,
                 })
+            if self._scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value:
+                done.extend(
+                    self._external_tool_candidates(
+                        [(block.id, image) for block, image in zip(image_blocks, images, strict=False)],
+                        image_hashes,
+                    )
+                )
             pending = len(self._blocks) - len(updated)
             self.finished_signal.emit({
                 "doc_hash": self._doc_hash,
@@ -688,6 +757,44 @@ class _FormulaOcrWorker(QThread):
                 ],
             })
 
+    def _external_tool_candidates(
+        self,
+        images: list[tuple[str, bytes]],
+        image_hashes: list[str],
+    ) -> list[dict[str, object]]:
+        if not images:
+            return []
+        hash_by_id = {
+            candidate_id: image_hash
+            for (candidate_id, _), image_hash in zip(images, image_hashes, strict=False)
+        }
+        started = time.perf_counter()
+        try:
+            candidates = ExternalFormulaToolRunner().recognize_images(images)
+        except Exception as exc:
+            _logger.info("外部公式工具候选生成失败: %s", exc)
+            return []
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        done: list[dict[str, object]] = []
+        for candidate in candidates:
+            image_hash = hash_by_id.get(candidate.candidate_id, "")
+            if not image_hash:
+                continue
+            done.append({
+                "block_id": candidate.candidate_id,
+                "latex": candidate.latex,
+                "normalized_latex": candidate.latex,
+                "image_hash": image_hash,
+                "model": candidate.model,
+                "model_version": candidate.model_version,
+                "preprocess_version": candidate.preprocess_version,
+                "score": candidate.score,
+                "duration_ms": candidate.duration_ms or elapsed_ms,
+                "warnings": list(candidate.warnings),
+                "scan_round": self._scan_round,
+            })
+        return done
+
 
 class _FormulaPageScanWorker(QThread):
     """Run MFD on a small page batch to discover scanned/image formulas."""
@@ -715,18 +822,24 @@ class _FormulaPageScanWorker(QThread):
         done_pages: list[int] = []
         failed: list[dict[str, object]] = []
         detected: list[dict[str, object]] = []
+        structure_candidates: list[dict[str, object]] = []
         try:
-            from src.core.formula_detector import Pix2TextMFDDetector
+            from src.core.born_digital_formula_extractor import BornDigitalFormulaStructureExtractor
 
             doc = fitz.open(self._filepath)
-            detector = Pix2TextMFDDetector(
-                dpi=180,
-                max_existing_ocr_blocks=0,
-                max_scanned_ocr_blocks=0,
-                max_existing_uncached_ocr_blocks=0,
-                max_scanned_uncached_ocr_blocks=0,
-                max_mfd_pages=-1,
-            )
+            structure_extractor = BornDigitalFormulaStructureExtractor()
+            detector = None
+            if self._scan_round != FormulaScanRound.PDF_STRUCTURE.value:
+                from src.core.formula_detector import Pix2TextMFDDetector
+
+                detector = Pix2TextMFDDetector(
+                    dpi=180,
+                    max_existing_ocr_blocks=0,
+                    max_scanned_ocr_blocks=0,
+                    max_existing_uncached_ocr_blocks=0,
+                    max_scanned_uncached_ocr_blocks=0,
+                    max_mfd_pages=-1,
+                )
             for page_num in self._page_nums:
                 if self.isInterruptionRequested():
                     break
@@ -734,10 +847,20 @@ class _FormulaPageScanWorker(QThread):
                     failed.append({"page_num": page_num, "error": "page_out_of_range"})
                     continue
                 try:
-                    page_formulas = detector.detect_specific_pages(doc, [page_num])
-                    detected.extend(
-                        self._build_formula_infos(page_num, page_formulas)
+                    structure_candidates.extend(
+                        self._build_structure_candidates(
+                            structure_extractor.extract_page(
+                                doc[page_num],
+                                page_num,
+                                existing_ids={block.id for block in self._blocks},
+                            )
+                        )
                     )
+                    if detector is not None:
+                        page_formulas = detector.detect_specific_pages(doc, [page_num])
+                        detected.extend(
+                            self._build_formula_infos(page_num, page_formulas)
+                        )
                     done_pages.append(page_num)
                 except Exception as exc:
                     failed.append({"page_num": page_num, "error": str(exc)})
@@ -748,6 +871,7 @@ class _FormulaPageScanWorker(QThread):
                 "done_pages": done_pages,
                 "failed": failed,
                 "detected": detected,
+                "structure_candidates": structure_candidates,
             })
         except Exception as exc:
             self.finished_signal.emit({
@@ -760,7 +884,28 @@ class _FormulaPageScanWorker(QThread):
                     if page_num not in done_pages
                 ],
                 "detected": detected,
+                "structure_candidates": structure_candidates,
             })
+
+    @staticmethod
+    def _build_structure_candidates(candidates: list[object]) -> list[dict[str, object]]:
+        items: list[dict[str, object]] = []
+        for candidate in candidates:
+            items.append({
+                "candidate_id": getattr(candidate, "candidate_id", ""),
+                "page_num": getattr(candidate, "page_num", -1),
+                "bbox": getattr(candidate, "bbox", (0, 0, 0, 0)),
+                "text": getattr(candidate, "text", ""),
+                "latex": getattr(candidate, "latex", ""),
+                "score": getattr(candidate, "confidence", None),
+                "input_hash": getattr(candidate, "input_hash", ""),
+                "model": getattr(candidate, "model", "pymupdf_born_digital_structure"),
+                "model_version": getattr(candidate, "model_version", "pymupdf_rawdict_layout_v1"),
+                "preprocess_version": getattr(candidate, "preprocess_version", "glyph-vector-json-v1"),
+                "warnings": list(getattr(candidate, "warnings", ()) or ()),
+                "evidence": getattr(candidate, "evidence", {}),
+            })
+        return items
 
     def _build_formula_infos(
         self,
