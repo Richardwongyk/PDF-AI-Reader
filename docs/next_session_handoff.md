@@ -6,7 +6,7 @@
 
 ## 先读结论
 
-当前主线目标没有完成，不能宣称项目已达标。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、r0 born-digital 结构候选落库、r1 缓存优先队列、r2 显式本地多工具候选 worker、r3 语义复核候选写回、r4 结构图谱批处理第一版，以及 `tools/formula_multiround_pipeline.py` 对 r0-r4 的可审计流水线 smoke/benchmark。没有完成的是：born-digital 公式高精度 LaTeX 还原、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4 语义级图谱质量、r5 增量知识库写回、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
+当前主线目标没有完成，不能宣称项目已达标。今晚目标被明确提高为：不间断运行，公式扫描准确度最终高于 99.9%，建立完整 RAG/知识系统，并在此基础上继续全线优化；未用 Attention/Napkin 大样本、行内公式、数学字体、真实性能和交互闭环证明前，不得标记完成。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、r0 born-digital facts-only 结构候选落库、r1 缓存优先队列、r2 显式本地多工具候选 worker、r3 语义复核候选写回、r4 结构图谱批处理第一版，以及 `tools/formula_multiround_pipeline.py` 对 r0-r4 的可审计流水线 smoke/benchmark。没有完成的是：born-digital 公式高精度 LaTeX 还原、行内公式高覆盖、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4 语义级图谱质量、r5 增量知识库写回、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
@@ -18,7 +18,7 @@
 - 2026-05-24 已重新按独立 worker 思路建立外部工具环境，当前 `conda env list` 显示：
   `pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`。
   这些都是隔离工具环境，不是主程序环境。
-- 当前代码在 `9a02945 Add multi-tool formula candidate pipeline` 后继续推进了多轮流水线：r0 不走 OCR，只写 born-digital PDF 结构候选；r2 通过显式精扫开关调用 Paddle/Pix2Text 等隔离 worker 写未接受候选；r3 可用 mock 或真实 DeepSeek；r4 写结构图谱任务和 artifact。
+- 当前代码在 `6cb0860 Add formula multiround pipeline runner` 后继续推进了候选融合、facts-only r0、行内公式指标和反硬编码 guard：r0 不走 OCR，不默认调用自写 LaTeX 重建器，只写 born-digital PDF facts 候选；r2 通过显式精扫开关调用 Paddle/Pix2Text 等隔离 worker 写未接受候选；r3 可用 mock 或真实 DeepSeek；r4 写结构图谱任务和 artifact。
 - 防休眠脚本仍应检查，不要假设一定有效。脚本在 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`。
 - 当前工作树必须以 `git status --short` 为准。不要随手回退，也不要把 `测试资料/`、日志、缓存、临时 benchmark 输出提交。
 
@@ -35,6 +35,7 @@
 明确禁止：
 
 - 不要用样本特化正则、固定词表、一次性启发式函数伪装公式识别。
+- 验收时必须检查生产公式路径是否出现样本特化词表、论文样本正则、手写修复链或默认自写 LaTeX 重建器。
 - born-digital PDF 的公式默认不走 OCR；只有图片、扫描、无文本层、乱码、缺失映射、低置信或用户显式精扫才进入 OCR/MFR。
 - 不要把重工具混进主程序环境或 UI 热路径。
 - 不要提交额外署名、来源标记、生成工具署名、日志、缓存、测试资料、临时产物。
@@ -84,7 +85,7 @@
 - 已有 `formula_recognition_results` 候选结果表，记录 stage、model、model_version、preprocess_version、input_hash、latex、score、warnings/evidence 和 accepted。
 - 已有 accepted 唯一性：同一候选当前只允许一个 accepted 结果。
 - 导入后会把页级结构扫描、需要 OCR 的公式块、已解析公式块的 r3 复核任务写入队列。
-- r0 页面扫描当前只走 born-digital PDF 结构事实，使用 `BornDigitalFormulaExtractor` 写 `stage=pdf_structure` 的未接受候选，不初始化 OCR/MFR。
+- r0 页面扫描当前只走 born-digital PDF 结构事实，使用 `BornDigitalFormulaStructureExtractor` 写 `stage=pdf_structure` 的未接受候选，不初始化 OCR/MFR，不默认调用自写 `PdfFormulaSemanticReconstructor` 生成 LaTeX。
 - r0 低置信结构候选会排入 `r2_local_high_precision` 待复核任务；这只是持久化待办，不会在默认阅读路径启动重模型。
 - r2 本地高精度轮通过 `ExternalFormulaToolRunner` + `tools/formula_tool_worker.py` 调隔离工具环境；当前已有 Paddle Formula 和 Pix2Text 公式图候选接入，结果默认不 accepted。
 - `tools/formula_multiround_pipeline.py` 已把 r0/r1/r2/r3/r4 串到同一条可审计命令行流水线：每轮输出状态、耗时、任务统计、结果表统计；`--reuse-db` 可证明二次打开跳过已完成 r0/r2 输入；`--r2-sample-formulas` 是显式高精度精扫，不是默认 OCR。
@@ -101,13 +102,14 @@
 - 已有 `tools/formula_tool_comparison.py`，用于同一批公式图的外部工具候选对比，并把 r2 候选写入 `formula_recognition_results`。
 - 已有 `tools/formula_index_performance.py`，用于多轮公式索引任务入库性能检测。
 - 已有 `tools/test_log_audit.py`，用于清理和审计日志。
-- 最新相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py` 为 `65 passed`。
+- 最新相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 `142 passed`。
 - Attention 前 6 页真实多轮流水线验证：
-  - 默认 born-digital 路线：r0 处理 6 页约 1.0s，写入 7 个 `pdf_structure:pymupdf_born_digital_structure` 结果；因没有 `needs_ocr` 和低置信 r2 候选，r1/r2 正确跳过；r3 mock 写候选，r4 写结构图谱。
-  - `--reuse-db` 二次运行：r0 `processed_pages=0`、`skipped_completed_pages=6`，证明已完成页跳过。
+  - facts-only 默认 born-digital 路线：r0 处理 6 页约 0.95s，写入 7 个 `pdf_structure:pymupdf_born_digital_structure` 结果；不初始化 OCR/MFR，不使用自写 LaTeX 重建器；r1/r2 正确跳过；r3 mock 写候选，r4 写结构图谱。
+  - `--reuse-db` 二次运行：r0 `processed_pages=0`、`skipped_completed_pages=6`，证明已完成页跳过，整条报告约 1.69s。
   - 显式 `--r2-sample-formulas 1 --auto-local-tools`：r2 对 1 个公式样本调用 `pix2text-mfr`、Paddle Formula、Pix2Text 隔离 worker，写入 3 条 `local_precise` 未接受候选；冷启动约 245s，后续 `--reuse-db` 约 1.2s 跳过同一输入。
   - `--run-cloud-review`：DeepSeek `deepseek/deepseek-v4-pro` r3 单条真实 smoke 通过，约 60s，只写候选 JSON，不覆盖正文。
-  - 多轮流水线报告已接入源 LaTeX 准确率复核：默认 r0/parsed blocks 前 6 页平均 best similarity 约 0.666，near match rate 0.571，仍有低相似样本；显式 r2 单样本最佳平均 similarity 约 0.854，相对 r0 有提升但还没有达到极高准确率或 exact-match 门槛。
+  - 多轮流水线报告已接入源 LaTeX 准确率复核。源码只用于验收，不进入真实用户运行路径。facts-only r0/parsed blocks 前 6 页 average best similarity 约 0.668，near match rate 0.429；inline 指标暴露严重缺口：`inline_weak_match_rate=0.026`、`inline_unmatched_count=75`；显式 r2 单样本最佳平均 similarity 约 0.854，相对 r0 有提升但还没有达到极高准确率或 exact-match 门槛。
+  - `formula_fusion` 已按 bbox/candidate_id 归并 parsed/r0/r2/r3 候选，输出 per-candidate 排名、accepted gate 和 `targeted_r2_queue`；当前 Attention 前 6 页 7 个公式区域 0 个 ready，全部 `needs_more_evidence`。
 - Attention 最新多轮入库性能：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
 - Attention born-digital 前 6 页结构审计：约 0.608s，17816 glyph，unknown glyph 为 0，display region 7 个；仍未达到完整 LaTeX 还原目标。
 
@@ -142,6 +144,7 @@
 
 1. **born-digital 公式还原精度不达目标**
    - 当前结构事实层和审计工具可用，但 LaTeX 还原仍不足。
+   - 行内公式现在单独纳入源码验收：LaTeX 中 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 都算公式；当前 inline 质量远未达标。
    - 关键难点：PDF 通常保存排版后的 glyph/bbox，不保存原 TeX AST。复杂二维结构、源码宏、字体编码、表格/列表误吸、页级源码对齐都未完全解决。
    - 方向：优先复用成熟 PDF/公式结构工具或源码；自写只做中间表示、审计、调度、缓存。
    - 现在每轮必须看 `formula_accuracy.stage_metrics`，不能只看候选数量。r0/r1/r2/r3 必须证明 exact/near/weak/average similarity 逐步提升；未达到门槛的结果只能保留候选，不能写入 accepted 或知识库。

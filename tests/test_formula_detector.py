@@ -377,6 +377,26 @@ def test_document_chunker_wraps_math_font_spans_inline() -> None:
     assert wrapped.endswith(".")
 
 
+def test_document_chunker_wraps_broad_math_font_families_inline() -> None:
+    from src.core.pdf_engine import DocumentChunker
+
+    spans = [
+        {"text": "for", "font": "NimbusRomNo9L-Regu"},
+        {"text": "𝒜", "font": "STIXTwoMath-Regular"},
+        {"text": " and", "font": "NimbusRomNo9L-Regu"},
+        {"text": " x", "font": "LatinModernMath-Regular"},
+        {"text": ", use", "font": "NimbusRomNo9L-Regu"},
+        {"text": " y", "font": "Asana-Math"},
+        {"text": ".", "font": "NimbusRomNo9L-Regu"},
+    ]
+
+    wrapped = DocumentChunker._text_with_inline_math_spans(spans)
+
+    assert r"\(𝒜\)" in wrapped
+    assert r"\(x\)" in wrapped
+    assert r"\(y\)" in wrapped
+
+
 def test_existing_formula_ocr_rejects_long_prose_with_math_symbols() -> None:
     detector = Pix2TextMFDDetector(max_existing_ocr_blocks=2)
     block = DocumentBlock(
@@ -391,6 +411,31 @@ def test_existing_formula_ocr_rejects_long_prose_with_math_symbols() -> None:
     )
 
     assert detector._should_ocr_existing_formula_block(block) is False
+
+
+def test_formula_production_paths_do_not_use_sample_word_gates() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    checked_files = [
+        root / "src/core/formula_detector.py",
+        root / "src/core/born_digital_formula_extractor.py",
+        root / "tools/formula_multiround_pipeline.py",
+    ]
+    banned = ("Attention", "softmax", "FFN", "BLEU", "EN-DE", "EN-FR", "lrate")
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in checked_files)
+
+    assert not any(token in combined for token in banned)
+
+
+def test_r0_structure_extractor_does_not_default_to_handwritten_latex_reconstruction() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src/core/born_digital_formula_extractor.py").read_text(encoding="utf-8")
+
+    assert "PdfFormulaSemanticReconstructor" not in source
+    assert "pymupdf_rawdict_facts_v1" in source
 
 
 def test_normalize_latex_collapses_spaced_text_commands() -> None:
@@ -445,6 +490,28 @@ def test_formula_audit_ignores_latex_line_break_spacing(tmp_path) -> None:
 
     assert display == ["x+y=1"]
     assert inline == []
+
+
+def test_formula_audit_treats_all_latex_math_delimiters_as_formulas(tmp_path) -> None:
+    from tools.formula_latex_audit import _extract_source_formulas
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(
+        r"""
+        \begin{document}
+        inline dollar $x_i$ and inline bracket \(y_j\).
+        display dollar $$a=b$$
+        display bracket \[c=d\]
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+
+    display, inline, _count = _extract_source_formulas(latex_root)
+
+    assert display == ["c=d", "a=b"]
+    assert inline == ["y_j", "x_i"]
 
 
 def test_formula_latex_audit_can_match_display_scope(monkeypatch, tmp_path) -> None:

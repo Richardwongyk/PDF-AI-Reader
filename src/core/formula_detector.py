@@ -306,19 +306,16 @@ class Pix2TextMFDDetector(FormulaDetector):
             return False
         if len(text) > 170 and re.search(r"[.!?]", text):
             return False
-        if re.search(r"\b(?:Layer Type|BLEU|params|steps|EN-DE|EN-FR|dev)\b", text):
-            return False
 
         words = re.findall(r"[A-Za-z]{3,}", text)
         math_markers = sum(text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫")
-        has_math_word = bool(re.search(r"\b(?:softmax|Attention|FFN|sin|cos|log|exp|max|min)\b", text))
-        if len(words) > 8 and not has_math_word:
+        if len(words) > 8:
             return False
         if "=" not in text:
             return False
         if len(words) > 12:
             return False
-        return math_markers >= 2 or has_math_word
+        return math_markers >= 2
 
     @staticmethod
     def _existing_formula_ocr_priority(block: DocumentBlock) -> tuple[int, int, int]:
@@ -328,14 +325,10 @@ class Pix2TextMFDDetector(FormulaDetector):
         text = (block.content or "").strip()
         words = re.findall(r"[A-Za-z]{3,}", text)
         math_markers = sum(text.count(ch) for ch in "=+-*/^_()[]{}∈≤≥×·√∑∫")
-        starts_formula = bool(
-            re.match(r"^(?:[A-Z]{1,4}|[A-Za-z]+\(.*|lrate|PE\s*\()", text)
-        )
-        has_function = bool(re.search(r"\b(?:softmax|Attention|FFN|sin|cos|log|exp|max|min)\b", text))
+        starts_formula = bool(re.match(r"^\s*(?:[A-Za-z]{1,8}|[A-Za-z]\w*\([^)]*\))", text))
         score = 0
         score += 6 if "=" in text else 0
         score += 4 if starts_formula else 0
-        score += 3 if has_function else 0
         score += min(math_markers, 8)
         score -= max(len(words) - 8, 0) * 2
         return (score, -len(words), -len(text))

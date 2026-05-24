@@ -49,6 +49,7 @@ MATH_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
 SOURCE_FORMULA_PATTERNS = [
     re.compile(r"(?<!\\)\\\[(.+?)(?<!\\)\\\]", re.DOTALL),
     re.compile(r"\$\$(.+?)\$\$", re.DOTALL),
+    re.compile(r"(?<!\\)\\\((.+?)(?<!\\)\\\)", re.DOTALL),
     re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", re.DOTALL),
 ]
 LATEX_INCLUDE_RE = re.compile(r"\\(?:input|include)\s*\{([^{}]+)\}")
@@ -93,6 +94,9 @@ class FormulaReport:
     source_unmatched_count: int
     source_near_match_rate: float
     source_weak_match_rate: float
+    inline_source_near_match_rate: float
+    inline_source_weak_match_rate: float
+    inline_source_unmatched_count: int
     average_best_similarity: float
     low_similarity_pdf_formula_count: int
     sample_source_formulas: list[str]
@@ -189,6 +193,7 @@ def _extract_source_formulas_detailed(
         display.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[0].finditer(text))
         display.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[1].finditer(text))
         inline.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[2].finditer(text))
+        inline.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[3].finditer(text))
 
     return SourceFormulaExtraction(
         display=display,
@@ -840,6 +845,11 @@ def _audit_case(
         pdf_formula_texts,
         max_candidates_per_source=max_match_candidates,
     )
+    _, _, inline_similarity_metrics = _best_formula_matches(
+        source_inline,
+        pdf_formula_texts,
+        max_candidates_per_source=max_match_candidates,
+    )
     source_common = {
         cmd for cmd, count in source_commands.items()
         if count >= 2 and cmd not in {r"\label", r"\ref", r"\cite", r"\begin", r"\end"}
@@ -893,6 +903,9 @@ def _audit_case(
         source_unmatched_count=int(similarity_metrics["unmatched"]),
         source_near_match_rate=round(float(similarity_metrics["near_rate"]), 3),
         source_weak_match_rate=round(float(similarity_metrics["weak_rate"]), 3),
+        inline_source_near_match_rate=round(float(inline_similarity_metrics["near_rate"]), 3),
+        inline_source_weak_match_rate=round(float(inline_similarity_metrics["weak_rate"]), 3),
+        inline_source_unmatched_count=int(inline_similarity_metrics["unmatched"]),
         average_best_similarity=round(float(similarity_metrics["average"]), 3),
         low_similarity_pdf_formula_count=len(low_similarity_pdf),
         sample_source_formulas=_sample(source_formulas),

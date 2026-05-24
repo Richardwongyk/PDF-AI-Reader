@@ -14,12 +14,16 @@
 4. r3 用 DeepSeek 等分析模型做语义校对建议，但只写候选，不直接覆盖。
 5. r4/r5 只接收 accepted 高置信结果，增量写入 GraphRAG 和全文知识库。
 
+最终验收目标是公式扫描准确度高于 99.9%、阅读路径极高效、RAG/知识系统完整可用。
+未达到 Attention/Napkin 大样本测试和真实交互闭环前，不得把目标标记为完成。
+LaTeX 源码只用于测试、审计和验收；真实用户运行时不能假设存在源码。
+
 ## 不做什么
 
 明确禁止：
 
 - 不写按论文样本特化的正则、词表、字符串替换链来“修公式”。
-- 不写自研 LaTeX AST 解析器去猜 PDF 中没有证据的结构。
+- 不把自研 LaTeX AST/布局解析器作为默认主路去猜 PDF 中没有证据的结构。
 - 不让 LLM 在缺少 PDF、工具或源码证据时编造公式。
 - 不把 OCR/MFR 作为 born-digital PDF 的默认路径。
 - 不把低置信候选写入正文、RAG、GraphRAG 或 accepted 结果。
@@ -31,6 +35,9 @@
 - PDF 事实抽取和跨工具 evidence 编排。
 - 候选相似度、源码对齐、质量门禁、审计报告。
 - accepted/rejected/revision 状态机和增量写回。
+
+验收时必须同时检查是否违反这些边界：生产公式路径不能出现样本特化词表、
+样本论文正则、一次性手写修复链，默认 r0 不能调用自写 LaTeX 重建器冒充高精度解析。
 
 ## 核心数据模型
 
@@ -116,17 +123,21 @@ FormulaFusionRecord 描述“候选融合结果”，也仍然不是正文。
 
 - 用 MuPDF 读取文本层、glyph、font、bbox、span、line、image、vector。
 - 可选 Poppler/pdfminer 做审计对照。
-- 输出 PDF 结构候选和风险标记。
+- 输出 PDF 结构事实候选和风险标记。r0 默认只保存 PDF facts 文本、bbox、font、
+  vector、diagnostics 和 input hash；高精度 LaTeX 由后续工具/模型候选轮产生。
 
 不做：
 
 - 不 OCR。
 - 不使用样本正则修复公式。
+- 不默认调用项目自写布局 LaTeX 重建器生成 accepted 候选。
 - 不把低相似度结果 accepted。
 
 当前问题：
 
-- Attention 前 6 页 r0 平均 best similarity 约 0.666，仍有表格/正文误吸和二维结构缺失。
+- Attention 前 6 页 facts-only r0 平均 best similarity 约 0.668，display 候选仍有表格/正文误吸和二维结构缺失。
+- 同一报告显示 inline 公式缺口更严重：`inline_weak_match_rate=0.026`，
+  `inline_unmatched_count=75`。行内公式和数学字体必须作为单独门槛。
 - 因此 r0 只能作为事实层和候选层，不能直接作为最终知识库公式。
 
 ### r1: 缓存优先补救层
@@ -221,8 +232,10 @@ r5：
 1. `syntax_valid=true`，且有正确数学定界符。
 2. `input_hash`、`model_version`、`preprocess_version` 可追溯。
 3. `formula_accuracy` 在测试资料上达到高门槛：
-   - `near_match_rate >= 0.95`
-   - `average_best_similarity >= 0.90`
+   - 最终目标：Attention/Napkin 大样本公式准确率 `>= 0.999`
+   - 阶段门槛：`near_match_rate >= 0.95`
+   - 阶段门槛：`inline_near_match_rate` / `inline_weak_match_rate` 必须单独报告并持续提升
+   - 阶段门槛：`average_best_similarity >= 0.90`
    - `low_similarity_candidate_count == 0`
 4. 对 born-digital 公式，候选不得明显背离 r0 glyph/bbox 证据。
 5. 对 r2/r3，若覆盖样本少，不能声称整轮质量提升，只能声称样本提升。
@@ -275,4 +288,3 @@ r5：
 4. 建立 accepted/rejected/revision 表。
 5. r5 accepted 变化后增量写回知识库和 GraphRAG。
 6. 用 Attention/Napkin 大样本跑质量门禁和性能门禁。
-

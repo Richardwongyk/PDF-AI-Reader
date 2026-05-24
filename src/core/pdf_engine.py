@@ -162,7 +162,10 @@ class DocumentChunker:
     # 常见数学字体名称关键词
     _MATH_FONT_KEYWORDS: list[str] = [
         "CM", "Math", "Symbol", "Euler", "Cambria Math",
-        "STIX", "XITS", "TeX", "Latin Modern Math",
+        "STIX", "XITS", "TeX", "Latin Modern Math", "Asana",
+        "Fira Math", "Libertinus Math", "GFS Neohellenic Math",
+        "KpMath", "Minion Math", "New Computer Modern Math",
+        "Noto Sans Math", "Noto Serif Math", "TeX Gyre",
     ]
 
     def __init__(
@@ -446,10 +449,7 @@ class DocumentChunker:
         if not text.strip():
             return False
         lowered = font.lower()
-        return any(
-            keyword in lowered
-            for keyword in ("math", "cmmi", "cmsy", "symbol", "stix", "xits", "euler")
-        )
+        return any(keyword.lower() in lowered for keyword in DocumentChunker._MATH_FONT_KEYWORDS)
 
     @staticmethod
     def _detect_columns(blocks: list[DocumentBlock]) -> list[list[DocumentBlock]]:

@@ -300,6 +300,155 @@ def test_formula_accuracy_report_compares_each_round_to_source(tmp_path) -> None
     assert report["monotonic"]["checked"] is True
 
 
+def test_formula_fusion_report_ranks_candidates_and_targets_low_similarity(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+    from src.app.formula_index_store import FormulaIndexStore
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(
+        r"""
+        \begin{document}
+        $$\alpha+\beta$$
+        $$\frac{a}{b}$$
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+    case = type("Case", (), {"name": "fake", "pdf": Path("fake.pdf"), "latex_root": latex_root})()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    blocks = [
+        DocumentBlock(
+            id="good",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content=r"$$plain text noise$$",
+            bbox=(0, 0, 10, 10),
+        ),
+        DocumentBlock(
+            id="needs_r2",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content=r"$$unrelated words$$",
+            bbox=(0, 20, 10, 30),
+        ),
+    ]
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="good",
+        stage="local_precise",
+        model="fake_tool",
+        model_version="v1",
+        preprocess_version="png",
+        input_hash="image-hash",
+        latex=r"\frac{a}{b}",
+        normalized_latex=r"\frac{a}{b}",
+    )
+
+    report = pipe._formula_fusion_report(case, store, "doc-1", blocks, max_pages=0)
+
+    rows = {row["candidate_id"]: row for row in report["candidate_rows"]}
+    assert rows["good"]["best_stage"] == "local_precise"
+    assert rows["good"]["has_local_precise"] is True
+    assert rows["good"]["best_similarity"] >= 0.9
+    assert rows["needs_r2"]["decision"] == "needs_more_evidence"
+    assert report["targeted_r2_queue"][0]["candidate_id"] == "needs_r2"
+
+
+def test_formula_fusion_report_merges_same_bbox_candidates(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+    from src.app.formula_index_store import FormulaIndexStore
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(
+        r"$$E=mc^2$$",
+        encoding="utf-8",
+    )
+    case = type("Case", (), {"name": "fake", "pdf": Path("fake.pdf"), "latex_root": latex_root})()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content=r"$$E=mc^2$$",
+            bbox=(10.0, 20.0, 110.0, 50.0),
+        ),
+    ]
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_r0_0",
+        stage="pdf_structure",
+        model="pymupdf",
+        model_version="v1",
+        preprocess_version="glyph",
+        input_hash="glyph-hash",
+        latex=r"E=mc^2",
+        normalized_latex=r"E=mc^2",
+        evidence={"page_num": 0, "bbox": [10.0, 20.0, 110.0, 50.0]},
+    )
+
+    report = pipe._formula_fusion_report(case, store, "doc-1", blocks, max_pages=0)
+
+    assert report["summary"]["candidate_count"] == 1
+    row = report["candidate_rows"][0]
+    assert row["member_candidate_ids"] == ["p0_b0", "p0_r0_0"]
+    assert row["stages"] == ["parsed_blocks", "pdf_structure"]
+
+
+def test_formula_fusion_report_merges_later_candidate_id_members(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+    from src.app.formula_index_store import FormulaIndexStore
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(r"$$E=mc^2$$", encoding="utf-8")
+    case = type("Case", (), {"name": "fake", "pdf": Path("fake.pdf"), "latex_root": latex_root})()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content=r"$$E=mc^2$$",
+            bbox=(10.0, 20.0, 110.0, 50.0),
+        ),
+    ]
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_r0_0",
+        stage="pdf_structure",
+        model="pymupdf",
+        model_version="v1",
+        preprocess_version="glyph",
+        input_hash="glyph-hash",
+        latex=r"E=mc^2",
+        normalized_latex=r"E=mc^2",
+        evidence={"page_num": 0, "bbox": [10.0, 20.0, 110.0, 50.0]},
+    )
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_r0_0",
+        stage="cloud_semantic",
+        model="deepseek",
+        model_version="v1",
+        preprocess_version="prompt",
+        input_hash="review-hash",
+        latex=r"E=mc^2",
+        normalized_latex=r"E=mc^2",
+        score=0.95,
+        evidence={"reason": "same stored candidate id"},
+    )
+
+    report = pipe._formula_fusion_report(case, store, "doc-1", blocks, max_pages=0)
+
+    assert report["summary"]["candidate_count"] == 1
+    row = report["candidate_rows"][0]
+    assert row["member_candidate_ids"] == ["p0_b0", "p0_r0_0"]
+    assert row["stages"] == ["cloud_semantic", "parsed_blocks", "pdf_structure"]
+
+
 class _Signal:
     def __init__(self) -> None:
         self._callbacks: list[object] = []

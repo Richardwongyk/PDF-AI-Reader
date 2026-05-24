@@ -39,6 +39,8 @@ from tools.formula_latex_audit import (
     _best_formula_matches,
     _cases,
     _extract_source_formulas_detailed,
+    _formula_similarity,
+    _normalize_formula_for_match,
 )
 
 
@@ -68,6 +70,7 @@ class MultiRoundPipelineReport:
     graph_jobs: dict[str, int]
     recognition_results: dict[str, int]
     formula_accuracy: dict[str, object]
+    formula_fusion: dict[str, object]
 
 
 class _MockReviewClient(BaseLLMClient):
@@ -109,7 +112,7 @@ def _select_cases(case_name: str) -> list[Any]:
 def _parse_blocks(pdf: Path, max_pages: int, start_page: int) -> tuple[int, list[DocumentBlock]]:
     chunker = DocumentChunker(
         enable_born_digital_math=True,
-        enable_born_digital_semantics=True,
+        enable_born_digital_semantics=False,
         enable_legacy_formula_heuristic=False,
     )
     blocks: list[DocumentBlock] = []
@@ -175,6 +178,13 @@ def run_pipeline_case(
         formula_blocks,
         max_pages=max_pages,
     )
+    formula_fusion = _formula_fusion_report(
+        case,
+        formula_store,
+        doc_hash,
+        formula_blocks,
+        max_pages=max_pages,
+    )
     elapsed_sec = time.perf_counter() - started_total
     status = "ok" if all(report.status in {"done", "skipped"} for report in rounds) else "partial"
     return MultiRoundPipelineReport(
@@ -193,6 +203,7 @@ def run_pipeline_case(
         graph_jobs=graph_store.counts(doc_hash),
         recognition_results=recognition_results,
         formula_accuracy=formula_accuracy,
+        formula_fusion=formula_fusion,
     )
 
 
@@ -570,7 +581,7 @@ def _formula_accuracy_report(
         groups["cloud_semantic:suggested_latex"] = r3_suggestions
 
     stage_metrics = [
-        _accuracy_for_group(name, latex_values, source_formulas)
+        _accuracy_for_group(name, latex_values, source_formulas, inline_sources=extraction.inline)
         for name, latex_values in sorted(groups.items())
     ]
     stage_metrics = [item for item in stage_metrics if item["candidate_count"] > 0]
@@ -592,12 +603,376 @@ def _formula_accuracy_report(
     }
 
 
+def _formula_fusion_report(
+    case: Any,
+    store: FormulaIndexStore,
+    doc_hash: str,
+    formula_blocks: list[DocumentBlock],
+    max_pages: int,
+) -> dict[str, object]:
+    raw_latex_root = getattr(case, "latex_root", None)
+    source_formulas: list[str] = []
+    source_available = bool(raw_latex_root and Path(raw_latex_root).exists())
+    if source_available:
+        extraction = _extract_source_formulas_detailed(
+            Path(raw_latex_root),
+            pdf=Path(getattr(case, "pdf")),
+            max_pages=max(0, int(max_pages)),
+        )
+        source_formulas = extraction.display + extraction.inline
+
+    candidates_by_id: dict[str, list[dict[str, object]]] = {}
+    for block in formula_blocks:
+        latex = str(block.content or "").strip()
+        if not latex:
+            continue
+        _add_fusion_candidate(
+            candidates_by_id,
+            _fusion_candidate(
+                candidate_id=block.id,
+                stage="parsed_blocks",
+                model="document_chunker",
+                latex=latex,
+                source_formulas=source_formulas,
+                score=None,
+                warnings=[],
+                accepted=False,
+                evidence={"page_num": block.page_num, "bbox": list(block.bbox)},
+            )
+        )
+
+    for record in store.list_recognition_results(doc_hash, limit=10000):
+        if not str(record.latex or "").strip():
+            continue
+        _add_fusion_candidate(
+            candidates_by_id,
+            _fusion_candidate(
+                candidate_id=record.candidate_id,
+                stage=record.stage,
+                model=record.model,
+                latex=record.latex,
+                source_formulas=source_formulas,
+                score=record.score,
+                warnings=list(record.warnings),
+                accepted=record.accepted,
+                evidence=record.evidence,
+            )
+        )
+
+    for record in store.list_round_records(
+        doc_hash,
+        statuses={"done"},
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        limit=10000,
+    ):
+        latex = str(record.result_json.get("suggested_latex", "") or "").strip()
+        if not latex:
+            continue
+        _add_fusion_candidate(
+            candidates_by_id,
+            _fusion_candidate(
+                candidate_id=record.target_id,
+                stage="cloud_semantic",
+                model="suggested_latex",
+                latex=latex,
+                source_formulas=source_formulas,
+                score=_optional_float(record.result_json.get("confidence")),
+                warnings=[str(item) for item in record.result_json.get("risks", []) if str(item)]
+                if isinstance(record.result_json.get("risks"), list)
+                else [],
+                accepted=False,
+                evidence={"reason": record.result_json.get("reason", "")},
+            )
+        )
+
+    rows = [
+        _fusion_row(candidate_id, candidates)
+        for candidate_id, candidates in sorted(candidates_by_id.items())
+    ]
+    rows = [row for row in rows if row["candidate_count"] > 0]
+    accepted_ready = [row for row in rows if row["decision"] == "ready_for_manual_accept"]
+    needs_more = [row for row in rows if row["decision"] == "needs_more_evidence"]
+    insufficient_r2 = [
+        row for row in rows
+        if row["decision"] != "ready_for_manual_accept"
+        and float(row["best_similarity"]) < 0.90
+    ]
+    return {
+        "available": bool(rows),
+        "source_available": source_available,
+        "candidate_rows": rows,
+        "summary": {
+            "candidate_count": len(rows),
+            "ready_for_manual_accept": len(accepted_ready),
+            "needs_more_evidence": len(needs_more),
+            "missing_or_insufficient_r2": len(insufficient_r2),
+            "average_best_similarity": round(
+                sum(float(row["best_similarity"]) for row in rows) / len(rows),
+                3,
+            ) if rows else 0.0,
+        },
+        "targeted_r2_queue": [
+            {
+                "candidate_id": row["candidate_id"],
+                "reason": (
+                    "low_similarity_after_local_precise"
+                    if row["has_local_precise"]
+                    else "low_similarity_without_local_precise_candidate"
+                ),
+                "best_similarity": row["best_similarity"],
+                "best_stage": row["best_stage"],
+            }
+            for row in insufficient_r2[:20]
+        ],
+        "note": (
+            "Fusion ranks existing candidates only. It does not rewrite LaTeX. "
+            "Rows below gate remain candidate-only and must not update正文/RAG/GraphRAG."
+        ),
+    }
+
+
+def _add_fusion_candidate(
+    groups: dict[str, list[dict[str, object]]],
+    candidate: dict[str, object],
+) -> None:
+    existing_group_id = str(candidate.get("candidate_id", ""))
+    group_id = _matching_fusion_group(groups, candidate)
+    if existing_group_id in groups and existing_group_id != group_id:
+        groups.setdefault(group_id, []).extend(groups.pop(existing_group_id))
+    groups.setdefault(group_id, []).append(candidate)
+
+
+def _matching_fusion_group(
+    groups: dict[str, list[dict[str, object]]],
+    candidate: dict[str, object],
+) -> str:
+    candidate_id = str(candidate.get("candidate_id", ""))
+    page_num = _candidate_page(candidate)
+    bbox = _candidate_bbox(candidate)
+    if page_num is not None and bbox is not None:
+        for group_id, existing_items in groups.items():
+            for existing in existing_items:
+                existing_bbox = _candidate_bbox(existing)
+                if existing_bbox is None or _candidate_page(existing) != page_num:
+                    continue
+                if _bbox_iou(bbox, existing_bbox) >= 0.80:
+                    return group_id
+    if candidate_id in groups:
+        return candidate_id
+    for group_id, existing_items in groups.items():
+        if any(str(existing.get("candidate_id", "")) == candidate_id for existing in existing_items):
+            return group_id
+    return candidate_id
+
+
+def _fusion_candidate(
+    *,
+    candidate_id: str,
+    stage: str,
+    model: str,
+    latex: str,
+    source_formulas: list[str],
+    score: float | None,
+    warnings: list[str],
+    accepted: bool,
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    similarity, best_source = _best_source_similarity(latex, source_formulas)
+    return {
+        "candidate_id": candidate_id,
+        "stage": stage,
+        "model": model,
+        "latex": " ".join(str(latex or "").split())[:260],
+        "source_similarity": similarity,
+        "best_source": best_source,
+        "score": score,
+        "warnings": warnings,
+        "accepted": accepted,
+        "evidence": evidence,
+    }
+
+
+def _fusion_row(candidate_id: str, candidates: list[dict[str, object]]) -> dict[str, object]:
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("source_similarity", 0.0) or 0.0),
+            0 if item.get("stage") == "parsed_blocks" else 1,
+            float(item.get("score", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    best = ranked[0] if ranked else {}
+    stages = sorted({str(item.get("stage", "")) for item in candidates if str(item.get("stage", ""))})
+    local_precise = [item for item in candidates if str(item.get("stage", "")) == "local_precise"]
+    member_candidate_ids = sorted(
+        {str(item.get("candidate_id", "")) for item in candidates if str(item.get("candidate_id", ""))}
+    )
+    model_outputs = {
+        f"{item.get('stage')}:{item.get('model')}": str(item.get("latex", ""))
+        for item in candidates
+    }
+    agreement = _candidate_agreement([str(item.get("latex", "")) for item in candidates])
+    best_similarity = float(best.get("source_similarity", 0.0) or 0.0)
+    warnings = [
+        warning
+        for item in candidates
+        for warning in item.get("warnings", [])
+        if str(warning)
+    ]
+    gate = _fusion_gate(
+        best_similarity=best_similarity,
+        agreement=agreement,
+        warnings=warnings,
+        has_local_precise=bool(local_precise),
+    )
+    if gate["passed"]:
+        decision = "ready_for_manual_accept"
+    elif best_similarity < 0.90 or not local_precise:
+        decision = "needs_more_evidence"
+    else:
+        decision = "candidate_only"
+    return {
+        "candidate_id": candidate_id,
+        "member_candidate_ids": member_candidate_ids,
+        "candidate_count": len(candidates),
+        "stages": stages,
+        "models": sorted(model_outputs),
+        "best_stage": str(best.get("stage", "")),
+        "best_model": str(best.get("model", "")),
+        "best_latex": str(best.get("latex", "")),
+        "best_similarity": round(best_similarity, 3),
+        "best_source": str(best.get("best_source", "")),
+        "agreement_score": agreement,
+        "has_local_precise": bool(local_precise),
+        "accepted_gate": gate,
+        "decision": decision,
+        "ranked_candidates": ranked[:6],
+    }
+
+
+def _fusion_gate(
+    *,
+    best_similarity: float,
+    agreement: float,
+    warnings: list[str],
+    has_local_precise: bool,
+) -> dict[str, object]:
+    reasons: list[str] = []
+    if best_similarity < 0.90:
+        reasons.append(f"best_similarity {best_similarity:.3f} < 0.900")
+    if agreement < 0.75:
+        reasons.append(f"agreement_score {agreement:.3f} < 0.750")
+    if not has_local_precise:
+        reasons.append("missing_local_precise_candidate")
+    high_risk_warnings = [
+        warning for warning in warnings
+        if any(marker in str(warning) for marker in ("failed", "empty", "low_confidence", "prose_like", "table"))
+    ]
+    if high_risk_warnings:
+        reasons.append("high_risk_warnings_present")
+    return {
+        "passed": not reasons,
+        "reasons": reasons,
+        "thresholds": {
+            "best_similarity": 0.90,
+            "agreement_score": 0.75,
+            "requires_local_precise": True,
+        },
+    }
+
+
+def _candidate_agreement(latex_values: list[str]) -> float:
+    values = _unique_nonempty(latex_values)
+    if len(values) <= 1:
+        return 1.0 if values else 0.0
+    normalized = [_normalize_formula_for_match(value) for value in values]
+    scores: list[float] = []
+    for index, left in enumerate(normalized):
+        for right in normalized[index + 1:]:
+            if not left or not right:
+                continue
+            scores.append(_formula_similarity(left, right))
+    return round(sum(scores) / len(scores), 3) if scores else 0.0
+
+
+def _best_source_similarity(latex: str, source_formulas: list[str]) -> tuple[float, str]:
+    normalized = _normalize_formula_for_match(latex)
+    if not normalized or not source_formulas:
+        return 0.0, ""
+    best_score = 0.0
+    best_source = ""
+    for source in source_formulas:
+        source_norm = _normalize_formula_for_match(source)
+        if not source_norm:
+            continue
+        score = _formula_similarity(normalized, source_norm)
+        if score > best_score:
+            best_score = score
+            best_source = source
+    return round(best_score, 3), " ".join(best_source.split())[:260]
+
+
+def _candidate_page(candidate: dict[str, object]) -> int | None:
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    page_num = evidence.get("page_num")
+    if isinstance(page_num, int):
+        return page_num
+    try:
+        return int(page_num) if page_num is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidate_bbox(candidate: dict[str, object]) -> tuple[float, float, float, float] | None:
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    bbox = evidence.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        left, top, right, bottom = (float(value) for value in bbox)
+    except (TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _bbox_iou(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    left_area = _bbox_area(left)
+    right_area = _bbox_area(right)
+    if left_area <= 0 or right_area <= 0:
+        return 0.0
+    ix0 = max(left[0], right[0])
+    iy0 = max(left[1], right[1])
+    ix1 = min(left[2], right[2])
+    iy1 = min(left[3], right[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    return intersection / (left_area + right_area - intersection)
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
 def _accuracy_for_group(
     group: str,
     candidates: list[str],
     source_formulas: list[str],
+    *,
+    inline_sources: list[str] | None = None,
 ) -> dict[str, object]:
     unique_candidates = _unique_nonempty(candidates)
+    inline_sources = inline_sources or []
     if not unique_candidates or not source_formulas:
         return {
             "group": group,
@@ -605,6 +980,9 @@ def _accuracy_for_group(
             "exact_match_rate": 0.0,
             "near_match_rate": 0.0,
             "weak_match_rate": 0.0,
+            "inline_near_match_rate": 0.0,
+            "inline_weak_match_rate": 0.0,
+            "inline_unmatched_count": len(inline_sources),
             "average_best_similarity": 0.0,
             "low_similarity_candidate_count": len(unique_candidates),
             "sample_low_similarity": [],
@@ -613,6 +991,12 @@ def _accuracy_for_group(
         unique_candidates,
         source_formulas,
         max_sources=len(unique_candidates),
+        max_candidates_per_source=80,
+    )
+    _, _, inline_metrics = _best_formula_matches(
+        inline_sources,
+        unique_candidates,
+        max_sources=len(inline_sources),
         max_candidates_per_source=80,
     )
     low_similarity = [
@@ -634,6 +1018,9 @@ def _accuracy_for_group(
         "exact_match_rate": round(int(metrics["exact"]) / len(unique_candidates), 3),
         "near_match_rate": round(float(metrics["near_rate"]), 3),
         "weak_match_rate": round(float(metrics["weak_rate"]), 3),
+        "inline_near_match_rate": round(float(inline_metrics["near_rate"]), 3),
+        "inline_weak_match_rate": round(float(inline_metrics["weak_rate"]), 3),
+        "inline_unmatched_count": int(inline_metrics["unmatched"]),
         "average_best_similarity": round(float(metrics["average"]), 3),
         "low_similarity_candidate_count": len(low_similarity),
         "sample_low_similarity": low_similarity[:5],

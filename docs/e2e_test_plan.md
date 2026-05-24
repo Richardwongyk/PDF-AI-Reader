@@ -74,15 +74,18 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 多轮公式解析必须覆盖 r0/r1/r2/r3/r4/r5 的设计边界：每轮落库、输入 hash 跳过、低置信只写候选、r3 不覆盖正文、GraphRAG 不阻塞阅读。
 - `tools/formula_multiround_pipeline.py` 默认路径必须证明 born-digital PDF 不进入 OCR/MFR；显式 r2 样本路径必须证明多工具候选只写 `local_precise` 未接受结果；`--reuse-db` 必须证明同一输入跳过。
 - 多轮公式流水线必须输出 `formula_accuracy.stage_metrics`，按源 LaTeX 对照每个 stage/model 的 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 的准确率应递增，否则本轮只能算候选探索，不能 accepted。
+- 源 LaTeX 只用于测试、审计和验收；真实用户运行路径不得依赖源码。源码中 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 包裹内容都算公式，其中行内公式必须单独统计。
+- 每次公式验收必须同时检查是否违反“禁止造轮子/禁止硬编码”：生产公式路径不能出现样本特化词表、论文样本正则、一次性手写修复链，默认 r0 不能调用自写 LaTeX 重建器冒充高精度解析。
 - r3 语义复核测试必须证明云端修正只写候选 JSON，不覆盖原始公式块；后台 QThread smoke 必须通过；真实 DeepSeek 调用作为可选 smoke test 单独运行，不能进入默认导入热路径。
 
 公式审计门槛：
 
 - 公式审计报告需记录 `recovered_common_source_commands`、`common_source_command_recall`、`source_near_match_rate`、`source_weak_match_rate`、`average_best_similarity`、`low_similarity_pdf_formula_count`，用于量化源码常见命令和源码公式在 PDF 抽取/MFR 后的恢复情况。
+- 多轮公式报告还必须记录 `inline_near_match_rate`、`inline_weak_match_rate`、`inline_unmatched_count`。小的行内公式、变量、上下标和数学字体如果丢失，应视为公式质量失败。
 - 审计必须同时输出低相似 PDF 公式样本和未匹配源码公式样本，后续用它们对比 Pix2Text、Paddle PP-FormulaNet_plus、UniMERNet 等后端的真实提升。
 - 审计默认使用 token 倒排索引和每公式 60 个候选做快速对比；需要更慢的严格对比时提高 `--max-match-candidates`。
 - 默认 `--quality-gate` 阈值：`common_source_command_recall >= 0.35`、`source_weak_match_rate >= 0.35`、`low_similarity_pdf_rate <= 0.60`。
-- 当前 no-MFD baseline 不满足公式质量门槛，门禁用于防止把低质量公式识别误判为已完成。
+- 最终公式准确率目标为 `>= 99.9%`。当前 no-MFD / facts-only baseline 不满足公式质量门槛，门禁用于防止把低质量公式识别误判为已完成。
 
 后续加强门槛：
 
@@ -132,10 +135,12 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 2026-05-24 最新多工具候选状态：
 
 - r0 born-digital 页面扫描已经只写 PDF 结构候选，不加载 OCR/MFR。
+- r0 facts-only 页面扫描不默认调用自写 LaTeX 重建器；它只保存 PDF 文本层、glyph/font/bbox/vector、diagnostics、input hash 和未接受候选。
 - `formula_recognition_results` 已记录结构候选、本地工具候选和 accepted 状态；同一候选 accepted 唯一性已有测试。
 - r2 已通过外部 JSON worker 接 Paddle Formula 与 Pix2Text，输出默认未接受；后续 E2E/审计必须验证这些候选不会覆盖正文。
 - `tools/formula_tool_comparison.py` 已能对同一批公式图运行隔离工具、计算源码相似度、记录耗时/warnings，并把 r2 候选落库；`--auto-local-tools` 可显式发现当前机器上的 Paddle/Pix2Text 隔离环境。
 - `tools/formula_multiround_pipeline.py` 已能在 Attention 前 6 页跑通 r0/r1/r2/r3/r4：默认 born-digital 路线 r1/r2 正确跳过，显式 r2 单样本调用 `pix2text-mfr`、Paddle Formula、Pix2Text 三类候选，真实 DeepSeek r3 单条 smoke 通过。
-- 当前源 LaTeX 准确率复核显示：Attention 前 6 页 r0/parsed blocks 平均 best similarity 约 0.666、near match rate 0.571；显式 r2 单样本最佳平均 similarity 约 0.854，有提升但远未达到极高准确率或 exact-match 目标。
+- 当前源 LaTeX 准确率复核显示：Attention 前 6 页 facts-only r0/parsed blocks 平均 best similarity 约 0.668、near match rate 0.429；inline 公式 `inline_weak_match_rate=0.026`、`inline_unmatched_count=75`，远未达标；显式 r2 单样本最佳平均 similarity 约 0.854，有提升但远未达到极高准确率或 exact-match 目标。
+- `formula_fusion` 当前能按 bbox/candidate_id 合并 parsed/r0/r2/r3 候选，输出 per-candidate 排名和定向 r2 队列；Attention 前 6 页 facts-only smoke 为 7 个区域、0 个 ready、7 个 `needs_more_evidence`。
 - 显式 r2 单样本首轮冷启动约 245s，复用 DB 后约 1.2s 跳过；后续必须优化批处理、常驻 worker、模型缓存和超时。
-- 最新相关单元测试组合为 65 passed；正式交付前必须重跑 Attention/Napkin 闭环。
+- 最新相关单元测试组合为 142 passed；正式交付前必须重跑 Attention/Napkin 闭环。

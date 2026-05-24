@@ -39,15 +39,15 @@
 4. 继续验证外部工具：MinerU 新模型、Paddle Formula、Pix2Text 已有 smoke；PEK/UniMERNet 和旧 magic-pdf 仍要补齐或明确淘汰。
 5. 继续推进全文 RAG/GraphRAG：默认秒级 FTS/RAG 可用，DeepSeek 分析回答和图谱抽取异步增强。
 
-2026-05-24 最新实现检查点：
+2026-05-25 最新实现检查点：
 
-- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`，并继续完成未提交的多轮流水线收口：异步公式轮次入队、公式识别候选表、accepted 唯一性、r0 born-digital 结构候选落库、r2 外部多工具候选 worker、r3 真实/模拟语义复核、r4 结构图谱批处理。
-- r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR；r2 只有低置信候选或显式 `--r2-sample-formulas` 精扫才通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
+- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`、`6cb0860`，并继续完成候选融合、facts-only r0、行内公式指标和反硬编码测试，待本轮提交。
+- r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR，不默认调用自写 LaTeX 重建器；r2 只有低置信候选或显式 `--r2-sample-formulas` 精扫才通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
 - 新增 `tools/formula_multiround_pipeline.py`：可跑 r0-r4 状态、任务统计、识别结果统计、`--reuse-db` 跳过验证、显式 r2 多工具、可选 DeepSeek r3 smoke。
-- 多轮流水线已接入源 LaTeX 准确率复核：每个 stage/model 输出 exact/near/weak/average similarity 和低相似候选；Attention 前 6 页 r0 平均约 0.666，显式 r2 单样本最佳约 0.854，有提升但远未达到极高准确率。
-- 新增 `docs/formula_multitool_fusion_design.md`：明确多工具潜力要通过候选级 fusion、coverage-comparable 检查、accepted 门禁和 r5 增量写回挖掘；禁止手写硬编码公式解析规则。
-- 相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py` 为 65 passed。
-- Attention 前 6 页真实验证：默认 r0 约 1.0s 写入 7 个 born-digital 结构公式候选，r1/r2 正确跳过；`--reuse-db` 二次 r0 跳过 6 页；显式 r2 多工具单样本写入 `pix2text-mfr`、Paddle Formula、Pix2Text 三类候选但冷启动约 245s，复用后约 1.2s；真实 DeepSeek r3 单条约 60s。
+- 多轮流水线已接入源 LaTeX 准确率复核。源码只用于测试/验收，真实用户运行路径不能依赖源码；LaTeX 中 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 包裹内容都算公式。每个 stage/model 输出 exact/near/weak/average similarity、inline 指标和低相似候选；Attention 前 6 页 facts-only r0 平均约 0.668、near match 0.429、`inline_weak_match_rate=0.026`，显式 r2 单样本最佳约 0.854，有提升但远未达到 99.9% 最终目标。
+- 新增/更新 `docs/formula_multitool_fusion_design.md`：明确多工具潜力要通过候选级 fusion、coverage-comparable 检查、accepted 门禁和 r5 增量写回挖掘；禁止手写硬编码公式解析规则；每次验收必须检查生产路径无样本词表/正则/手写修复链。
+- 相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 142 passed。
+- Attention 前 6 页真实验证：facts-only 默认 r0 约 0.95s 写入 7 个 born-digital 结构公式候选，r1/r2 正确跳过；`--reuse-db` 二次 r0 `processed_pages=0`、`skipped_completed_pages=6`；fusion 合并为 7 个公式区域，0 个 ready，全部 `needs_more_evidence`；显式 r2 多工具单样本写入 `pix2text-mfr`、Paddle Formula、Pix2Text 三类候选但冷启动约 245s，复用后约 1.2s；真实 DeepSeek r3 单条约 60s。
 - Attention 多轮入库最新基准：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
 - 工具 smoke：MinerU 3.1.15 本地新模型 Attention 单页跑通；Paddle Formula/Pix2Text 单张公式图 worker 跑通但质量仍只能候选；magic-pdf 缺旧权重；PEK/UniMERNet 未跑通。
 
