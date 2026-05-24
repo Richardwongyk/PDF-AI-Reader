@@ -360,21 +360,26 @@ def test_document_chunker_wraps_math_font_spans_inline() -> None:
     from src.core.pdf_engine import DocumentChunker
 
     spans = [
-        {"text": "dimension", "font": "NimbusRomNo9L-Regu"},
-        {"text": " d", "font": "CMMI10"},
-        {"text": "k", "font": "CMMI7"},
-        {"text": ", and apply", "font": "NimbusRomNo9L-Regu"},
-        {"text": "√", "font": "CMSY10"},
-        {"text": "d", "font": "CMMI10"},
-        {"text": "k", "font": "CMMI7"},
-        {"text": ".", "font": "NimbusRomNo9L-Regu"},
+        {"text": "dimension", "font": "NimbusRomNo9L-Regu", "size": 10.0, "bbox": (0, 0, 40, 10)},
+        {"text": " d", "font": "CMMI10", "size": 10.0, "bbox": (40, 0, 47, 10)},
+        {"text": "k", "font": "CMMI7", "size": 7.0, "bbox": (47, 4, 50, 11)},
+        {"text": ", and apply", "font": "NimbusRomNo9L-Regu", "size": 10.0, "bbox": (50, 0, 90, 10)},
+        {"text": "√", "font": "CMSY10", "size": 10.0, "bbox": (90, 0, 96, 10)},
+        {"text": "d", "font": "CMMI10", "size": 10.0, "bbox": (96, 0, 101, 10)},
+        {"text": "k", "font": "CMMI7", "size": 7.0, "bbox": (101, 4, 104, 11)},
+        {"text": ".", "font": "NimbusRomNo9L-Regu", "size": 10.0, "bbox": (104, 0, 106, 10)},
     ]
 
-    wrapped = DocumentChunker._text_with_inline_math_spans(spans)
+    wrapped, evidence = DocumentChunker._text_with_inline_math_spans_with_evidence(spans)
 
     assert r"\(dk\)" in wrapped
     assert r"\(√dk\)" in wrapped
     assert wrapped.endswith(".")
+    assert evidence[0]["latex"] == "dk"
+    assert evidence[0]["has_script_size"] is True
+    assert evidence[0]["font_size_min"] == 7.0
+    assert evidence[0]["font_size_max"] == 10.0
+    assert evidence[0]["spans"][0]["font"] == "CMMI10"
 
 
 def test_document_chunker_wraps_broad_math_font_families_inline() -> None:

@@ -775,18 +775,37 @@ def _inline_formula_candidate_items(blocks: list[DocumentBlock]) -> list[dict[st
         content = str(block.content or "")
         if not content:
             continue
+        evidence_by_latex = _inline_math_evidence_by_latex(block)
         for index, latex in enumerate(_inline_formula_snippets_from_text(content)):
+            evidence = evidence_by_latex.get(latex, {})
+            bbox = evidence.get("bbox") if isinstance(evidence, dict) else None
             candidates.append(
                 {
                     "candidate_id": f"{block.id}_inline_{index}",
                     "latex": latex,
                     "page_num": block.page_num,
-                    "bbox": list(block.bbox),
+                    "bbox": bbox if isinstance(bbox, list) and len(bbox) == 4 else list(block.bbox),
                     "block_id": block.id,
                     "source_context": _context_excerpt(content),
+                    "inline_pdf_evidence": evidence,
                 }
             )
     return candidates
+
+
+def _inline_math_evidence_by_latex(block: DocumentBlock) -> dict[str, dict[str, object]]:
+    raw_items = block.metadata.get("inline_math_candidates")
+    if not isinstance(raw_items, list):
+        return {}
+    grouped: dict[str, dict[str, object]] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        latex = str(item.get("latex", "") or "").strip()
+        if not latex:
+            continue
+        grouped.setdefault(latex, item)
+    return grouped
 
 
 def _formula_accuracy_report(
@@ -978,6 +997,7 @@ def _formula_fusion_report(
                     "bbox": item.get("bbox"),
                     "block_id": item.get("block_id"),
                     "source_context": item.get("source_context", ""),
+                    "inline_pdf_evidence": item.get("inline_pdf_evidence", {}),
                 },
             )
         )
@@ -1444,6 +1464,7 @@ def _persist_fusion_rows(
                         "source": target.metadata.get("source", "formula_fusion_review"),
                         "source_block_id": target.metadata.get("source_block_id", ""),
                         "source_context": target.metadata.get("source_context", ""),
+                        "inline_pdf_evidence": target.metadata.get("inline_pdf_evidence", {}),
                     },
                 }
         if _row_has_accepted_result(row):
@@ -1526,6 +1547,7 @@ def _fusion_target_block(
                     "source": block.metadata.get("source", "formula_fusion_targeted_r2"),
                     "review_trigger": "formula_fusion_needs_more_evidence",
                     "fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
+                    "inline_pdf_evidence": block.metadata.get("inline_pdf_evidence", {}),
                 }
             },
             deep=True,
@@ -1553,6 +1575,8 @@ def _fusion_target_block(
             if isinstance(candidate.get("evidence"), dict) else "",
             "source_context": str(candidate.get("evidence", {}).get("source_context", "") or "")
             if isinstance(candidate.get("evidence"), dict) else "",
+            "inline_pdf_evidence": candidate.get("evidence", {}).get("inline_pdf_evidence", {})
+            if isinstance(candidate.get("evidence"), dict) else {},
         },
     )
 

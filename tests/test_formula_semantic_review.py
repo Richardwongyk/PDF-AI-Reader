@@ -271,6 +271,15 @@ def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_p
                     "source": "paragraph_inline_math",
                     "source_block_id": "p0_b0",
                     "source_context": "inline context with x_i and y_j",
+                    "inline_pdf_evidence": {
+                        "source": "pdf_math_font_spans",
+                        "fonts": ["CMMI10", "CMMI7"],
+                        "span_count": 2,
+                        "has_script_size": True,
+                        "font_size_min": 7.0,
+                        "font_size_max": 10.0,
+                        "bbox": [1, 2, 3, 4],
+                    },
                 },
             }
         },
@@ -294,8 +303,11 @@ def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_p
     assert record.result_json["review_priority"] == 420.0
     assert record.result_json["review_priority_reason"] == "stages=inline_spans; low_value_inline=False"
     assert record.result_json["review_candidate"]["source_context"] == "inline context with x_i and y_j"
+    assert record.result_json["review_candidate"]["inline_pdf_evidence"]["has_script_size"] is True
     assert "paragraph_inline_math" in client.messages[0][1]["content"]
     assert "inline context with x_i and y_j" in client.messages[0][1]["content"]
+    assert "pdf_math_font_spans" in client.messages[0][1]["content"]
+    assert "has_script_size" in client.messages[0][1]["content"]
 
 
 def test_formula_semantic_review_keeps_string_risk_as_single_item(tmp_path) -> None:

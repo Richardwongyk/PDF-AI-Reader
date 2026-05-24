@@ -492,6 +492,8 @@ def _block_from_record_payload(record: FormulaRoundRecord) -> DocumentBlock | No
             "fusion_decision": str(payload.get("decision", "") or ""),
             "source_block_id": str(candidate.get("source_block_id", "") or ""),
             "source_context": str(candidate.get("source_context", "") or ""),
+            "inline_pdf_evidence": candidate.get("inline_pdf_evidence", {})
+            if isinstance(candidate.get("inline_pdf_evidence"), dict) else {},
             "candidate_only": True,
         },
     )
@@ -512,6 +514,7 @@ def _semantic_metadata_summary(metadata: dict[str, object]) -> dict[str, object]
         "fusion_input_hash",
         "source_block_id",
         "source_context",
+        "inline_pdf_evidence",
         "born_digital_diagnostics",
     }
     summary: dict[str, object] = {}
@@ -550,7 +553,16 @@ def _semantic_candidate_summaries(candidates: list[dict[str, object]]) -> list[d
         if isinstance(evidence, dict):
             evidence_summary = {
                 key: evidence.get(key)
-                for key in ("page_num", "bbox", "source", "text", "diagnostics", "block_id", "source_context")
+                for key in (
+                    "page_num",
+                    "bbox",
+                    "source",
+                    "text",
+                    "diagnostics",
+                    "block_id",
+                    "source_context",
+                    "inline_pdf_evidence",
+                )
                 if key in evidence
             }
             details = evidence.get("details")
@@ -592,6 +604,7 @@ def _semantic_fusion_summaries(fusion_records: list[dict[str, object]]) -> list[
                     "source_similarity": candidate.get("source_similarity"),
                     "score": candidate.get("score"),
                     "warnings": candidate.get("warnings", []),
+                    "evidence": _semantic_inline_evidence_summary(candidate.get("evidence")),
                 })
         summaries.append({
             "fusion_version": item.get("fusion_version", ""),
@@ -610,6 +623,28 @@ def _semantic_fusion_summaries(fusion_records: list[dict[str, object]]) -> list[
             "ranked_candidates": ranked_summary,
         })
     return summaries
+
+
+def _semantic_inline_evidence_summary(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    inline = value.get("inline_pdf_evidence")
+    if not isinstance(inline, dict):
+        return {}
+    return {
+        key: inline.get(key)
+        for key in (
+            "source",
+            "fonts",
+            "span_count",
+            "has_script_size",
+            "font_size_min",
+            "font_size_max",
+            "bbox",
+            "spans",
+        )
+        if key in inline
+    }
 
 
 def _normalize_suggested_latex(value: object, *, display: bool) -> str:

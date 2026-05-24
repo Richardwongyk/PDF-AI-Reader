@@ -8,7 +8,7 @@
 
 当前主线目标没有完成，不能宣称项目已达标。今晚目标被明确提高为：不间断运行，公式扫描准确度最终高于 99.9%，建立完整 RAG/知识系统，并在此基础上继续全线优化；未用 Attention/Napkin 大样本、行内公式、数学字体、真实性能和交互闭环证明前，不得标记完成。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、`formula_fusion_records` 融合记录表、r0 born-digital facts-only 结构候选落库、r1 缓存优先队列、r2 本地多工具候选 worker、r3 带候选/fusion 证据的语义复核候选写回、r4 结构图谱批处理第一版、r5 accepted 公式增量知识库 upsert service，以及 `tools/formula_multiround_pipeline.py` 对 r0-r5 的可审计流水线 smoke/benchmark。没有完成的是：born-digital 公式高精度 LaTeX 还原、行内公式高覆盖、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4 语义级图谱质量、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
 
-2026-05-25 最新补充：r3/r4 已不只是设计文档。`FormulaSemanticReviewService` 可以从 fusion payload 合成 inline/formula 候选块，真实 DeepSeek smoke 已跑通小批量候选，只写 JSON；r3 prompt 现在给云端的是压缩证据包而不是整段数据库 JSON，并保留 inline 来源段落 `source_context`，要求只输出 JSON 对象。若云端返回非 JSON，失败会落库并记录 raw response 摘要，便于审计和重试。r3 入队现在带 `semantic_review_priority` 和可读的 `review_priority_reason`，按证据价值、冲突/风险、相似度缺口和 LaTeX 复杂度优先消费；低价值单字符 inline 会延后但不会丢弃。r3 完成后仍保留 `review_candidate`、`queued_input_hash`、`review_input_hash` 和优先级原因，方便审计“云端到底审了哪个候选”。`FormulaKnowledgeGraphService` 已消费 `r4_knowledge_graph` 队列，把普通公式和 fusion candidate-only 公式写入 `GraphIndexStore` artifact。`tools/formula_multiround_pipeline.py` 现在支持 `--drain-r2/--drain-r3/--drain-r4/--drain-r5`，报告 `formula_fusion_snapshots` 展示每次 fusion 的写入、缓存命中和派生 r2/r3/r5 入队数量。新增质量门禁：如果 r2 本地 MFR 候选比 born-digital 结构候选更差，会记录 `local_precise_degraded_against_born_digital`，不能进入 `ready_for_manual_accept`，不能写正文/RAG/GraphRAG accepted。
+2026-05-25 最新补充：r3/r4 已不只是设计文档。`FormulaSemanticReviewService` 可以从 fusion payload 合成 inline/formula 候选块，真实 DeepSeek smoke 已跑通小批量候选，只写 JSON；r3 prompt 现在给云端的是压缩证据包而不是整段数据库 JSON，并保留 inline 来源段落 `source_context`，要求只输出 JSON 对象。若云端返回非 JSON，失败会落库并记录 raw response 摘要，便于审计和重试。r3 入队现在带 `semantic_review_priority` 和可读的 `review_priority_reason`，按证据价值、冲突/风险、相似度缺口和 LaTeX 复杂度优先消费；低价值单字符 inline 会延后但不会丢弃。r3 完成后仍保留 `review_candidate`、`queued_input_hash`、`review_input_hash` 和优先级原因，方便审计“云端到底审了哪个候选”。行内公式候选现在会把 PDF 字体、字号、bbox、math font span 和脚本字号证据写入 `inline_pdf_evidence`，传到 fusion/r3；例如 Attention 前 2 页 `ht−1` 已带 CMMI10/CMMI7/CMSY7/CMR7、6.974/9.963pt 和 `has_script_size=true`。这只是证据通道，不是手写 LaTeX 解析器，也不自动接受。`FormulaKnowledgeGraphService` 已消费 `r4_knowledge_graph` 队列，把普通公式和 fusion candidate-only 公式写入 `GraphIndexStore` artifact。`tools/formula_multiround_pipeline.py` 现在支持 `--drain-r2/--drain-r3/--drain-r4/--drain-r5`，报告 `formula_fusion_snapshots` 展示每次 fusion 的写入、缓存命中和派生 r2/r3/r5 入队数量。新增质量门禁：如果 r2 本地 MFR 候选比 born-digital 结构候选更差，会记录 `local_precise_degraded_against_born_digital`，不能进入 `ready_for_manual_accept`，不能写正文/RAG/GraphRAG accepted。
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
@@ -84,6 +84,7 @@
 - `src/app/formula_semantic_review.py` 的 r3 prompt 已改成压缩证据包：只保留 PDF diagnostics、候选模型/version/input hash、fusion gate、ranked candidates 和 inline 段落上下文；候选输出会自动补数学定界符，但仍只作为候选写库。
 - r3 云端队列已加入通用优先级：高价值、低相似、候选冲突、结构/本地工具证据和复杂 LaTeX 先审；单字符/低价值 inline 只降优先级，不删除。优先级分数和原因写入 `formula_round_jobs.result_json`。
 - r3 完成结果会合并原始排队 payload，保留 `review_candidate`、`queued_input_hash`、`review_input_hash`、`review_priority` 和 `review_priority_reason`，避免 done 后丢失“审的是哪个候选”的证据。
+- `DocumentChunker` 对 math-font 行内公式新增结构化 `inline_math_candidates` metadata：每个候选保存原 PDF span 的 text/font/size/bbox、候选 bbox、字体列表、字号范围和 `has_script_size`。`tools/formula_multiround_pipeline.py` 会把它转成 fusion evidence 和 r3 `review_candidate.inline_pdf_evidence`。
 - `tools/formula_multiround_pipeline.py` 已能 drain r2/r3/r4/r5；r4 使用真实 `FormulaKnowledgeGraphService`；fusion 将 inline 候选按 candidate id 分开，不再把同一段落多个行内公式合并；报告新增 `fusion_best:*` 准确率组和 `formula_fusion_snapshots`。
 - fusion 门禁已加严：存在 r2 但 r2 质量低于 r0/parsed/inline born-digital 证据时，记录 `local_precise_degraded_against_born_digital`，最终仍为 `needs_more_evidence`，不进入 accepted/r5。
 - 新增/更新测试覆盖：r4 公式图谱、candidate-only graph 节点、r3 payload inline 候选、r3 风险字段规范化、r1/r2 结果 JSON 的 input hash/model version、r2 降质不接受、fusion_best 准确率组、drain r2/r3/r4。
@@ -97,6 +98,7 @@
 - Attention 前 2 页真实 DeepSeek r3 smoke：约 35.777s；实际 client 为 `deepseek/deepseek-v4-pro`，处理 2 条、剩余 7 条保持 queued；只写候选 JSON 和 fusion/r4 candidate，不 accepted。
 - Attention 前 2 页 r3 证据包 smoke：默认 mock 全 drain 约 0.926s，r3/r4 各 9 条；真实 DeepSeek 限 1 条约 37.304s，模型未按 JSON 返回时该任务标记 failed，error 写入 raw response 摘要，剩余 8 条保持 queued。失败不覆盖正文、不影响 r4 候选图谱。
 - Attention 前 2 页 r3 优先队列 smoke：`--r3-limit 1` 不 drain 时，只处理 1 条、剩 8 条 queued；首条从原先容易命中的单字符 `t` 改为更高价值的 `ht−1` 候选。SQLite 审计显示 done 记录保留 `latex='ht−1'`、queued hash、review hash 和 `review_priority_reason`；单字符 `t` 仍在队列中，只是延后。
+- Attention 前 2 页 inline PDF evidence smoke：`ht`、`ht−1`、`t` 这些 inline 候选已带实际 PDF bbox、fonts、font size 和 `has_script_size`。`ht−1` 的 evidence 包含 CMMI10/CMMI7/CMSY7/CMR7，字号范围 6.974 到 9.963，bbox 为实际 span union；后续 r3/工具可以据此恢复上下标，但当前仍只作为候选证据。
 - Napkin 前 8 页轻量多轮：约 7.873s；r0 处理 8 页，没有公式候选时 r1/r2/r3/r4 正确跳过，证明大 PDF 前言区不会误触发 OCR/MFR。
 
 文档与计划：

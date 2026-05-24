@@ -288,8 +288,10 @@ class DocumentChunker:
                 content = wrap_math_text(content, display=True)
                 metadata["math_wrapped"] = "display"
             elif self._contains_math_font_spans(spans):
-                content = self._text_with_inline_math_spans(spans)
+                content, inline_candidates = self._text_with_inline_math_spans_with_evidence(spans)
                 metadata["math_wrapped"] = "inline"
+                if inline_candidates:
+                    metadata["inline_math_candidates"] = inline_candidates
 
             blocks.append(DocumentBlock(
                 id=f"p{page_num}_b{len(blocks)}",
@@ -416,17 +418,29 @@ class DocumentChunker:
 
     @classmethod
     def _text_with_inline_math_spans(cls, spans: list[dict[str, Any]]) -> str:
+        content, _ = cls._text_with_inline_math_spans_with_evidence(spans)
+        return content
+
+    @classmethod
+    def _text_with_inline_math_spans_with_evidence(
+        cls,
+        spans: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
         parts: list[str] = []
-        math_buffer: list[str] = []
+        math_buffer: list[dict[str, Any]] = []
+        inline_candidates: list[dict[str, Any]] = []
 
         def flush_math() -> None:
             if not math_buffer:
                 return
-            raw = "".join(math_buffer).strip()
+            raw = "".join(str(span.get("text", "")) for span in math_buffer).strip()
+            span_group = list(math_buffer)
             math_buffer.clear()
             if raw:
                 if cls._is_inline_math_candidate(raw):
-                    parts.append(wrap_math_text(raw, display=False))
+                    wrapped = wrap_math_text(raw, display=False)
+                    parts.append(wrapped)
+                    inline_candidates.append(cls._inline_math_candidate_evidence(raw, wrapped, span_group))
                 else:
                     parts.append(raw)
 
@@ -435,7 +449,7 @@ class DocumentChunker:
             if not text:
                 continue
             if cls._is_math_font_span(span):
-                math_buffer.append(text)
+                math_buffer.append(span)
             else:
                 flush_math()
                 parts.append(text)
@@ -443,7 +457,112 @@ class DocumentChunker:
         joined = " ".join(part.strip() for part in parts if part.strip())
         joined = re.sub(r"\s+([,.;:)\]])", r"\1", joined)
         joined = re.sub(r"([([])\s+", r"\1", joined)
-        return joined.strip()
+        return joined.strip(), inline_candidates
+
+    @classmethod
+    def _inline_math_candidate_evidence(
+        cls,
+        latex: str,
+        wrapped_latex: str,
+        spans: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        span_summaries = [cls._inline_math_span_summary(span) for span in spans]
+        bbox = cls._union_span_bbox(spans)
+        sizes = [
+            float(summary["size"])
+            for summary in span_summaries
+            if isinstance(summary.get("size"), (int, float)) and float(summary["size"]) > 0
+        ]
+        fonts = sorted({
+            str(summary.get("font", ""))
+            for summary in span_summaries
+            if str(summary.get("font", ""))
+        })
+        evidence: dict[str, Any] = {
+            "latex": latex,
+            "wrapped_latex": wrapped_latex,
+            "source": "pdf_math_font_spans",
+            "spans": span_summaries,
+            "fonts": fonts,
+            "span_count": len(span_summaries),
+            "has_script_size": cls._span_group_has_script_size(spans),
+        }
+        if bbox is not None:
+            evidence["bbox"] = list(bbox)
+        if sizes:
+            evidence["font_size_min"] = round(min(sizes), 3)
+            evidence["font_size_max"] = round(max(sizes), 3)
+        return evidence
+
+    @classmethod
+    def _inline_math_span_summary(cls, span: dict[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "text": str(span.get("text", "")),
+            "font": str(span.get("font", "")),
+        }
+        try:
+            summary["size"] = round(float(span.get("size", 0.0) or 0.0), 3)
+        except (TypeError, ValueError):
+            summary["size"] = 0.0
+        bbox = cls._span_bbox(span)
+        if bbox is not None:
+            summary["bbox"] = list(bbox)
+        return summary
+
+    @staticmethod
+    def _span_bbox(span: dict[str, Any]) -> tuple[float, float, float, float] | None:
+        bbox = span.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+        try:
+            return tuple(round(float(value), 3) for value in bbox)  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _union_span_bbox(cls, spans: list[dict[str, Any]]) -> tuple[float, float, float, float] | None:
+        boxes = [bbox for span in spans if (bbox := cls._span_bbox(span)) is not None]
+        if not boxes:
+            return None
+        return (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+
+    @classmethod
+    def _span_group_has_script_size(cls, spans: list[dict[str, Any]]) -> bool:
+        summaries = [cls._inline_math_span_summary(span) for span in spans]
+        sized = [
+            summary
+            for summary in summaries
+            if isinstance(summary.get("size"), (int, float)) and float(summary.get("size", 0.0)) > 0
+        ]
+        if len(sized) < 2:
+            return False
+        max_size = max(float(summary.get("size", 0.0)) for summary in sized)
+        small = [summary for summary in sized if float(summary.get("size", 0.0)) < max_size * 0.86]
+        large = [summary for summary in sized if float(summary.get("size", 0.0)) >= max_size * 0.86]
+        if not small or not large:
+            return False
+        large_centers = [cls._bbox_center_y(summary.get("bbox")) for summary in large]
+        small_centers = [cls._bbox_center_y(summary.get("bbox")) for summary in small]
+        large_centers = [center for center in large_centers if center is not None]
+        small_centers = [center for center in small_centers if center is not None]
+        if not large_centers or not small_centers:
+            return True
+        base_center = sum(large_centers) / len(large_centers)
+        return any(abs(center - base_center) >= max(1.0, max_size * 0.10) for center in small_centers)
+
+    @staticmethod
+    def _bbox_center_y(value: object) -> float | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            return None
+        try:
+            return (float(value[1]) + float(value[3])) / 2.0
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _is_math_font_span(span: dict[str, Any]) -> bool:

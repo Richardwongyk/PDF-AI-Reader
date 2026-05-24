@@ -76,9 +76,9 @@
 
 - r1 在哪里：`FormulaIndexStore` 的 `r1_cached_recognition` queue 和 `FormulaIndexFlow` cache-first OCR/MFR worker；默认 born-digital Attention/Napkin 不触发 r1 未命中推理，只有 `needs_ocr=True` 图片/扫描/乱码/缺文本层候选才进入。
 - r3 在哪里：`src/app/formula_semantic_review.py` 和 UI idle 调度；候选/fusion 证据进入 prompt，DeepSeek 或 mock 返回的 `suggested_latex/confidence/reason/risks/raw_response` 写入 `formula_round_jobs.result_json`，不覆盖正文。
-- r3 最新边界：prompt 使用压缩证据包，inline 候选带 `source_context`，输出自动补数学定界符但仍只作为候选；DeepSeek 非 JSON 响应会 failed 落库并保存 raw response 摘要。fusion 派生的 r3 任务已按 `semantic_review_priority` 排序：结构/本地工具证据、低相似、候选冲突、复杂 LaTeX 和风险项先审；单字符 inline 延后但不丢弃。r3 完成后保留原始 `review_candidate`、queued/review hash 和优先级原因，便于审计。
+- r3 最新边界：prompt 使用压缩证据包，inline 候选带 `source_context` 和 `inline_pdf_evidence`，输出自动补数学定界符但仍只作为候选；DeepSeek 非 JSON 响应会 failed 落库并保存 raw response 摘要。fusion 派生的 r3 任务已按 `semantic_review_priority` 排序：结构/本地工具证据、低相似、候选冲突、复杂 LaTeX 和风险项先审；单字符 inline 延后但不丢弃。r3 完成后保留原始 `review_candidate`、queued/review hash 和优先级原因，便于审计。
 - r4 在哪里：`src/app/formula_knowledge_graph.py` 和 `src/app/graph_index_flow.py`；普通公式写 `formula` 节点，未过门禁的 fusion 候选写 `formula_candidate` 节点，只做图谱候选证据。
-- 最新测试集合为 `174 passed`。Attention 前 6 页默认非 OCR pipeline：r3/r4 各处理 122 个候选；targeted r2 后发现 Pix2Text-MFR 对 born-digital 7 个样本平均 similarity 约 0.578，低于 r0 约 0.668，因此 fusion 记录 `local_precise_degraded=5` 且 `ready_for_manual_accept=0`。Attention 前 2 页 `--r3-limit 1` 小批 smoke 已证明 r3 先处理 `ht−1` 这类高价值候选，低价值单字符 `t` 保留 queued。
+- 最新测试集合为 `174 passed`。Attention 前 6 页默认非 OCR pipeline：r3/r4 各处理 122 个候选；targeted r2 后发现 Pix2Text-MFR 对 born-digital 7 个样本平均 similarity 约 0.578，低于 r0 约 0.668，因此 fusion 记录 `local_precise_degraded=5` 且 `ready_for_manual_accept=0`。Attention 前 2 页 `--r3-limit 1` 小批 smoke 已证明 r3 先处理 `ht−1` 这类高价值候选，低价值单字符 `t` 保留 queued；inline evidence smoke 证明 `ht−1` 带 CMMI/CMSY/CMR 字体、字号和脚本证据进入 fusion/r3。
 - 结论：多轮高性能解析框架已经跑通，质量门禁也能阻止降质候选污染正文；但“公式准确率 >99.9%”没有达成，当前任务不能完成。下一步必须提升 born-digital LaTeX 还原本身，而不是继续堆 OCR。
 
 多工具配合的下一步必须按 `docs/formula_multitool_fusion_design.md` 推进：不手写硬编码公式解析规则，不靠样本正则修公式；自写部分只做 evidence/candidate/fusion schema、工具编排、源码准确率复核、候选排序、accepted 门禁和增量写回。
@@ -88,7 +88,8 @@
 1. **公式质量闭环**
    - Attention 和 Napkin 的 PDF、LaTeX 源码、图片资源都要纳入审计。
    - LaTeX 源码中 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 包裹内容都算公式；行内公式、变量、上下标和数学字体必须单独统计和验收。
-   - r0/r1/r2/r3 每轮必须能证明：入队、输入 hash、模型版本、结果 JSON、跳过机制、失败记录、低置信不覆盖正文。
+  - r0/r1/r2/r3 每轮必须能证明：入队、输入 hash、模型版本、结果 JSON、跳过机制、失败记录、低置信不覆盖正文。
+   - 行内公式验收必须检查 `inline_pdf_evidence`：字体、字号、bbox、脚本字号和数学字体证据是否进入 fusion/r3。源码仍只用于验收，不能进入真实用户运行路径。
    - 外部工具必须做同样样本对比，输出准确率、弱匹配率、P95 耗时、冷启动、缓存命中和失败样例。
    - 每次验收必须检查是否造轮子/硬编码：生产公式路径不能出现样本特化词表、论文样本正则、一次性手写修复链，默认 r0 不能调用自写 LaTeX 重建器冒充高精度解析。
 

@@ -588,6 +588,25 @@ def test_formula_fusion_report_includes_inline_math_candidates(tmp_path) -> None
         block_type=BlockType.PARAGRAPH,
         content=r"inline \(x_i\)",
         bbox=(0, 0, 100, 20),
+        metadata={
+            "inline_math_candidates": [
+                {
+                    "latex": "x_i",
+                    "wrapped_latex": r"\(x_i\)",
+                    "source": "pdf_math_font_spans",
+                    "bbox": [10, 2, 22, 12],
+                    "fonts": ["CMMI10", "CMMI7"],
+                    "span_count": 2,
+                    "has_script_size": True,
+                    "font_size_min": 7.0,
+                    "font_size_max": 10.0,
+                    "spans": [
+                        {"text": "x", "font": "CMMI10", "size": 10.0, "bbox": [10, 2, 17, 12]},
+                        {"text": "_i", "font": "CMMI7", "size": 7.0, "bbox": [17, 6, 22, 13]},
+                    ],
+                }
+            ]
+        },
     )
 
     report = pipe._formula_fusion_report(case, store, "doc-1", [paragraph], [], max_pages=0)
@@ -597,6 +616,8 @@ def test_formula_fusion_report_includes_inline_math_candidates(tmp_path) -> None
     assert rows["p0_b0_inline_0"]["best_stage"] == "inline_spans"
     inline_candidate = rows["p0_b0_inline_0"]["ranked_candidates"][0]
     assert inline_candidate["evidence"]["source_context"] == r"inline \(x_i\)"
+    assert inline_candidate["evidence"]["inline_pdf_evidence"]["has_script_size"] is True
+    assert inline_candidate["evidence"]["bbox"] == [10, 2, 22, 12]
     assert not any(item["candidate_id"] == "p0_b0_inline_0" for item in report["targeted_r2_queue"])
 
 
