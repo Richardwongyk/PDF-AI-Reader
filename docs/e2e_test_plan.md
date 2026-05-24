@@ -91,7 +91,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - Napkin 全文知识库仍使用哈希嵌入兜底，不是真语义 embedding。
 - 右侧全文问答已有证据面板、检索状态、引用页跳转和追问建议；仍需补真实模型质量评估和更细粒度的引用高亮。
 - 公式审计已经能统计 LaTeX 源和 PDF 抽取差距；扫描/图片公式已接入 Pix2Text MFR OCR，但整体 LaTeX 保真仍明显不足，需要继续做源码对齐和文本公式恢复。
-- 外部工具环境已清理，当前没有可直接调用的 MinerU/PaddleOCR/PDF-Extract-Kit/UniMERNet 独立 worker；下一次必须先按版本矩阵重建并真实烟测。
+- 外部工具环境已按独立 worker 思路存在：MinerU、Paddle Formula、Pix2Text 已有不同程度 smoke；PDF-Extract-Kit/UniMERNet 尚未跑通，旧 magic-pdf 缺权重。E2E 仍必须把这些工具输出当候选审计，不能把单图 smoke 当质量通过。
 
 ## 本轮闭环结果
 
@@ -122,3 +122,10 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 最新 `--case all` 检测：Attention 15 页总 2.1970s、持久化 0.0046s；Napkin 前 16 页总 1.2997s、持久化 0.0306s。
 - 当前报告证明任务入库开销极小；还不能证明全量 Napkin 1050 页、真实云端修正和高精度模型 worker 的性能，需要继续扩展闭环。
 - r3 语义复核已有单元测试覆盖候选写回、坏 JSON 失败记录、缺失块跳过、批量限制和真实 QThread 后台 smoke；E2E 仍需补充真实 DeepSeek smoke 与 accepted 门禁验证。
+
+2026-05-24 最新多工具候选状态：
+
+- r0 born-digital 页面扫描已经只写 PDF 结构候选，不加载 OCR/MFR。
+- `formula_recognition_results` 已记录结构候选、本地工具候选和 accepted 状态；同一候选 accepted 唯一性已有测试。
+- r2 已通过外部 JSON worker 接 Paddle Formula 与 Pix2Text，输出默认未接受；后续 E2E/审计必须验证这些候选不会覆盖正文。
+- 最新相关单元测试组合为 66 passed；文档变更后如未改代码可不重复全量跑，但正式交付前必须重跑 Attention/Napkin 闭环。

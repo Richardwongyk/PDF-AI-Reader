@@ -6,7 +6,7 @@
 
 ## 先读结论
 
-当前主线目标没有完成，不能宣称项目已达标。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表与 r3 语义复核候选写回的第一版。没有完成的是：真实外部公式工具稳定部署、born-digital 公式高精度 LaTeX 还原、图片/扫描公式高精度 OCR/MFR、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的完整闭环验收。
+当前主线目标没有完成，不能宣称项目已达标。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、r3 语义复核候选写回、r0 born-digital 结构候选落库、r2 外部多工具候选 worker 第一版。没有完成的是：born-digital 公式高精度 LaTeX 还原、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4/r5 增量知识库和图谱闭环、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
@@ -15,9 +15,12 @@
 - 工作目录：`D:\程设大作业`。
 - 主程序环境：`C:\Users\WYK\.conda\envs\pdf_ai_reader_314`。
 - 现有用户环境不要动：`base`、`cs231n`、`drawing`、`science`、`pdf_ai_reader`、`pdf_ai_reader_314`、`lottery_python`、`pku_elective` 等。
-- 2026-05-24 外部 PDF/公式工具环境安装尝试失败后，临时环境已删除；最后一次 `conda env list` 确认没有 `pdf_tool_*` 或 `pdf_formula_*` 环境。
+- 2026-05-24 已重新按独立 worker 思路建立外部工具环境，当前 `conda env list` 显示：
+  `pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`。
+  这些都是隔离工具环境，不是主程序环境。
+- 最新代码提交到 `9a02945 Add multi-tool formula candidate pipeline`：r0 不走 OCR，只写 born-digital PDF 结构候选；r2 通过外部 worker 写 Paddle/Pix2Text 等未接受候选。
 - 防休眠脚本仍应检查，不要假设一定有效。脚本在 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`。
-- 当前工作树有较多未提交改动和未跟踪文件。不要随手回退，也不要把 `测试资料/`、日志、缓存、临时 benchmark 输出提交。
+- 当前工作树必须以 `git status --short` 为准。不要随手回退，也不要把 `测试资料/`、日志、缓存、临时 benchmark 输出提交。
 
 ## 必须遵守的设计哲学
 
@@ -47,7 +50,7 @@
 | r2 | `r2_local_high_precision` | 本地高精度/多工具复核，处理低置信、复杂矩阵、对齐环境、用户显式精扫 | 用户触发或后台空闲 | round jobs、recognition results | 独立 worker；可暂停；结果先做候选 |
 | r3 | `r3_cloud_semantic_review` | DeepSeek 等分析模型基于上下文和候选公式做语义校对建议 | 所有已解析公式块可入队，按批消费 | `formula_round_jobs.result_json` | 不直接覆盖正文；必须保留 `suggested_latex/confidence/reason/risks/raw_response` |
 | r4 | `r4_knowledge_graph` | 将公式、章节、定理、概念、引用关系写入 GraphRAG artifact | 基础索引就绪后异步 | graph artifact、关系边、证据节点 | GraphRAG 不阻塞基础问答和阅读 |
-| r5 | 知识库增量增强（设计轮次，代码未落地） | 把高置信修正增量写回全文 RAG/FTS/向量库 | accepted 结果变化时 | knowledge index、block revision | 必须按 block/content hash 跳过未变内容 |
+| r5 | `r5_knowledge_incremental_update` | 把高置信修正增量写回全文 RAG/FTS/向量库 | accepted 结果变化时 | knowledge index、block revision | 枚举已存在；增量 upsert 接线未完成，必须按 block/content hash 跳过未变内容 |
 
 硬要求：
 
@@ -77,8 +80,12 @@
 
 公式与索引代码进度：
 
-- 已有多轮公式任务枚举与存储：r0/r1/r2/r3/r4。
+- 已有多轮公式任务枚举与存储：r0/r1/r2/r3/r4/r5。
+- 已有 `formula_recognition_results` 候选结果表，记录 stage、model、model_version、preprocess_version、input_hash、latex、score、warnings/evidence 和 accepted。
+- 已有 accepted 唯一性：同一候选当前只允许一个 accepted 结果。
 - 导入后会把页级结构扫描、需要 OCR 的公式块、已解析公式块的 r3 复核任务写入队列。
+- r0 页面扫描当前只走 born-digital PDF 结构事实，使用 `BornDigitalFormulaExtractor` 写 `stage=pdf_structure` 的未接受候选，不初始化 OCR/MFR。
+- r2 本地高精度轮通过 `ExternalFormulaToolRunner` + `tools/formula_tool_worker.py` 调隔离工具环境；当前已有 Paddle Formula 和 Pix2Text 公式图候选接入，结果默认不 accepted。
 - `FormulaSemanticReviewService` 和 `FormulaSemanticReviewFlow` 已有第一版：批量调用分析模型，写回 JSON 候选，不覆盖正文。
 - UI 空闲时可小批量调度公式索引/语义复核，避免导入热路径同步等待。
 - 日志改为轮转并增加清理工具，避免日志无限膨胀。
@@ -90,7 +97,9 @@
 - 已有 `tools/formula_ocr_benchmark.py`，用于 OCR/MFR 后端抽样性能测试。
 - 已有 `tools/formula_index_performance.py`，用于多轮公式索引任务入库性能检测。
 - 已有 `tools/test_log_audit.py`，用于清理和审计日志。
-- 曾经的测试基线包括：全量约 `153 passed, 3 skipped`；目标测试约 `32 passed`；Attention/Napkin 多轮任务入库性能约秒级。由于后续环境清理和文档修改后未重新跑全量测试，新会话必须重新验证。
+- 最新相关测试基线：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 `66 passed`。
+- Attention 最新多轮入库性能：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
+- Attention born-digital 前 6 页结构审计：约 0.608s，17816 glyph，unknown glyph 为 0，display region 7 个；仍未达到完整 LaTeX 还原目标。
 
 防休眠：
 
@@ -103,9 +112,9 @@
 1. **不能把外部公式工具混进主环境**
    - 结论：主程序环境只保留项目运行依赖；MinerU/PaddleOCR/PDF-Extract-Kit/UniMERNet 等必须独立 worker 环境。
 
-2. **临时环境污染风险已清理**
-   - 曾创建/尝试过 `pdf_formula_tools_310`、`pdf_tool_mineru310`、`pdf_tool_magic310`、`pdf_tool_paddle310`、`pdf_tool_pek310`。
-   - 已删除这些临时环境；最后一次 `conda env list` 不再显示它们。
+2. **外部工具必须隔离**
+   - 曾经混装/并行创建环境的风险已明确；当前改为每个大工具一个独立环境。
+   - 当前存在 `pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`，不要混进主环境。
 
 3. **旧用户环境不可触碰**
    - 曾误入已有环境的风险被识别。之后明确：不要动 `cs231n`、`base`、`drawing`、`science` 等用户环境。
@@ -126,13 +135,14 @@
    - 关键难点：PDF 通常保存排版后的 glyph/bbox，不保存原 TeX AST。复杂二维结构、源码宏、字体编码、表格/列表误吸、页级源码对齐都未完全解决。
    - 方向：优先复用成熟 PDF/公式结构工具或源码；自写只做中间表示、审计、调度、缓存。
 
-2. **图片/扫描公式 OCR/MFR 未稳定跑通**
-   - Pix2Text 已有但本地效果差，原因待查：模型版本、预处理、DPI、裁剪、CPU 性能、缓存、输入区域质量都有可能。
-   - PaddleOCR Formula、UniMERNet、PDF-Extract-Kit、MinerU 都需要独立环境真实烟测。
+2. **图片/扫描公式 OCR/MFR 仍只能作为候选层**
+   - Pix2Text 和 Paddle Formula 已有独立 worker smoke，但 Attention 单图输出仍有明显归一化/字符问题，不能覆盖正文。
+   - MinerU 3.1.15 本地新模型已跑通单页整页解析，但耗时长，当前适合离线候选和结构对照。
+   - UniMERNet/PDF-Extract-Kit 尚未跑通；旧 magic-pdf 缺权重，只能作为历史路线对照。
 
-3. **外部工具安装尝试失败**
-   - 失败不是单个包的问题，而是多个大工具依赖栈互相冲突、PyPI 元数据不完整、CLI 运行时依赖漏声明、Windows 环境和 conda/pip 混用复杂。
-   - 下一次必须先查官方文档和版本矩阵，再逐个独立环境验证，不要一次性混装。
+3. **外部工具还缺大样本对比**
+   - 当前只证明部分工具“能启动/能返回候选”，还没有证明 Attention/Napkin 大样本准确率、P95 耗时、内存和缓存命中。
+   - 下一步必须用同一批裁剪样本比较 Pix2Text、Paddle Formula、MinerU、UniMERNet/PDF-Extract-Kit，不能靠单图观感定方案。
 
 4. **RAG/GraphRAG 仍未达到产品级**
    - FTS/RAG 方向已有基础，但全文理解、证据链、公式/定理/引用图谱、问答 UI 还要继续打磨。
@@ -163,15 +173,15 @@
 - 使用国内镜像可以提高速度，但版本兼容仍必须按官方文档确认。
 - 如果工具会下载模型，必须记录模型路径、版本、大小、冷启动时间、推理时间和缓存命中时间。
 
-建议下一次环境矩阵：
+当前环境矩阵：
 
 | 环境 | Python | 目标 | 验证 |
 | --- | --- | --- | --- |
-| `pdf_tool_paddle310` | 3.10 | `paddlepaddle` + `paddleocr` FormulaRecognition | import、单张公式图、真实 PDF 裁剪图 |
-| `pdf_tool_mineru311` | 3.11 或官方推荐 | MinerU 最新版本 | CLI help、最小 PDF 转换、Attention 前几页 |
-| `pdf_tool_magic310` | 3.10 | 旧 `magic-pdf` 对照 | CLI help、真实 PDF 小页 |
-| `pdf_tool_pek310` | 3.10 | PDF-Extract-Kit + UniMERNet | Python API、示例命令、真实 PDF 小页 |
-| `pdf_tool_pix2text` | 3.10/3.11 | Pix2Text 现有链路复测 | 预处理/DPI/裁剪 ablation |
+| `pdf_tool_paddle310` | 3.10 | `paddlepaddle` + `paddleocr` FormulaRecognition | import 与单张公式图 smoke 通过；输出质量待审计 |
+| `pdf_tool_mineru310` | 3.10 | MinerU 3.1.15 新模型本地解析 | Attention 单页 smoke 通过；耗时约 172s |
+| `pdf_tool_magic310` | 3.10 | 旧 `magic-pdf` 对照 | 基础环境可用；缺旧模型权重，真实小页未通过 |
+| `pdf_tool_pek310` | 3.10 | PDF-Extract-Kit + UniMERNet | 环境存在；源码拉取失败，未 smoke |
+| `pdf_tool_pix2text310` | 3.10 | Pix2Text 现有链路复测 | 单张公式图 smoke 通过；缓存路径和质量待整理 |
 
 每个环境建完必须记录：
 
@@ -247,7 +257,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\test_log_audit.py --
 5. 跑轻量测试：
 
 ```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_smoke.py -q
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q
 ```
 
 6. 跑公式多轮入库性能：
@@ -279,7 +289,7 @@ P0：
 2. 补齐 r0/r1/r2/r3/r4/r5 的端到端测试：入队、跳过、失败重试、结果落库、二次打开复用。
 3. 用 Attention/Napkin 做真实公式质量门禁，记录失败样例和性能。
 4. 修复或隔离任何正则/硬编码公式识别实验，不能进入默认路径。
-5. 重新调研并独立安装外部工具，优先跑通 Pix2Text 复测和 PaddleOCR Formula，然后再 MinerU/PDF-Extract-Kit/UniMERNet。
+5. 继续外部工具大样本对比，优先把 PEK/UniMERNet 跑通或明确淘汰，再比较 Pix2Text/Paddle/MinerU 的 Attention/Napkin 质量和性能。
 
 P1：
 
@@ -302,7 +312,7 @@ P2：
 ```text
 你接手的是 D:\程设大作业 的 PDF AI Reader 项目。先读根目录 AGENTS.md，再读 docs/next_session_handoff.md、TODO.md、docs/current_goal_and_next_steps.md、docs/async_formula_indexing_design.md、docs/formula_extraction_research.md、docs/e2e_test_plan.md。
 
-当前主环境是 C:\Users\WYK\.conda\envs\pdf_ai_reader_314。不要动用户已有环境 base/cs231n/drawing/science/pdf_ai_reader/pdf_ai_reader_314 等。之前临时 PDF 工具环境安装失败后已删除，conda env list 最后确认没有 pdf_tool_* 或 pdf_formula_*。不要先装包，先确认 git status、conda env list、防休眠进程和测试基线。
+当前主环境是 C:\Users\WYK\.conda\envs\pdf_ai_reader_314。不要动用户已有环境 base/cs231n/drawing/science/pdf_ai_reader/pdf_ai_reader_314 等。当前隔离工具环境包括 pdf_tool_paddle310、pdf_tool_mineru310、pdf_tool_pix2text310、pdf_tool_magic310、pdf_tool_pek310；不要混装进主环境，也不要未经确认删除。不要先装包，先确认 git status、conda env list、防休眠进程和测试基线。
 
 设计红线：born-digital PDF 公式默认不走 OCR；图片/扫描/无文本层/乱码/低置信才走 OCR/MFR。禁止样本特化正则、固定词表、一次性启发式函数伪装公式识别。优先成熟工具和官方文档，自写代码只做编排、适配、缓存、审计和必要 glue。所有重任务异步分批，结果必须落库，二次打开跳过已完成任务。不要把 MinerU/Pix2Text/UniMERNet/PDF-Extract-Kit/PaddleOCR 混装到主环境。
 
@@ -310,5 +320,5 @@ P2：
 
 测试资料在 测试资料/：Attention 是小文件，Napkin 是大文件，两者 PDF、LaTeX 源码和图片资源都要用于公式质量和性能验收。闭环测试必须模拟滚动翻页、跳转、双击翻译/隐藏/再次双击打开、缩放、问答、日志审计。长文档性能、缩放清晰度、翻译和问答延迟必须作为门槛。
 
-下一步先跑轻量测试：C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_smoke.py -q。然后跑 tools/formula_index_performance.py、tools/formula_latex_audit.py 的 Attention/Napkin 门禁，再跑 tools/e2e_pdf_workflow.py。外部工具要先写版本矩阵，再逐个独立环境安装和真实 PDF 小页烟测。所有提交不得带额外署名、来源标记或生成工具署名，不提交测试资料、日志、缓存、临时产物。
+下一步先跑轻量测试：C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q。然后跑 tools/formula_index_performance.py、tools/formula_latex_audit.py 的 Attention/Napkin 门禁，再跑 tools/e2e_pdf_workflow.py。外部工具要先确认现有环境和模型缓存，再逐个真实 PDF 小页烟测和大样本对比。所有提交不得带额外署名、来源标记或生成工具署名，不提交测试资料、日志、缓存、临时产物。
 ```

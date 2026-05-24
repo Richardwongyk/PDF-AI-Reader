@@ -24,36 +24,35 @@ PDF 导入
        写入 document_blocks、基础全文索引、formula_region_candidates
        UI 和基础问答立即可用
 
-  -> Round 1: 结构公式候选修正
-       基于 PDF 事实做 display / inline / table-like / prose-like 分类
-       建立二维布局证据和置信度
-       写回 formula_candidates / document_blocks 增量版本
-
-  -> Round 2: 本地轻模型补强
+  -> Round 1: 缓存优先 OCR/MFR 补救
        只处理图片公式、扫描公式、低置信纯公式裁剪或整页对照任务
-       Pix2Text 默认候选，UniMERNet / PDF-Extract-Kit / MinerU 作为可选 worker
+       先查 image_hash / input_hash / model_version 缓存，未命中才推理
        写回 formula_recognition_results 和缓存
 
-  -> Round 3: 本地高精度复核
+  -> Round 2: 本地高精度多工具复核
        对低置信、问答 evidence、用户标注错误、复杂矩阵/对齐环境做二次识别
-       可以使用更慢模型，但只在后台批量运行
-       写回 revision candidates，不直接覆盖高置信原始证据
+       Pix2Text / Paddle Formula / MinerU / UniMERNet / PDF-Extract-Kit 通过独立 worker 运行
+       写回未接受候选，不直接覆盖高置信原始证据
 
-  -> Round 4: 云端语义修正
+  -> Round 3: 云端语义修正
        DeepSeek 基于上下文、候选公式、PDF 证据和模型置信度做校对建议
-       通过语法、证据一致性、上下文一致性门禁后才自动写回
+       只写候选 JSON；通过语法、证据一致性、上下文一致性门禁后才允许 accepted
        低置信结果进入人工/后续修正队列
 
-  -> Round 5: RAG / GraphRAG 增量增强
-       公式、章节、定理、概念、引用关系增量写入全文索引和图谱 artifact
+  -> Round 4: GraphRAG 结构增强
+       公式、章节、定理、概念、引用关系增量写入图谱 artifact
        基础 RAG 永远不等待 GraphRAG
+
+  -> Round 5: 知识库增量更新
+       accepted 高置信公式结果变化后增量写回 FTS/RAG/向量索引
+       按 block/content/input hash 跳过未变化内容
 ```
 
 ## 存储模型
 
 所有轮次都必须持久化。不能只把结果留在内存，也不能每次打开文档重新扫描。
 
-### 当前落地状态（2026-05-24）
+### 当前落地状态（2026-05-24，最新提交到 9a02945）
 
 已在现有 `FormulaIndexStore` 上完成第一版多轮任务持久化，而不是另起一个同步扫描器：
 
@@ -67,14 +66,19 @@ PDF 导入
   - `r2_local_high_precision`
   - `r3_cloud_semantic_review`
   - `r4_knowledge_graph`
-- `r5` 当前是设计层的知识库增量更新轮次，还没有作为代码枚举落地。下一步应把
-  accepted 高置信公式修订与知识库/GraphRAG 增量 upsert 的边界补齐，并决定是否
-  增加显式 `r5_knowledge_incremental_update` 轮次。
+  - `r5_knowledge_incremental_update`
+- `formula_recognition_results` 已落地，用于保存不同轮次、模型、输入 hash 和预处理版本的
+  公式候选结果；`accepted=true` 已有唯一性约束逻辑，后续还要补 revision/audit 表和
+  知识库增量 upsert 接线。
 - 导入 PDF 后会立即持久化：
   - 全文页码进入 `r0_pdf_structure` 页面队列。
   - `needs_ocr=True` 的公式块进入 `r1_cached_recognition`。
   - 所有已解析公式块进入 `r3_cloud_semantic_review` 的非 OCR 复核记录。
 - 显式高精度扫描使用 `r2_local_high_precision`，不会被 `r1_cached_recognition` 的 done 状态吞掉。
+- r0 页面 worker 当前调用 `BornDigitalFormulaExtractor`，只消费 MuPDF born-digital 结构证据，
+  写入 `stage=pdf_structure` 的未接受候选；r0 不初始化 MFD/OCR。
+- r2 当前通过 `ExternalFormulaToolRunner` 和 `tools/formula_tool_worker.py` 调独立工具环境，
+  已支持 Paddle Formula 与 Pix2Text 公式图候选；所有 r2 结果默认 `accepted=false`。
 
 这一步已完成多轮调度、存储闭环和 r3 候选写回的第一版：
 
@@ -82,7 +86,8 @@ PDF 导入
 - `FormulaSemanticReviewFlow` 已把 r3 消费接入后台 QThread；MainWindow 空闲调度会小批量启动语义复核，导入热路径只负责入队。
 - r3 结果写入 `formula_round_jobs.result_json`，保留 `suggested_latex`、`confidence`、`reason`、`risks` 和原始响应。
 - r3 不覆盖 `DocumentBlock.content`，也不改 accepted 公式；低置信或未通过门禁的结果只能作为候选证据保存。
-- 当前仍未完成真实 DeepSeek smoke test 和 accepted 修订门禁；这些必须作为后续独立闭环完成。
+- 当前仍未完成真实 DeepSeek r3 生产门禁、accepted revision 表、r4/r5 增量写回闭环；
+  这些必须作为后续独立闭环完成。
 
 ### 文档块
 
@@ -381,9 +386,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_inde
 ## 下一步落地
 
 1. 定义统一 `FormulaCandidateStore` / `FormulaResultStore` / `AsyncJobStore`。
-2. `FormulaIndexStore` 多轮任务表已完成第一版；继续补 `formula_recognition_results` 和 accepted revision 表。
-3. Pix2Text benchmark 已支持纯公式筛选、batch size、score metadata；下一步跑更大样本并与源码对齐。
-4. 增加 worker 抽象：`LocalFormulaWorker`、`DocumentParseWorker`、`CloudSemanticFixWorker`。
-5. 用 Attention/Napkin 建立同一批候选样本，比较 Pix2Text、UniMERNet、PDF-Extract-Kit、MinerU。
+2. `FormulaIndexStore` 多轮任务表、`formula_recognition_results` 和 accepted 唯一性已完成第一版；继续补 accepted revision/audit 表。
+3. Pix2Text/Paddle 外部 worker 已有最小候选接入；下一步用同一批 Attention/Napkin 裁剪样本扩展到 MinerU、UniMERNet/PDF-Extract-Kit，并做源码对齐。
+4. 增加更完整 worker 抽象：常驻 worker、批量协议、模型版本探测、模型缓存路径、失败降级和超时回收。
+5. 用 Attention/Napkin 建立同一批候选样本，比较 Pix2Text、Paddle Formula、UniMERNet、PDF-Extract-Kit、MinerU 的准确率与耗时。
 6. 对 bbox overlap 和 LaTeX 相似度审计做 profile，确认是否值得 C++17 下沉。
-7. 把高置信结果增量写回知识库和 GraphRAG artifact，低置信进入修正队列。
+7. 把 accepted 高置信结果增量写回知识库和 GraphRAG artifact，低置信进入修正队列。

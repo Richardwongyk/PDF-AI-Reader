@@ -58,6 +58,40 @@
 4. **交互性能不回退**：打开、滚动、缩放、翻译、问答入口不能被后台索引或公式识别拖垮。
 5. **工具路线专业化**：可大胆迁移到更成熟工具，但必须调研、测试、版本隔离和可回滚。
 
+## 当前任务的通俗描述
+
+现在做的不是“把 PDF 全部 OCR 一遍”，也不是写一个靠正则猜公式的小脚本，而是把 PDF 阅读器改成“先快后准”的论文理解系统：
+
+1. 打开 PDF 时，先用 PDF 自带的文本层、字体、字形坐标、矢量线和图片信息快速建立可读内容，让滚动、缩放、翻译、基础问答先可用。
+2. 后台把每一页、每个公式候选、每个工具结果都排成任务，分 r0/r1/r2/r3/r4/r5 多轮慢慢增强；每轮结果都落库，下次打开同一输入直接跳过。
+3. born-digital PDF 的公式优先靠 PDF 结构事实恢复；只有图片、扫描、乱码、缺文本层、低置信或用户显式精扫时，才调用 OCR/MFR。
+4. Paddle、Pix2Text、MinerU、UniMERNet/PDF-Extract-Kit 等外部工具只作为隔离 worker 提供候选，不允许直接覆盖正文。
+5. 高置信公式和章节/定理/引用关系最终要增量进入全文知识库和 GraphRAG，让问答能引用真实证据，而不是普通聊天。
+
+当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。
+
+## 到大作业完成的路线
+
+1. **公式质量闭环**
+   - Attention 和 Napkin 的 PDF、LaTeX 源码、图片资源都要纳入审计。
+   - r0/r1/r2/r3 每轮必须能证明：入队、输入 hash、模型版本、结果 JSON、跳过机制、失败记录、低置信不覆盖正文。
+   - 外部工具必须做同样样本对比，输出准确率、弱匹配率、P95 耗时、冷启动、缓存命中和失败样例。
+
+2. **知识库与 GraphRAG 闭环**
+   - 基础 FTS/RAG 保持秒级可用。
+   - accepted 高置信公式变化后，r5 要增量更新 FTS/向量索引和 GraphRAG artifact。
+   - r4 要把章节、公式、定理、概念、引用关系写成可追溯图谱证据。
+
+3. **真实交互闭环**
+   - E2E 必须模拟滚动翻页、页码跳转、缩放、双击翻译、隐藏/再打开、裂缝问答、右侧全文问答、日志审计。
+   - Napkin 作为长文档性能门槛，不能只用 Attention 小文件证明可用。
+   - 缩放后要清晰、翻译层不丢、滚动定位不乱，后台任务不能抢 UI。
+
+4. **产品完成与交付**
+   - 清理环境和缓存路径，写清主环境与各工具环境的安装/验证方法。
+   - 固定最终测试命令、演示脚本、失败边界和性能报告。
+   - 提交前确认无测试资料、日志、缓存、临时 benchmark 输出和额外署名。
+
 ## 2026-05-24 新会话交接状态
 
 新终端/新会话接手时必须先读：
@@ -71,8 +105,8 @@
 当前真实状态：
 
 - 主程序环境仍是 `C:\Users\WYK\.conda\envs\pdf_ai_reader_314`。
-- 临时 PDF 工具环境已删除，最后一次 `conda env list` 没有 `pdf_tool_*` 或 `pdf_formula_*`。
-- 不要动用户已有环境，不要在主环境混装 MinerU/PaddleOCR/PDF-Extract-Kit/UniMERNet。
+- 当前隔离工具环境存在：`pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`。
+- 不要动用户已有环境，不要在主环境混装 MinerU/PaddleOCR/PDF-Extract-Kit/UniMERNet；工具环境只作为独立 worker 使用。
 - 防休眠脚本存在，但新会话必须重新确认进程和日志。
 - 公式多轮解析要求见 `docs/next_session_handoff.md` 的“多轮公式解析要求”章节，不能遗漏 r0/r1/r2/r3/r4/r5。
 
@@ -83,7 +117,16 @@
 - r2：本地高精度多工具复核，独立 worker，只写候选。
 - r3：DeepSeek 等分析模型语义复核，写候选 JSON，不覆盖正文。
 - r4：公式/章节/定理/引用/概念关系异步写 GraphRAG。
-- r5：设计层轮次，代码尚未显式落地；accepted 高置信修正应增量写回全文索引，按 hash 跳过未变内容。
+- r5：`r5_knowledge_incremental_update` 枚举已存在；accepted 高置信修正应增量写回全文索引，按 hash 跳过未变内容，具体 upsert 接线尚未完成。
+
+最新实现状态：
+
+- 最新代码提交到 `9a02945 Add multi-tool formula candidate pipeline`。
+- r0 页面扫描已经改为 born-digital PDF 结构快扫：只用 MuPDF/现有审计事实写候选，不初始化 OCR/MFR。
+- `formula_recognition_results` 已保存每个模型/轮次/输入 hash 的公式候选，accepted 唯一性已测试。
+- r2 已有外部多工具候选 worker，当前 Paddle Formula 和 Pix2Text 单图 smoke 能返回候选；所有 r2 结果默认不覆盖正文。
+- MinerU 3.1.15 本地新模型已跑通 Attention 单页离线解析；PEK/UniMERNet 未跑通，旧 magic-pdf 缺权重。
+- 最新相关测试：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 66 passed。
 
 ## 今晚执行边界
 
@@ -327,9 +370,12 @@
 - 公式索引任务数据库写入 `data/formula_index_jobs.db`，已加入 `.gitignore`，不会进入版本库。
 - 公式后台识别成功后会刷新页面 block，并通过 `KnowledgeEngine.upsert_blocks()` 增量写回知识库。
 - 如果公式识别早于基础知识库构建完成，主窗口会暂存增量块，等 `build_finished` 后统一写入，避免竞态导致全文问答漏掉公式。
-- `FormulaIndexStore` 已扩展为多轮公式任务存储：`scan_round` 区分 `r0_pdf_structure`、`r1_cached_recognition`、`r2_local_high_precision`、`r3_cloud_semantic_review`、`r4_knowledge_graph`。
+- `FormulaIndexStore` 已扩展为多轮公式任务存储：`scan_round` 区分 `r0_pdf_structure`、`r1_cached_recognition`、`r2_local_high_precision`、`r3_cloud_semantic_review`、`r4_knowledge_graph`、`r5_knowledge_incremental_update`。
 - 新增 `formula_round_jobs` 统一记录非 OCR 轮次和跨轮状态，主键为 `doc_hash + scan_round + target_type + target_id`。
+- 新增 `formula_recognition_results` 统一保存结构解析、本地工具和云端语义修正候选；同一候选的 accepted 结果已保证唯一。
 - 导入时所有页进入 `r0_pdf_structure`，`needs_ocr=True` 公式进入 `r1_cached_recognition`，所有已解析公式进入 `r3_cloud_semantic_review` 复核记录。
+- r0 页面 worker 当前只执行 born-digital 结构快扫并写 `pdf_structure` 候选，不初始化 MFD/OCR。
+- r2 本地高精度轮当前通过外部 JSON worker 接入 Paddle Formula 和 Pix2Text 候选，后续扩展 MinerU/PEK/UniMERNet。
 - 新增 `FormulaSemanticReviewService`，用于消费 r3 队列并把云端语义修正写成候选 JSON；它不会覆盖原始公式块，也不会自动 accepted。
 - 新增 `FormulaSemanticReviewFlow`，用于在 UI 空闲时通过后台 QThread 小批量消费 r3 队列，避免导入、滚动、缩放等待云端复核。
 - 显式高精度扫描使用 `r2_local_high_precision`，不会因为 `r1_cached_recognition` 已完成而被跳过。
@@ -392,6 +438,7 @@ PDF 打开/滚动/缩放
 - `src/ui/main_window.py`：空闲调度已纳入 r3 pending 计数；后台顺序为 OCR/缓存任务优先、r3 小批量语义复核、页面级检测兜底。
 - `tools/formula_index_performance.py`：真实 Attention/Napkin 资料的轻量性能基准。
 - `tests/test_formula_index_flow.py`、`tests/test_formula_index_scheduler.py`、`tests/test_formula_index_performance.py`：覆盖多轮不互相覆盖、导入轮次统计、性能报告字段。
+- `tests/test_external_formula_tools.py`：覆盖外部公式工具 JSON runner、失败候选和环境变量配置。
 
 验证：
 
@@ -400,12 +447,12 @@ PDF 打开/滚动/缩放
 - Napkin 前 12 页：126 blocks，2 formula blocks，结构解析 0.9658s，持久化 0.0037s；`r0_pdf_structure:queued=12`、`r3_cloud_semantic_review:queued=2`。
 - 最新 `tools/formula_index_performance.py --case all`：Attention 15 页总 2.1970s、持久化 0.0046s；Napkin 前 16 页总 1.2997s、持久化 0.0306s。
 - r3 复核测试：`pytest tests/test_formula_semantic_review.py tests/test_formula_index_flow.py -q` 为 28 passed，包含真实 QThread smoke。
-- 最新默认测试：`pytest -q` 为 150 passed、3 skipped。
+- 最新相关测试：`pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q` 为 66 passed。
 
 仍未完成：
 
 - `r3_cloud_semantic_review` 已有独立服务消费、后台 flow、UI 空闲调度和候选写回，但还没有真实 DeepSeek smoke test、accepted 修订门禁和人工/自动验收策略。
-- `r2_local_high_precision` 已有轮次隔离，但还没有接 UniMERNet/MinerU/PDF-Extract-Kit 对照 worker。
+- `r2_local_high_precision` 已有轮次隔离和 Paddle/Pix2Text 候选 worker，但还没有接 UniMERNet/PDF-Extract-Kit，对 MinerU 也还没有接入统一候选协议。
 - 性能基准是限页热路径，不等同于完整 Napkin 1050 页闭环。
 - 公式准确率仍未达到目标，需要继续做 born-digital 源码对齐、高精度候选生成和多模型对照。
 
@@ -596,18 +643,19 @@ PDF 打开/滚动/缩放
 - 公式 OCR 缓存命中时不加载模型。
 - 提交信息和提交日志不出现额外自动署名。
 
-## 2026-05-24 暂停交接
+## 2026-05-24 历史公式审计记录
 
 ### 当前边界
 
-用户要求先停下思考。本阶段到这里为止，不再继续实现、不继续安装工具、不继续跑长测试、不做提交。当前需要保留现场，后续恢复时先从工作树和本节记录核对。
+本节保留早些时候的公式审计判断，主要用于理解 Napkin/Attention 源码对照问题。
+它不再代表当前工作树状态，也不再表示“暂停、不提交”。当前状态以上方“2026-05-24
+新会话交接状态”和“最新实现状态”为准。
 
 当前工作树状态：
 
-- 已修改但未提交：`tools/formula_latex_audit.py`、`tests/test_formula_detector.py`。
-- 已修改但不应纳入本阶段提交：`TODO.md`。
-- 未跟踪且不应纳入提交：`测试资料/`。
-- 防休眠脚本仍在后台运行：`keep_awake.ps1` 两个实例，`keep_awake_watchdog.ps1` 一个实例。
+- 以执行时的 `git status --short` 为准。
+- `测试资料/`、日志、缓存、临时 benchmark 输出仍不应提交。
+- 防休眠状态必须每次接手时重新检查。
 
 最近已提交成果：
 
@@ -615,7 +663,7 @@ PDF 打开/滚动/缩放
   - 公式审计把 `\text`、`\operatorname`、`\mathrm` 归为同一类直立文本/算子命令。
   - 这是审计归一化，不是生产公式识别器，也不是样例硬凑。
 
-当前未提交但已验证的成果：
+当时未提交但已验证的历史成果：
 
 - `tools/formula_latex_audit.py`
   - 新增按主 TeX 的 `\input` / `\include` 顺序展开源码。
@@ -672,8 +720,7 @@ PDF 打开/滚动/缩放
 
 ### 下一步建议顺序
 
-1. 先决定是否提交当前未提交的审计基线改动。
-   提交前只暂存 `tools/formula_latex_audit.py` 和 `tests/test_formula_detector.py`，不要暂存 `TODO.md` 和 `测试资料/`。
+1. 历史审计基线已经不是当前唯一待提交内容。恢复工作时先看上方最新状态和 `git status --short`。
 
 2. 若提交，提交前必须再跑：
    - `python -X utf8 -m pytest tests\test_formula_detector.py::test_formula_audit_ignores_latex_line_break_spacing tests\test_formula_detector.py::test_formula_latex_audit_can_match_display_scope tests\test_formula_detector.py::test_formula_audit_quality_gate_flags_low_recall -q`

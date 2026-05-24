@@ -14,7 +14,7 @@
 当前真实状态：
 
 1. 主程序环境仍为 `C:\Users\WYK\.conda\envs\pdf_ai_reader_314`。
-2. 2026-05-24 临时 PDF 工具环境安装尝试后已清理，`conda env list` 最后确认没有 `pdf_tool_*` 或 `pdf_formula_*` 环境。
+2. 2026-05-24 已按隔离 worker 思路建立工具环境：`pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`。这些不是主程序环境，不能混装进 `pdf_ai_reader_314`。
 3. 不要动用户已有环境，例如 `base`、`cs231n`、`drawing`、`science`、`pdf_ai_reader`、`pdf_ai_reader_314` 等。
 4. 防休眠脚本在仓库 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`，新会话必须先检查是否仍在运行。
 5. 外部工具（MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR、magic-pdf）要按独立 worker 环境矩阵验证，不得混装到主环境。
@@ -29,15 +29,23 @@
 | r2 本地高精度 | 用 Pix2Text/PaddleOCR/UniMERNet/PDF-Extract-Kit/MinerU 等独立 worker 做低置信复核 | 不把工具混进主环境，不直接覆盖正文 |
 | r3 云端语义复核 | DeepSeek 基于上下文和候选公式写 `suggested_latex/confidence/reason/risks` | 不无证据猜公式，不自动覆盖 |
 | r4 GraphRAG | 异步写公式、章节、定理、引用、概念关系 | 不阻塞基础 RAG 和阅读 |
-| r5 知识库增量更新（设计轮次，代码未落地） | accepted 高置信结果变化后按 hash 增量 upsert | 不重建整篇、不重复 embedding |
+| r5 知识库增量更新（枚举已落地，接线未完成） | accepted 高置信结果变化后按 hash 增量 upsert | 不重建整篇、不重复 embedding |
 
 下一步优先级：
 
 1. 读 `docs/next_session_handoff.md`，确认问题清单、失败教训、文件地图和交接提示词。
 2. 用主环境跑轻量测试确认代码基线，再跑 Attention/Napkin 公式与性能审计。
-3. 继续完成多轮公式解析 worker 接口：r0/r1/r2/r3/r4 每轮落库、跳过已完成结果、低置信只写候选。
-4. 重新调研外部工具时，先查官方文档和版本兼容，再建独立环境；每个工具必须通过 import、CLI、真实 PDF 小页烟测和 `pip check`。
+3. 继续完成多轮公式解析真实质量闭环：r0 born-digital 结构候选、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量都必须能落库和跳过。
+4. 继续验证外部工具：MinerU 新模型、Paddle Formula、Pix2Text 已有 smoke；PEK/UniMERNet 和旧 magic-pdf 仍要补齐或明确淘汰。
 5. 继续推进全文 RAG/GraphRAG：默认秒级 FTS/RAG 可用，DeepSeek 分析回答和图谱抽取异步增强。
+
+2026-05-24 最新实现检查点：
+
+- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`：完成异步公式轮次入队、公式识别候选表、accepted 唯一性、r0 born-digital 结构候选落库、r2 外部多工具候选 worker。
+- r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR；r2 通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
+- 相关测试基线：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 66 passed。
+- Attention 多轮入库最新基准：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
+- 工具 smoke：MinerU 3.1.15 本地新模型 Attention 单页跑通；Paddle Formula/Pix2Text 单张公式图 worker 跑通但质量仍只能候选；magic-pdf 缺旧权重；PEK/UniMERNet 未跑通。
 
 ---
 

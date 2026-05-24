@@ -21,10 +21,11 @@
 
 当前主环境是 Python 3.14 + CPU PyTorch + ONNXRuntime，无 CUDA。PaddlePaddle 没有可用的 Python 3.14 wheel，因此 PaddleOCR 不能直接装进主环境。单独新建 Python 3.12 worker 能跑，但会增加部署复杂度和磁盘体积，不适合作为默认方案。
 
-2026-05-24 后续补充：外部工具环境尝试后已清理，最后一次确认没有 `pdf_tool_*`
-或 `pdf_formula_*` 环境。下一次评估 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet
-时，必须按 `docs/next_session_handoff.md` 的矩阵独立建 worker 环境，并记录真实 PDF
-小页烟测、冷启动、推理耗时、峰值内存和源码对照质量。
+2026-05-24 后续补充：外部工具环境已按隔离 worker 思路重新建立，当前有
+`pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、
+`pdf_tool_pek310`。下一次评估 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet
+时，必须继续按 `docs/next_session_handoff.md` 的矩阵独立验证，并记录真实 PDF
+小页烟测、冷启动、推理耗时、峰值内存、缓存路径和源码对照质量。
 
 PaddleOCR 官方公式模块提供 `FormulaRecognition(model_name=...)` 和 `predict(input=..., batch_size=...)`，输出字段为 `rec_formula`。官方数据里 `PP-FormulaNet_plus-S` 侧重速度和英文公式，CPU 高性能模式约 260ms/公式；`PP-FormulaNet_plus-M/L` 准确率更高但 CPU 推理明显更慢。RapidLaTeXOCR 使用 ONNXRuntime/OpenVINO，技术路线更轻，但当前包对 Python 3.14 不友好，不能无代价接入主环境。
 
