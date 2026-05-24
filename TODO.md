@@ -5,6 +5,132 @@
 
 ---
 
+## 2026-05-24 新终端交接入口（必读）
+
+> 新会话接手时先读根目录 `AGENTS.md`，再读 `docs/next_session_handoff.md`。
+> 当前阶段的关键任务不是继续盲目安装工具，而是按已写入文档的设计边界推进：
+> born-digital PDF 公式先走 PDF 结构解析，扫描/图片公式才走 OCR/MFR；所有重任务异步分批、结果落库、可恢复；RAG/GraphRAG 必须基于全文证据；测试必须覆盖 Attention 与 Napkin 两份真实资料。
+
+当前真实状态：
+
+1. 主程序环境仍为 `C:\Users\WYK\.conda\envs\pdf_ai_reader_314`。
+2. 2026-05-24 临时 PDF 工具环境安装尝试后已清理，`conda env list` 最后确认没有 `pdf_tool_*` 或 `pdf_formula_*` 环境。
+3. 不要动用户已有环境，例如 `base`、`cs231n`、`drawing`、`science`、`pdf_ai_reader`、`pdf_ai_reader_314` 等。
+4. 防休眠脚本在仓库 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`，新会话必须先检查是否仍在运行。
+5. 外部工具（MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR、magic-pdf）要按独立 worker 环境矩阵验证，不得混装到主环境。
+6. 所有提交不得带额外署名、来源标记或生成工具署名；不要提交 `测试资料/`、日志、缓存、临时 benchmark 输出。
+
+多轮公式解析必须让下一个助手首先看到并遵守：
+
+| 轮次 | 必须完成的事 | 不能做的事 |
+| --- | --- | --- |
+| r0 PDF 结构快扫 | 导入后全篇页面入队，抽取文本层/glyph/font/bbox/vector/图片候选并落库 | 不 OCR，不阻塞首屏 |
+| r1 缓存优先识别 | 只处理 `needs_ocr=True`、图片/扫描/已有公式块，先查缓存再推理 | 不重复扫已完成输入 hash |
+| r2 本地高精度 | 用 Pix2Text/PaddleOCR/UniMERNet/PDF-Extract-Kit/MinerU 等独立 worker 做低置信复核 | 不把工具混进主环境，不直接覆盖正文 |
+| r3 云端语义复核 | DeepSeek 基于上下文和候选公式写 `suggested_latex/confidence/reason/risks` | 不无证据猜公式，不自动覆盖 |
+| r4 GraphRAG | 异步写公式、章节、定理、引用、概念关系 | 不阻塞基础 RAG 和阅读 |
+| r5 知识库增量更新（设计轮次，代码未落地） | accepted 高置信结果变化后按 hash 增量 upsert | 不重建整篇、不重复 embedding |
+
+下一步优先级：
+
+1. 读 `docs/next_session_handoff.md`，确认问题清单、失败教训、文件地图和交接提示词。
+2. 用主环境跑轻量测试确认代码基线，再跑 Attention/Napkin 公式与性能审计。
+3. 继续完成多轮公式解析 worker 接口：r0/r1/r2/r3/r4 每轮落库、跳过已完成结果、低置信只写候选。
+4. 重新调研外部工具时，先查官方文档和版本兼容，再建独立环境；每个工具必须通过 import、CLI、真实 PDF 小页烟测和 `pip check`。
+5. 继续推进全文 RAG/GraphRAG：默认秒级 FTS/RAG 可用，DeepSeek 分析回答和图谱抽取异步增强。
+
+---
+
+## 2026-05-23 交接记录：PRD 对齐审计与下一步
+
+> 本节用于下一次打开新会话后继续工作。当前只记录问题和建议，未修改业务代码。
+> 用户反馈：现有功能离需求文档较远；同时本机约束为 16G 内存 + CPU，Ollama 本地大模型过慢、过大，不适合作为默认生成模型。
+
+### 结论
+
+当前项目不是完全没做，而是很多 PRD/TDD 标为“已实现”的能力只完成了骨架或部分接线。下一步应先把产品路线从“本地大模型优先”调整为“本地解析/索引优先，生成模型默认云端可配置，UI 明确告知隐私边界”。否则 16G CPU 环境下用户体验会被 Ollama 拖垮。
+
+### P0：必须优先修的问题
+
+1. 模型路由语义错误
+   - 现状：`src/main.py:143-154` 在存在云端 API Key 时把 `LiteLLMClient` 放进 `primary_client`，然后作为 `HybridModelRouter(local_client, cloud_client, config)` 的第一个参数传入。
+   - 后果：`local_first` 名义上是本地优先，实际第一个客户端可能就是云端；也没有“每次云端调用显式授权”的机制。
+   - 相关代码：`src/main.py:136-154`，`src/core/ai_engine.py:304-388`。
+   - 建议：拆清楚 `local_client`、`cloud_client`、`mock_client` 三者；16G CPU 默认可设为 `cloud_only`，但 UI/状态栏必须明确“生成内容会调用云端 API”。
+
+2. Ollama 不应再作为默认生成模型要求
+   - 现状：`config.yaml` 和 `src/core/models.py` 默认仍是 `qwen3.5:4b`、`bge-m3`、`local_first`。
+   - 现状：首次启动会强制检查 Ollama，并弹窗引导安装/下载 `qwen3.5:4b`。
+   - 后果：与用户实际硬件冲突，启动体验和产品方向都不合理。
+   - 相关代码：`src/core/models.py:127-137`，`src/ui/main_window.py:783-813`，`config.yaml:1-9`。
+   - 建议：默认路线改为云端生成；首次启动改为检查云端 API 配置，不再要求 Ollama。Ollama 保留为高级/可选本地模式。
+
+3. 嵌入兜底是 Mock 随机向量，知识库检索质量不可用
+   - 现状：`src/main.py:100-114` 中 Ollama 嵌入不可用时回退 `MockLLMClient`。
+   - 后果：Mock 向量由固定随机数生成，不具备语义；知识库“能构建”，但问答检索质量基本不可信。
+   - 建议：实现轻量本地嵌入兜底，例如 `HashingEmbeddingClient`，使用确定性词袋/哈希向量，至少能按关键词相关性检索；或单独配置云端 embedding 模型。
+
+4. 问答未严格基于文档上下文
+   - 现状：当没有当前段落和检索结果时，`QAService` 会写入“无额外上下文，请根据你的知识回答”。
+   - 后果：这会把论文助手降级成普通聊天，和 PRD 的“基于全文知识库”冲突。
+   - 相关代码：`src/core/ai_engine.py:783-790`。
+   - 建议：无上下文时返回“知识库未就绪/未检索到相关片段”，不要让模型自由发挥。
+
+### P1：产品闭环缺口
+
+1. 知识库状态反馈不完整
+   - 现状：`DocumentFlow._on_parse_completed()` 会自动构建知识库，说明自动构建并非完全缺失。
+   - 相关代码：`src/app/document_flow.py:112-124`。
+   - 缺口：UI 只在 `_refresh_knowledge_status()` 显示“知识库构建中/就绪”，缺少构建中进度、完成后刷新、失败后的可操作提示。
+   - 相关代码：`src/ui/main_window.py:413-421`。
+
+2. 追问建议未形成完整接线
+   - 现状：`QAService.generate_followup_questions()` 和 `SplitWidget.show_followup_questions()` 都存在。
+   - 相关代码：`src/core/ai_engine.py:713-745`，`src/ui/split_widget.py:315-325`。
+   - 缺口：主问答完成流程未看到调用并展示追问建议的闭环。
+
+3. PRD 中多个可见 UI 功能仍是占位
+   - 搜索框只是占位：`src/ui/main_window.py:196-201`。
+   - 右侧 AI 工具集只是占位：`src/ui/main_window.py:237-244`。
+   - 术语表编辑器只是提示“后续版本实现”：`src/ui/main_window.py:707-709`。
+
+4. 定理/证明保护条件过窄
+   - 现状：只有 `block_type == "heading"` 且包含 theorem/lemma/proof/definition 时才追加保护提示。
+   - 后果：普通段落里的定理、证明不会触发保护。
+   - 相关代码：`src/core/ai_engine.py:600-608`。
+
+### 建议下一次新会话的执行顺序
+
+1. 先改模型路线
+   - 默认生成策略改为 `cloud_only` 或显式 `cloud_preferred`。
+   - 保留 Ollama 作为高级选项，不在首次启动强制要求。
+   - 修正 `HybridModelRouter` 构造参数，避免把云端客户端伪装成本地客户端。
+
+2. 再改嵌入路线
+   - 增加确定性的轻量本地 `HashingEmbeddingClient`，替代 Mock 随机向量作为无 Ollama 默认兜底。
+   - 如果以后要更准，再加云端 embedding 配置项，和生成模型分开。
+
+3. 再修问答边界
+   - 知识库未就绪时，裂缝问答直接提示“知识库构建中，请稍后再问”。
+   - 检索为空时，要求模型说明“文档中未找到依据”，不要允许无上下文泛答。
+
+4. 最后补 UI 闭环
+   - 知识库状态进度和失败重试。
+   - 追问建议显示。
+   - 搜索框实际搜索当前文档块。
+   - 右侧 AI 工具集从占位改成知识库状态、术语摘要、推荐问题。
+
+### 下一次开始前的验证命令
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest -q
+git status --short
+```
+
+上一次完整验证结果：`5 passed`。注意不要使用 PATH 里的 `pytest`，它之前指向 Python 3.13 环境。
+
+---
+
 ## 一、Git 演化时间线（按阶段）
 
 ### 阶段 0：原型 (1 commit)
@@ -212,7 +338,7 @@ UI 用 _current_answer            │
 
 ═══════════════════          ════════════════════════════════
   Infrastructure                 Infrastructure (NEW)
-  (none)                         
+  (none)
                                  src/core/
                                  ├─ ServiceContainer (DI 容器)
                                  └─ ErrorHandler (四级严重度)

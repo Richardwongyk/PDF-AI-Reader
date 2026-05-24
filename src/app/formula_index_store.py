@@ -15,6 +15,7 @@ import threading
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -22,6 +23,17 @@ from src.core.models import DocumentBlock
 
 FormulaTaskStatus = Literal["queued", "running", "done", "failed", "skipped"]
 FormulaPageScanStatus = Literal["queued", "running", "done", "failed", "skipped"]
+FormulaRoundTarget = Literal["block", "page"]
+
+
+class FormulaScanRound(StrEnum):
+    """Persisted stages for multi-pass formula parsing."""
+
+    PDF_STRUCTURE = "r0_pdf_structure"
+    CACHED_RECOGNITION = "r1_cached_recognition"
+    LOCAL_HIGH_PRECISION = "r2_local_high_precision"
+    CLOUD_SEMANTIC_REVIEW = "r3_cloud_semantic_review"
+    KNOWLEDGE_GRAPH = "r4_knowledge_graph"
 
 
 @dataclass(frozen=True)
@@ -36,6 +48,7 @@ class FormulaIndexTask:
     priority: float
     status: FormulaTaskStatus
     content_hash: str
+    scan_round: str = FormulaScanRound.CACHED_RECOGNITION.value
     image_hash: str = ""
     latex: str = ""
     model: str = ""
@@ -53,6 +66,26 @@ class FormulaPageScanTask:
     page_num: int
     priority: float
     status: FormulaPageScanStatus
+    scan_round: str = FormulaScanRound.PDF_STRUCTURE.value
+    error: str = ""
+    attempts: int = 0
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class FormulaRoundRecord:
+    """Generic persisted record for one formula parsing round and target."""
+
+    doc_hash: str
+    filepath: str
+    scan_round: str
+    target_type: FormulaRoundTarget
+    target_id: str
+    page_num: int
+    priority: float
+    status: FormulaTaskStatus
+    result_json: dict[str, object]
+    elapsed_ms: int = 0
     error: str = ""
     attempts: int = 0
     updated_at: str = ""
@@ -75,6 +108,7 @@ class FormulaIndexStore:
                 priority     REAL NOT NULL DEFAULT 0,
                 status       TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                scan_round   TEXT NOT NULL DEFAULT 'r1_cached_recognition',
                 image_hash   TEXT NOT NULL DEFAULT '',
                 latex        TEXT NOT NULL DEFAULT '',
                 model        TEXT NOT NULL DEFAULT '',
@@ -96,6 +130,7 @@ class FormulaIndexStore:
                 page_num   INTEGER NOT NULL,
                 priority   REAL NOT NULL DEFAULT 0,
                 status     TEXT NOT NULL,
+                scan_round TEXT NOT NULL DEFAULT 'r0_pdf_structure',
                 error      TEXT NOT NULL DEFAULT '',
                 attempts   INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -107,6 +142,30 @@ class FormulaIndexStore:
             "CREATE INDEX IF NOT EXISTS idx_formula_page_scan_status "
             "ON formula_page_scan_jobs(doc_hash, status, priority DESC, page_num ASC)"
         )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS formula_round_jobs (
+                doc_hash    TEXT NOT NULL,
+                filepath    TEXT NOT NULL,
+                scan_round  TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id   TEXT NOT NULL,
+                page_num    INTEGER NOT NULL,
+                priority    REAL NOT NULL DEFAULT 0,
+                status      TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT '{}',
+                elapsed_ms  INTEGER NOT NULL DEFAULT 0,
+                error       TEXT NOT NULL DEFAULT '',
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (doc_hash, scan_round, target_type, target_id)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_round_jobs_status "
+            "ON formula_round_jobs(doc_hash, scan_round, status, priority DESC, page_num ASC)"
+        )
+        self._migrate_schema()
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -116,11 +175,13 @@ class FormulaIndexStore:
         filepath: str,
         blocks: list[DocumentBlock],
         priority_pages: set[int] | None = None,
+        scan_round: str | FormulaScanRound = FormulaScanRound.CACHED_RECOGNITION,
     ) -> int:
         """Insert or refresh queued jobs for OCR-pending formula blocks."""
         if not doc_hash or not filepath or not blocks:
             return 0
         priority_pages = priority_pages or set()
+        round_name = _round_value(scan_round)
         now = _now()
         inserted = 0
         with self._lock:
@@ -133,13 +194,29 @@ class FormulaIndexStore:
                        WHERE doc_hash=? AND block_id=?""",
                     (doc_hash, block.id),
                 ).fetchone()
-                if row and row[0] == "done" and row[1] == content_hash:
+                if (
+                    row
+                    and row[0] == "done"
+                    and row[1] == content_hash
+                    and round_name == FormulaScanRound.CACHED_RECOGNITION.value
+                ):
+                    self._enqueue_round_job_locked(
+                        doc_hash=doc_hash,
+                        filepath=filepath,
+                        scan_round=round_name,
+                        target_type="block",
+                        target_id=block.id,
+                        page_num=block.page_num,
+                        priority=priority,
+                        status="done",
+                        now=now,
+                    )
                     continue
                 self._conn.execute(
                     """INSERT INTO formula_index_jobs
                        (doc_hash, filepath, block_id, page_num, bbox_json, priority,
-                        status, content_hash, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                        status, content_hash, scan_round, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
                        ON CONFLICT(doc_hash, block_id) DO UPDATE SET
                          filepath=excluded.filepath,
                          page_num=excluded.page_num,
@@ -148,10 +225,12 @@ class FormulaIndexStore:
                          status=CASE
                            WHEN formula_index_jobs.status='done'
                             AND formula_index_jobs.content_hash=excluded.content_hash
+                            AND excluded.scan_round='r1_cached_recognition'
                            THEN 'done'
                            ELSE 'queued'
                          END,
                          content_hash=excluded.content_hash,
+                         scan_round=excluded.scan_round,
                          error='',
                          updated_at=excluded.updated_at""",
                     (
@@ -162,9 +241,21 @@ class FormulaIndexStore:
                         bbox_json,
                         priority,
                         content_hash,
+                        round_name,
                         now,
                         now,
                     ),
+                )
+                self._enqueue_round_job_locked(
+                    doc_hash=doc_hash,
+                    filepath=filepath,
+                    scan_round=round_name,
+                    target_type="block",
+                    target_id=block.id,
+                    page_num=block.page_num,
+                    priority=priority,
+                    status="queued",
+                    now=now,
                 )
                 inserted += 1
             self._conn.commit()
@@ -176,10 +267,12 @@ class FormulaIndexStore:
         filepath: str,
         pages: list[int] | range,
         priority_pages: set[int] | None = None,
+        scan_round: str | FormulaScanRound = FormulaScanRound.PDF_STRUCTURE,
     ) -> int:
         """Insert or refresh page-level MFD jobs for a document."""
         if not doc_hash or not filepath:
             return 0
+        round_name = _round_value(scan_round)
         page_nums: list[int] = []
         for page in pages:
             try:
@@ -204,8 +297,8 @@ class FormulaIndexStore:
                 ).fetchone()
                 self._conn.execute(
                     """INSERT INTO formula_page_scan_jobs
-                       (doc_hash, filepath, page_num, priority, status, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, 'queued', ?, ?)
+                       (doc_hash, filepath, page_num, priority, status, scan_round, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)
                        ON CONFLICT(doc_hash, page_num) DO UPDATE SET
                          filepath=excluded.filepath,
                          priority=max(formula_page_scan_jobs.priority, excluded.priority),
@@ -214,17 +307,97 @@ class FormulaIndexStore:
                            THEN 'done'
                            ELSE 'queued'
                          END,
+                         scan_round=excluded.scan_round,
                          error='',
                          updated_at=excluded.updated_at""",
-                    (doc_hash, filepath, page_num, priority, now, now),
+                    (doc_hash, filepath, page_num, priority, round_name, now, now),
+                )
+                status = "done" if row and str(row[0]) == "done" else "queued"
+                self._enqueue_round_job_locked(
+                    doc_hash=doc_hash,
+                    filepath=filepath,
+                    scan_round=round_name,
+                    target_type="page",
+                    target_id=str(page_num),
+                    page_num=page_num,
+                    priority=priority,
+                    status=status,
+                    now=now,
                 )
                 if not row or str(row[0]) != "done":
                     inserted += 1
             self._conn.commit()
         return inserted
 
-    def mark_running(self, doc_hash: str, block_ids: list[str]) -> None:
-        self._update_status(doc_hash, block_ids, "running", increment_attempts=True)
+    def enqueue_round_records(
+        self,
+        doc_hash: str,
+        filepath: str,
+        scan_round: str | FormulaScanRound,
+        target_type: FormulaRoundTarget,
+        targets: list[DocumentBlock] | list[int],
+        priority_pages: set[int] | None = None,
+        status: FormulaTaskStatus = "queued",
+    ) -> int:
+        """Persist non-OCR round work such as semantic review or graph updates."""
+        if not doc_hash or not filepath or not targets:
+            return 0
+        priority_pages = priority_pages or set()
+        round_name = _round_value(scan_round)
+        now = _now()
+        inserted = 0
+        with self._lock:
+            for target in targets:
+                if target_type == "block":
+                    if not isinstance(target, DocumentBlock):
+                        continue
+                    target_id = target.id
+                    page_num = target.page_num
+                    priority = self.priority_for_block(target, priority_pages)
+                else:
+                    try:
+                        page_num = int(target)
+                    except (TypeError, ValueError):
+                        continue
+                    if page_num < 0:
+                        continue
+                    target_id = str(page_num)
+                    priority = self.priority_for_page(page_num, priority_pages)
+                row = self._conn.execute(
+                    """SELECT status FROM formula_round_jobs
+                       WHERE doc_hash=? AND scan_round=? AND target_type=? AND target_id=?""",
+                    (doc_hash, round_name, target_type, target_id),
+                ).fetchone()
+                if row and str(row[0]) == "done":
+                    continue
+                self._enqueue_round_job_locked(
+                    doc_hash=doc_hash,
+                    filepath=filepath,
+                    scan_round=round_name,
+                    target_type=target_type,
+                    target_id=target_id,
+                    page_num=page_num,
+                    priority=priority,
+                    status=status,
+                    now=now,
+                )
+                inserted += 1
+            self._conn.commit()
+        return inserted
+
+    def mark_running(
+        self,
+        doc_hash: str,
+        block_ids: list[str],
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> None:
+        self._update_status(
+            doc_hash,
+            block_ids,
+            "running",
+            increment_attempts=True,
+            scan_round=scan_round,
+        )
 
     def mark_done(
         self,
@@ -233,6 +406,7 @@ class FormulaIndexStore:
         latex: str,
         image_hash: str,
         model: str = "pix2text-mfr",
+        scan_round: str | FormulaScanRound | None = None,
     ) -> None:
         now = _now()
         with self._lock:
@@ -242,9 +416,27 @@ class FormulaIndexStore:
                    WHERE doc_hash=? AND block_id=?""",
                 (latex, image_hash, model, now, doc_hash, block_id),
             )
+            self._update_round_job_for_block_locked(
+                doc_hash,
+                block_id,
+                "done",
+                scan_round=scan_round,
+                now=now,
+                result_json={
+                    "latex": latex,
+                    "image_hash": image_hash,
+                    "model": model,
+                },
+            )
             self._conn.commit()
 
-    def mark_failed(self, doc_hash: str, block_id: str, error: str) -> None:
+    def mark_failed(
+        self,
+        doc_hash: str,
+        block_id: str,
+        error: str,
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> None:
         now = _now()
         with self._lock:
             self._conn.execute(
@@ -253,9 +445,23 @@ class FormulaIndexStore:
                    WHERE doc_hash=? AND block_id=?""",
                 (error[:500], now, doc_hash, block_id),
             )
+            self._update_round_job_for_block_locked(
+                doc_hash,
+                block_id,
+                "failed",
+                scan_round=scan_round,
+                now=now,
+                error=error,
+            )
             self._conn.commit()
 
-    def mark_skipped(self, doc_hash: str, block_id: str, reason: str) -> None:
+    def mark_skipped(
+        self,
+        doc_hash: str,
+        block_id: str,
+        reason: str,
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> None:
         now = _now()
         with self._lock:
             self._conn.execute(
@@ -264,15 +470,45 @@ class FormulaIndexStore:
                    WHERE doc_hash=? AND block_id=?""",
                 (reason[:500], now, doc_hash, block_id),
             )
+            self._update_round_job_for_block_locked(
+                doc_hash,
+                block_id,
+                "skipped",
+                scan_round=scan_round,
+                now=now,
+                error=reason,
+            )
             self._conn.commit()
 
-    def mark_pages_running(self, doc_hash: str, page_nums: list[int]) -> None:
-        self._update_page_status(doc_hash, page_nums, "running", increment_attempts=True)
+    def mark_pages_running(
+        self,
+        doc_hash: str,
+        page_nums: list[int],
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> None:
+        self._update_page_status(
+            doc_hash,
+            page_nums,
+            "running",
+            increment_attempts=True,
+            scan_round=scan_round,
+        )
 
-    def mark_pages_done(self, doc_hash: str, page_nums: list[int]) -> None:
-        self._update_page_status(doc_hash, page_nums, "done")
+    def mark_pages_done(
+        self,
+        doc_hash: str,
+        page_nums: list[int],
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> None:
+        self._update_page_status(doc_hash, page_nums, "done", scan_round=scan_round)
 
-    def mark_page_failed(self, doc_hash: str, page_num: int, error: str) -> None:
+    def mark_page_failed(
+        self,
+        doc_hash: str,
+        page_num: int,
+        error: str,
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> None:
         now = _now()
         with self._lock:
             self._conn.execute(
@@ -280,6 +516,14 @@ class FormulaIndexStore:
                    SET status='failed', error=?, updated_at=?
                    WHERE doc_hash=? AND page_num=?""",
                 (error[:500], now, doc_hash, page_num),
+            )
+            self._update_round_job_for_page_locked(
+                doc_hash,
+                int(page_num),
+                "failed",
+                scan_round=scan_round,
+                now=now,
+                error=error,
             )
             self._conn.commit()
 
@@ -314,6 +558,7 @@ class FormulaIndexStore:
         doc_hash: str,
         statuses: set[str] | None = None,
         limit: int = 100,
+        scan_round: str | FormulaScanRound | None = None,
     ) -> list[FormulaIndexTask]:
         params: list[object] = [doc_hash]
         where = "doc_hash=?"
@@ -321,12 +566,15 @@ class FormulaIndexStore:
             placeholders = ",".join("?" for _ in statuses)
             where += f" AND status IN ({placeholders})"
             params.extend(sorted(statuses))
+        if scan_round is not None:
+            where += " AND scan_round=?"
+            params.append(_round_value(scan_round))
         params.append(limit)
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT doc_hash, filepath, block_id, page_num, bbox_json,
                            priority, status, content_hash, image_hash, latex,
-                           model, error, attempts, updated_at
+                           model, error, attempts, updated_at, scan_round
                     FROM formula_index_jobs
                     WHERE {where}
                     ORDER BY priority DESC, page_num ASC, block_id ASC
@@ -340,6 +588,7 @@ class FormulaIndexStore:
         doc_hash: str,
         statuses: set[str] | None = None,
         limit: int = 100,
+        scan_round: str | FormulaScanRound | None = None,
     ) -> list[FormulaPageScanTask]:
         params: list[object] = [doc_hash]
         where = "doc_hash=?"
@@ -347,11 +596,14 @@ class FormulaIndexStore:
             placeholders = ",".join("?" for _ in statuses)
             where += f" AND status IN ({placeholders})"
             params.extend(sorted(statuses))
+        if scan_round is not None:
+            where += " AND scan_round=?"
+            params.append(_round_value(scan_round))
         params.append(limit)
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT doc_hash, filepath, page_num, priority, status,
-                           error, attempts, updated_at
+                           error, attempts, updated_at, scan_round
                     FROM formula_page_scan_jobs
                     WHERE {where}
                     ORDER BY priority DESC, page_num ASC
@@ -368,9 +620,156 @@ class FormulaIndexStore:
                 error=str(row[5]),
                 attempts=int(row[6]),
                 updated_at=str(row[7]),
+                scan_round=str(row[8]),
             )
             for row in rows
         ]
+
+    def round_counts(
+        self,
+        doc_hash: str,
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> dict[str, int]:
+        params: list[object] = [doc_hash]
+        where = "doc_hash=?"
+        if scan_round is not None:
+            where += " AND scan_round=?"
+            params.append(_round_value(scan_round))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT scan_round || ':' || status, COUNT(*)
+                    FROM formula_round_jobs
+                    WHERE {where}
+                    GROUP BY scan_round, status""",
+                params,
+            ).fetchall()
+        return {str(name): int(count) for name, count in rows}
+
+    def round_pending_count(
+        self,
+        doc_hash: str,
+        scan_round: str | FormulaScanRound | None = None,
+    ) -> int:
+        """Return queued/running generic round records for one document."""
+        counts = self.round_counts(doc_hash, scan_round=scan_round)
+        return sum(
+            count
+            for name, count in counts.items()
+            if name.endswith(":queued") or name.endswith(":running")
+        )
+
+    def list_round_records(
+        self,
+        doc_hash: str,
+        statuses: set[str] | None = None,
+        scan_round: str | FormulaScanRound | None = None,
+        limit: int = 100,
+    ) -> list[FormulaRoundRecord]:
+        params: list[object] = [doc_hash]
+        where = "doc_hash=?"
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            where += f" AND status IN ({placeholders})"
+            params.extend(sorted(statuses))
+        if scan_round is not None:
+            where += " AND scan_round=?"
+            params.append(_round_value(scan_round))
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT doc_hash, filepath, scan_round, target_type, target_id,
+                           page_num, priority, status, result_json, elapsed_ms,
+                           error, attempts, updated_at
+                    FROM formula_round_jobs
+                    WHERE {where}
+                    ORDER BY scan_round ASC, priority DESC, page_num ASC, target_id ASC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._row_to_round_record(row) for row in rows]
+
+    def mark_round_running(
+        self,
+        doc_hash: str,
+        scan_round: str | FormulaScanRound,
+        target_type: FormulaRoundTarget,
+        target_ids: list[str],
+    ) -> None:
+        """Mark generic round records as running and increment attempts."""
+        if not doc_hash or not target_ids:
+            return
+        now = _now()
+        round_name = _round_value(scan_round)
+        with self._lock:
+            self._conn.executemany(
+                """UPDATE formula_round_jobs
+                   SET status='running', attempts=attempts+1, error='', updated_at=?
+                   WHERE doc_hash=? AND scan_round=? AND target_type=? AND target_id=?""",
+                [
+                    (now, doc_hash, round_name, target_type, str(target_id))
+                    for target_id in target_ids
+                ],
+            )
+            self._conn.commit()
+
+    def mark_round_done(
+        self,
+        doc_hash: str,
+        scan_round: str | FormulaScanRound,
+        target_type: FormulaRoundTarget,
+        target_id: str,
+        result_json: dict[str, object],
+        elapsed_ms: int = 0,
+    ) -> None:
+        """Persist a generic round result without touching DocumentBlock content."""
+        now = _now()
+        payload = json.dumps(result_json, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            self._conn.execute(
+                """UPDATE formula_round_jobs
+                   SET status='done', result_json=?, elapsed_ms=?, error='', updated_at=?
+                   WHERE doc_hash=? AND scan_round=? AND target_type=? AND target_id=?""",
+                (
+                    payload,
+                    max(0, int(elapsed_ms)),
+                    now,
+                    doc_hash,
+                    _round_value(scan_round),
+                    target_type,
+                    str(target_id),
+                ),
+            )
+            self._conn.commit()
+
+    def mark_round_failed(
+        self,
+        doc_hash: str,
+        scan_round: str | FormulaScanRound,
+        target_type: FormulaRoundTarget,
+        target_id: str,
+        error: str,
+        elapsed_ms: int = 0,
+        status: FormulaTaskStatus = "failed",
+    ) -> None:
+        """Persist a generic round failure or skip reason."""
+        now = _now()
+        with self._lock:
+            self._conn.execute(
+                """UPDATE formula_round_jobs
+                   SET status=?, elapsed_ms=?, error=?, updated_at=?
+                   WHERE doc_hash=? AND scan_round=? AND target_type=? AND target_id=?""",
+                (
+                    status,
+                    max(0, int(elapsed_ms)),
+                    error[:500],
+                    now,
+                    doc_hash,
+                    _round_value(scan_round),
+                    target_type,
+                    str(target_id),
+                ),
+            )
+            self._conn.commit()
 
     def _update_status(
         self,
@@ -378,11 +777,13 @@ class FormulaIndexStore:
         block_ids: list[str],
         status: FormulaTaskStatus,
         increment_attempts: bool = False,
+        scan_round: str | FormulaScanRound | None = None,
     ) -> None:
         if not doc_hash or not block_ids:
             return
         now = _now()
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
+        round_name = _round_value(scan_round) if scan_round is not None else None
         with self._lock:
             self._conn.executemany(
                 f"""UPDATE formula_index_jobs
@@ -390,6 +791,15 @@ class FormulaIndexStore:
                     WHERE doc_hash=? AND block_id=?""",
                 [(status, now, doc_hash, block_id) for block_id in block_ids],
             )
+            for block_id in block_ids:
+                self._update_round_job_for_block_locked(
+                    doc_hash,
+                    block_id,
+                    status,
+                    scan_round=round_name,
+                    now=now,
+                    increment_attempts=increment_attempts,
+                )
             self._conn.commit()
 
     def _update_page_status(
@@ -398,11 +808,13 @@ class FormulaIndexStore:
         page_nums: list[int],
         status: FormulaPageScanStatus,
         increment_attempts: bool = False,
+        scan_round: str | FormulaScanRound | None = None,
     ) -> None:
         if not doc_hash or not page_nums:
             return
         now = _now()
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
+        round_name = _round_value(scan_round) if scan_round is not None else None
         with self._lock:
             self._conn.executemany(
                 f"""UPDATE formula_page_scan_jobs
@@ -410,7 +822,192 @@ class FormulaIndexStore:
                     WHERE doc_hash=? AND page_num=?""",
                 [(status, now, doc_hash, int(page_num)) for page_num in page_nums],
             )
+            for page_num in page_nums:
+                self._update_round_job_for_page_locked(
+                    doc_hash,
+                    int(page_num),
+                    status,
+                    scan_round=round_name,
+                    now=now,
+                    increment_attempts=increment_attempts,
+                )
             self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add multi-round columns when opening an older task database."""
+        self._ensure_column(
+            "formula_index_jobs",
+            "scan_round",
+            "TEXT NOT NULL DEFAULT 'r1_cached_recognition'",
+        )
+        self._ensure_column(
+            "formula_page_scan_jobs",
+            "scan_round",
+            "TEXT NOT NULL DEFAULT 'r0_pdf_structure'",
+        )
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        columns = {
+            str(row[1])
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _enqueue_round_job_locked(
+        self,
+        doc_hash: str,
+        filepath: str,
+        scan_round: str,
+        target_type: FormulaRoundTarget,
+        target_id: str,
+        page_num: int,
+        priority: float,
+        status: FormulaTaskStatus,
+        now: str,
+        result_json: dict[str, object] | None = None,
+        error: str = "",
+    ) -> None:
+        payload = json.dumps(result_json or {}, ensure_ascii=False, separators=(",", ":"))
+        self._conn.execute(
+            """INSERT INTO formula_round_jobs
+               (doc_hash, filepath, scan_round, target_type, target_id, page_num,
+                priority, status, result_json, error, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(doc_hash, scan_round, target_type, target_id) DO UPDATE SET
+                 filepath=excluded.filepath,
+                 page_num=excluded.page_num,
+                 priority=max(formula_round_jobs.priority, excluded.priority),
+                 status=excluded.status,
+                 result_json=CASE
+                   WHEN excluded.result_json!='{}' THEN excluded.result_json
+                   ELSE formula_round_jobs.result_json
+                 END,
+                 error=excluded.error,
+                 updated_at=excluded.updated_at""",
+            (
+                doc_hash,
+                filepath,
+                scan_round,
+                target_type,
+                target_id,
+                int(page_num),
+                float(priority),
+                status,
+                payload,
+                error[:500],
+                now,
+                now,
+            ),
+        )
+
+    def _update_round_job_for_block_locked(
+        self,
+        doc_hash: str,
+        block_id: str,
+        status: FormulaTaskStatus,
+        scan_round: str | FormulaScanRound | None,
+        now: str,
+        result_json: dict[str, object] | None = None,
+        error: str = "",
+        increment_attempts: bool = False,
+    ) -> None:
+        row = self._conn.execute(
+            """SELECT filepath, page_num, priority, scan_round
+               FROM formula_index_jobs
+               WHERE doc_hash=? AND block_id=?""",
+            (doc_hash, block_id),
+        ).fetchone()
+        if not row:
+            return
+        round_name = _round_value(scan_round) if scan_round is not None else str(row[3])
+        attempts_expr = "attempts + 1" if increment_attempts else "attempts"
+        payload = json.dumps(result_json or {}, ensure_ascii=False, separators=(",", ":"))
+        self._conn.execute(
+            f"""INSERT INTO formula_round_jobs
+               (doc_hash, filepath, scan_round, target_type, target_id, page_num,
+                priority, status, result_json, error, created_at, updated_at)
+               VALUES (?, ?, ?, 'block', ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(doc_hash, scan_round, target_type, target_id) DO UPDATE SET
+                 filepath=excluded.filepath,
+                 page_num=excluded.page_num,
+                 priority=max(formula_round_jobs.priority, excluded.priority),
+                 status=excluded.status,
+                 result_json=CASE
+                   WHEN excluded.result_json!='{{}}' THEN excluded.result_json
+                   ELSE formula_round_jobs.result_json
+                 END,
+                 error=excluded.error,
+                 attempts={attempts_expr},
+                 updated_at=excluded.updated_at""",
+            (
+                doc_hash,
+                str(row[0]),
+                round_name,
+                block_id,
+                int(row[1]),
+                float(row[2]),
+                status,
+                payload,
+                error[:500],
+                now,
+                now,
+            ),
+        )
+
+    def _update_round_job_for_page_locked(
+        self,
+        doc_hash: str,
+        page_num: int,
+        status: FormulaPageScanStatus,
+        scan_round: str | FormulaScanRound | None,
+        now: str,
+        result_json: dict[str, object] | None = None,
+        error: str = "",
+        increment_attempts: bool = False,
+    ) -> None:
+        row = self._conn.execute(
+            """SELECT filepath, priority, scan_round
+               FROM formula_page_scan_jobs
+               WHERE doc_hash=? AND page_num=?""",
+            (doc_hash, page_num),
+        ).fetchone()
+        if not row:
+            return
+        round_name = _round_value(scan_round) if scan_round is not None else str(row[2])
+        attempts_expr = "attempts + 1" if increment_attempts else "attempts"
+        payload = json.dumps(result_json or {}, ensure_ascii=False, separators=(",", ":"))
+        self._conn.execute(
+            f"""INSERT INTO formula_round_jobs
+               (doc_hash, filepath, scan_round, target_type, target_id, page_num,
+                priority, status, result_json, error, created_at, updated_at)
+               VALUES (?, ?, ?, 'page', ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(doc_hash, scan_round, target_type, target_id) DO UPDATE SET
+                 filepath=excluded.filepath,
+                 page_num=excluded.page_num,
+                 priority=max(formula_round_jobs.priority, excluded.priority),
+                 status=excluded.status,
+                 result_json=CASE
+                   WHEN excluded.result_json!='{{}}' THEN excluded.result_json
+                   ELSE formula_round_jobs.result_json
+                 END,
+                 error=excluded.error,
+                 attempts={attempts_expr},
+                 updated_at=excluded.updated_at""",
+            (
+                doc_hash,
+                str(row[0]),
+                round_name,
+                str(page_num),
+                int(page_num),
+                float(row[1]),
+                status,
+                payload,
+                error[:500],
+                now,
+                now,
+            ),
+        )
 
     @staticmethod
     def content_hash(block: DocumentBlock) -> str:
@@ -452,8 +1049,37 @@ class FormulaIndexStore:
             error=str(row[11]),
             attempts=int(row[12]),
             updated_at=str(row[13]),
+            scan_round=str(row[14]),
+        )
+
+    @staticmethod
+    def _row_to_round_record(row: tuple[object, ...]) -> FormulaRoundRecord:
+        try:
+            result_json = json.loads(str(row[8] or "{}"))
+        except json.JSONDecodeError:
+            result_json = {}
+        if not isinstance(result_json, dict):
+            result_json = {}
+        return FormulaRoundRecord(
+            doc_hash=str(row[0]),
+            filepath=str(row[1]),
+            scan_round=str(row[2]),
+            target_type=str(row[3]),  # type: ignore[arg-type]
+            target_id=str(row[4]),
+            page_num=int(row[5]),
+            priority=float(row[6]),
+            status=str(row[7]),  # type: ignore[arg-type]
+            result_json=result_json,
+            elapsed_ms=int(row[9]),
+            error=str(row[10]),
+            attempts=int(row[11]),
+            updated_at=str(row[12]),
         )
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _round_value(scan_round: str | FormulaScanRound) -> str:
+    return scan_round.value if isinstance(scan_round, FormulaScanRound) else str(scan_round)

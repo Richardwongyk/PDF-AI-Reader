@@ -1,6 +1,6 @@
 from src.app.formula_index_flow import FormulaIndexFlow, _FormulaPageScanWorker
 from src.app.formula_index_scheduler import FormulaScanPlan
-from src.app.formula_index_store import FormulaIndexStore
+from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -104,11 +104,13 @@ def test_formula_index_flow_default_worker_is_cache_only() -> None:
             blocks: list[DocumentBlock],
             doc_hash: str = "",
             cache_only: bool = True,
+            scan_round: str = "",
         ) -> None:
             self.filepath = filepath
             self.blocks = blocks
             self.doc_hash = doc_hash
             self.cache_only = cache_only
+            self.scan_round = scan_round
             self.finished_signal = _Signal()
             self.finished = _Signal()
 
@@ -132,6 +134,7 @@ def test_formula_index_flow_default_worker_is_cache_only() -> None:
 
     assert len(workers) == 1
     assert workers[0].cache_only is True
+    assert workers[0].scan_round == FormulaScanRound.CACHED_RECOGNITION.value
 
 
 def test_formula_index_flow_explicit_full_scan_can_load_model() -> None:
@@ -145,9 +148,11 @@ def test_formula_index_flow_explicit_full_scan_can_load_model() -> None:
             blocks: list[DocumentBlock],
             doc_hash: str = "",
             cache_only: bool = True,
+            scan_round: str = "",
         ) -> None:
             self.doc_hash = doc_hash
             self.cache_only = cache_only
+            self.scan_round = scan_round
             self.finished_signal = _Signal()
             self.finished = _Signal()
 
@@ -176,6 +181,7 @@ def test_formula_index_flow_explicit_full_scan_can_load_model() -> None:
 
     assert len(workers) == 1
     assert workers[0].cache_only is False
+    assert workers[0].scan_round == FormulaScanRound.CACHED_RECOGNITION.value
 
 
 def test_formula_index_flow_can_persist_plan_without_starting_worker(tmp_path) -> None:
@@ -189,6 +195,7 @@ def test_formula_index_flow_can_persist_plan_without_starting_worker(tmp_path) -
         batch_budget=8,
         drain_queue=False,
         cache_only=True,
+        scan_round=FormulaScanRound.CACHED_RECOGNITION.value,
     )
 
     queued = flow.persist_plan("paper.pdf", "doc-1", plan)
@@ -197,6 +204,9 @@ def test_formula_index_flow_can_persist_plan_without_starting_worker(tmp_path) -
     assert started == []
     assert flow._queued_blocks == []
     assert store.counts("doc-1") == {"queued": 1}
+    assert store.round_counts("doc-1") == {
+        "r1_cached_recognition:queued": 1,
+    }
 
 
 def test_formula_index_flow_does_not_queue_done_formula_job(tmp_path) -> None:
@@ -229,6 +239,11 @@ def test_formula_index_store_persists_page_scan_status(tmp_path) -> None:
     tasks = store.list_page_tasks("doc-1")
     assert [task.page_num for task in tasks] == [2, 0]
     assert tasks[0].attempts == 1
+    assert tasks[0].scan_round == FormulaScanRound.PDF_STRUCTURE.value
+    assert store.round_counts("doc-1") == {
+        "r0_pdf_structure:done": 1,
+        "r0_pdf_structure:queued": 1,
+    }
 
 
 def test_formula_index_flow_queues_page_scans_without_start_when_budget_zero(tmp_path) -> None:
@@ -249,6 +264,7 @@ def test_formula_index_flow_queues_page_scans_without_start_when_budget_zero(tmp
     assert started == [("paper.pdf", 0)]
     assert flow._queued_page_nums == [0, 1, 2]
     assert store.page_counts("doc-1") == {"queued": 3}
+    assert store.round_counts("doc-1") == {"r0_pdf_structure:queued": 3}
 
 
 def test_formula_index_flow_does_not_queue_done_page_scan(tmp_path) -> None:
@@ -386,6 +402,8 @@ def test_formula_index_store_persists_status_transitions(tmp_path) -> None:
     assert tasks[0].attempts == 1
     assert tasks[0].latex == r"\frac{a}{b}"
     assert tasks[0].image_hash == "hash-1"
+    assert tasks[0].scan_round == FormulaScanRound.CACHED_RECOGNITION.value
+    assert store.round_counts("doc-1") == {"r1_cached_recognition:done": 1}
 
 
 def test_formula_index_store_requeues_changed_done_block(tmp_path) -> None:
@@ -401,6 +419,122 @@ def test_formula_index_store_requeues_changed_done_block(tmp_path) -> None:
     task = store.list_tasks("doc-1")[0]
     assert task.latex == r"x"
     assert task.status == "queued"
+
+
+def test_formula_index_store_keeps_high_precision_round_after_cached_done(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula("p0_b1", 0)
+    store.enqueue_blocks(
+        "doc-1",
+        "paper.pdf",
+        [block],
+        scan_round=FormulaScanRound.CACHED_RECOGNITION,
+    )
+    store.mark_done(
+        "doc-1",
+        "p0_b1",
+        r"\alpha",
+        "hash-1",
+        scan_round=FormulaScanRound.CACHED_RECOGNITION,
+    )
+
+    queued = store.enqueue_blocks(
+        "doc-1",
+        "paper.pdf",
+        [block],
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    )
+
+    assert queued == 1
+    assert store.counts("doc-1") == {"queued": 1}
+    assert store.list_tasks(
+        "doc-1",
+        statuses={"queued"},
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    )[0].block_id == "p0_b1"
+    assert store.round_counts("doc-1") == {
+        "r1_cached_recognition:done": 1,
+        "r2_local_high_precision:queued": 1,
+    }
+
+
+def test_formula_index_flow_records_high_precision_worker_round(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    block = _formula("p0_b1", 0)
+    flow.enqueue_blocks(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        batch_budget=0,
+        cache_only=False,
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+    )
+
+    flow._on_worker_finished(
+        {
+            "doc_hash": "doc-1",
+            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+            "updated": [],
+            "pending": 0,
+            "done": [{
+                "block_id": "p0_b1",
+                "latex": r"\beta",
+                "image_hash": "hash-2",
+                "model": "pix2text-mfr",
+                "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+            }],
+            "skipped": [],
+            "failed": [],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    assert store.round_counts("doc-1") == {
+        "r2_local_high_precision:done": 1,
+    }
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    )[0]
+    assert record.result_json["latex"] == r"\beta"
+    assert record.result_json["image_hash"] == "hash-2"
+
+
+def test_formula_index_flow_queues_semantic_review_for_all_formula_blocks(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    done_formula = _formula("p0_done", 0, needs_ocr=False)
+    pending_formula = _formula("p1_pending", 1)
+    paragraph = DocumentBlock(
+        id="p0_p",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="not formula",
+        bbox=(0, 0, 10, 10),
+    )
+
+    queued = flow.enqueue_semantic_review_blocks(
+        "paper.pdf",
+        "doc-1",
+        [done_formula, pending_formula, paragraph],
+        priority_pages={1},
+    )
+
+    assert queued == 2
+    assert store.round_counts("doc-1") == {
+        "r3_cloud_semantic_review:queued": 2,
+    }
+    records = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+    )
+    assert [record.target_id for record in records] == ["p1_pending", "p0_done"]
+    assert store.round_pending_count(
+        "doc-1",
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+    ) == 2
 
 
 def test_formula_index_flow_records_worker_result_in_store(tmp_path) -> None:

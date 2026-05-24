@@ -14,7 +14,7 @@ import hashlib
 from PySide6.QtCore import QObject, QThread, Signal
 
 from src.app.formula_index_scheduler import FormulaScanPlan
-from src.app.formula_index_store import FormulaIndexStore
+from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 _logger = logging.getLogger(__name__)
@@ -44,6 +44,8 @@ class FormulaIndexFlow(QObject):
         self._drain_queue = False
         self._drain_page_queue = False
         self._cache_only = True
+        self._scan_round = FormulaScanRound.CACHED_RECOGNITION.value
+        self._page_scan_round = FormulaScanRound.PDF_STRUCTURE.value
         self._store = store or FormulaIndexStore()
         self._active_doc_hash = ""
 
@@ -69,6 +71,7 @@ class FormulaIndexFlow(QObject):
             filepath,
             candidates,
             plan.priority_pages,
+            scan_round=plan.scan_round,
         )
         if queued:
             _logger.info("公式索引任务持久化: doc=%s count=%d", doc_hash, queued)
@@ -83,6 +86,7 @@ class FormulaIndexFlow(QObject):
         batch_budget: int | None = None,
         drain_queue: bool = False,
         cache_only: bool = True,
+        scan_round: str = FormulaScanRound.CACHED_RECOGNITION.value,
     ) -> None:
         """Enqueue formula blocks that still need OCR.
 
@@ -94,13 +98,20 @@ class FormulaIndexFlow(QObject):
         self._active_doc_hash = doc_hash
         self._drain_queue = drain_queue
         self._cache_only = cache_only
+        self._scan_round = scan_round
         candidates = self._ocr_candidates(blocks)
         if not candidates:
             self.scan_finished.emit(0, 0)
             return
         priority_pages = priority_pages or set()
         if doc_hash:
-            queued = self._store.enqueue_blocks(doc_hash, filepath, candidates, priority_pages)
+            queued = self._store.enqueue_blocks(
+                doc_hash,
+                filepath,
+                candidates,
+                priority_pages,
+                scan_round=scan_round,
+            )
             if queued:
                 _logger.info("公式索引任务入队: doc=%s count=%d", doc_hash, queued)
             eligible_ids = {
@@ -108,6 +119,7 @@ class FormulaIndexFlow(QObject):
                 for task in self._store.list_tasks(
                     doc_hash,
                     statuses={"queued", "running"},
+                    scan_round=scan_round,
                     limit=max(len(candidates), 10000),
                 )
             }
@@ -136,6 +148,7 @@ class FormulaIndexFlow(QObject):
         priority_pages: set[int] | None = None,
         batch_budget: int | None = None,
         drain_queue: bool = False,
+        scan_round: str = FormulaScanRound.PDF_STRUCTURE.value,
     ) -> int:
         """Queue page-level MFD scans that can discover image/scanned formulas."""
         if not filepath or not pages:
@@ -154,9 +167,16 @@ class FormulaIndexFlow(QObject):
         priority_pages = priority_pages or set()
         self._active_doc_hash = doc_hash
         self._drain_page_queue = drain_queue
+        self._page_scan_round = scan_round
         queued = 0
         if doc_hash:
-            queued = self._store.enqueue_pages(doc_hash, filepath, page_nums, priority_pages)
+            queued = self._store.enqueue_pages(
+                doc_hash,
+                filepath,
+                page_nums,
+                priority_pages,
+                scan_round=scan_round,
+            )
             if queued:
                 _logger.info("页面级公式检测任务入队: doc=%s pages=%d", doc_hash, queued)
             eligible_pages = {
@@ -164,6 +184,7 @@ class FormulaIndexFlow(QObject):
                 for task in self._store.list_page_tasks(
                     doc_hash,
                     statuses={"queued", "running"},
+                    scan_round=scan_round,
                     limit=max(len(page_nums), 10000),
                 )
             }
@@ -193,6 +214,7 @@ class FormulaIndexFlow(QObject):
         allowed_pages: set[int] | None = None,
         priority_pages: set[int] | None = None,
         batch_budget: int | None = None,
+        scan_round: str = FormulaScanRound.PDF_STRUCTURE.value,
     ) -> int:
         """Start one persisted page-scan batch without re-enqueueing the document."""
         if not filepath or not doc_hash or self.is_running:
@@ -204,6 +226,7 @@ class FormulaIndexFlow(QObject):
             for task in self._store.list_page_tasks(
                 doc_hash,
                 statuses={"queued", "running"},
+                scan_round=scan_round,
                 limit=10000,
             )
         }
@@ -225,6 +248,7 @@ class FormulaIndexFlow(QObject):
         )
         self._active_doc_hash = doc_hash
         self._drain_page_queue = False
+        self._page_scan_round = scan_round
         self._page_scan_blocks = [block.model_copy(deep=True) for block in blocks]
         budget = self.DEFAULT_PAGE_BATCH_BUDGET if batch_budget is None else batch_budget
         starting = min(max(0, int(budget)), len(self._queued_page_nums))
@@ -246,6 +270,7 @@ class FormulaIndexFlow(QObject):
             batch_budget=plan.batch_budget,
             drain_queue=plan.drain_queue,
             cache_only=plan.cache_only,
+            scan_round=plan.scan_round,
         )
 
     def pending_count(self, doc_hash: str) -> int:
@@ -253,6 +278,28 @@ class FormulaIndexFlow(QObject):
 
     def page_pending_count(self, doc_hash: str) -> int:
         return self._store.page_pending_count(doc_hash)
+
+    def enqueue_semantic_review_blocks(
+        self,
+        filepath: str,
+        doc_hash: str,
+        blocks: list[DocumentBlock],
+        priority_pages: set[int] | None = None,
+    ) -> int:
+        """Queue non-OCR formula blocks for later semantic/cloud review."""
+        formula_blocks = [
+            block.model_copy(deep=True)
+            for block in blocks
+            if block.block_type == BlockType.FORMULA
+        ]
+        return self._store.enqueue_round_records(
+            doc_hash,
+            filepath,
+            FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+            "block",
+            formula_blocks,
+            priority_pages=priority_pages,
+        )
 
     def stop(self) -> None:
         """Stop the active worker if one is running."""
@@ -280,12 +327,17 @@ class FormulaIndexFlow(QObject):
         batch = self._queued_blocks[:batch_budget]
         self._queued_blocks = self._queued_blocks[batch_budget:]
         if self._active_doc_hash:
-            self._store.mark_running(self._active_doc_hash, [block.id for block in batch])
+            self._store.mark_running(
+                self._active_doc_hash,
+                [block.id for block in batch],
+                scan_round=self._scan_round,
+            )
         self._thread = _FormulaOcrWorker(
             filepath,
             batch,
             doc_hash=self._active_doc_hash,
             cache_only=self._cache_only,
+            scan_round=self._scan_round,
         )
         self._thread.finished_signal.connect(
             lambda result, fp=filepath, budget=batch_budget:
@@ -307,12 +359,17 @@ class FormulaIndexFlow(QObject):
         batch = self._queued_page_nums[:batch_budget]
         self._queued_page_nums = self._queued_page_nums[batch_budget:]
         if self._active_doc_hash:
-            self._store.mark_pages_running(self._active_doc_hash, batch)
+            self._store.mark_pages_running(
+                self._active_doc_hash,
+                batch,
+                scan_round=self._page_scan_round,
+            )
         self._page_thread = _FormulaPageScanWorker(
             filepath,
             batch,
             self._page_scan_blocks,
             doc_hash=self._active_doc_hash,
+            scan_round=self._page_scan_round,
         )
         self._page_thread.finished_signal.connect(
             lambda result, fp=filepath, budget=batch_budget:
@@ -343,6 +400,7 @@ class FormulaIndexFlow(QObject):
                 str(item.get("latex", "")),
                 str(item.get("image_hash", "")),
                 str(item.get("model", "pix2text-mfr") or "pix2text-mfr"),
+                scan_round=str(item.get("scan_round", self._scan_round) or self._scan_round),
             )
         for item in result.get("skipped", []):
             if not isinstance(item, dict):
@@ -351,6 +409,7 @@ class FormulaIndexFlow(QObject):
                 doc_hash,
                 str(item.get("block_id", "")),
                 str(item.get("reason", "skipped") or "skipped"),
+                scan_round=str(item.get("scan_round", self._scan_round) or self._scan_round),
             )
         for item in result.get("failed", []):
             if not isinstance(item, dict):
@@ -359,6 +418,7 @@ class FormulaIndexFlow(QObject):
                 doc_hash,
                 str(item.get("block_id", "")),
                 str(item.get("error", "failed") or "failed"),
+                scan_round=str(item.get("scan_round", self._scan_round) or self._scan_round),
             )
         recognized = len(updated)
         if updated:
@@ -373,13 +433,14 @@ class FormulaIndexFlow(QObject):
         batch_budget: int,
     ) -> None:
         doc_hash = str(result.get("doc_hash", "") or "")
+        scan_round = str(result.get("scan_round", self._page_scan_round) or self._page_scan_round)
         done_pages = [
             int(page)
             for page in result.get("done_pages", [])
             if isinstance(page, int)
         ]
         if done_pages:
-            self._store.mark_pages_done(doc_hash, done_pages)
+            self._store.mark_pages_done(doc_hash, done_pages, scan_round=scan_round)
         for item in result.get("failed", []):
             if not isinstance(item, dict):
                 continue
@@ -392,6 +453,7 @@ class FormulaIndexFlow(QObject):
                     doc_hash,
                     page_num,
                     str(item.get("error", "failed") or "failed"),
+                    scan_round=str(item.get("scan_round", scan_round) or scan_round),
                 )
         detected = [
             item for item in result.get("detected", [])
@@ -451,12 +513,14 @@ class _FormulaOcrWorker(QThread):
         blocks: list[DocumentBlock],
         doc_hash: str = "",
         cache_only: bool = True,
+        scan_round: str = FormulaScanRound.CACHED_RECOGNITION.value,
     ) -> None:
         super().__init__()
         self._filepath = filepath
         self._blocks = [block.model_copy(deep=True) for block in blocks]
         self._doc_hash = doc_hash
         self._cache_only = cache_only
+        self._scan_round = scan_round
 
     def run(self) -> None:
         import fitz
@@ -496,6 +560,7 @@ class _FormulaOcrWorker(QThread):
             if not images or self.isInterruptionRequested():
                 self.finished_signal.emit({
                     "doc_hash": self._doc_hash,
+                    "scan_round": self._scan_round,
                     "updated": [],
                     "pending": len(self._blocks),
                     "done": [],
@@ -515,6 +580,7 @@ class _FormulaOcrWorker(QThread):
                     skipped.append({
                         "block_id": block.id,
                         "reason": "cache_miss" if self._cache_only else "ocr_empty",
+                        "scan_round": self._scan_round,
                     })
                     continue
                 block.content = wrap_math_text(cleaned, display=True)
@@ -531,10 +597,12 @@ class _FormulaOcrWorker(QThread):
                     "latex": cleaned,
                     "image_hash": image_hash,
                     "model": "pix2text-mfr",
+                    "scan_round": self._scan_round,
                 })
             pending = len(self._blocks) - len(updated)
             self.finished_signal.emit({
                 "doc_hash": self._doc_hash,
+                "scan_round": self._scan_round,
                 "updated": updated,
                 "pending": pending,
                 "done": done,
@@ -545,11 +613,19 @@ class _FormulaOcrWorker(QThread):
             _logger.warning("公式索引后台 OCR 失败: %s", exc)
             self.finished_signal.emit({
                 "doc_hash": self._doc_hash,
+                "scan_round": self._scan_round,
                 "updated": [],
                 "pending": len(self._blocks),
                 "done": [],
                 "skipped": [],
-                "failed": [{"block_id": block.id, "error": str(exc)} for block in self._blocks],
+                "failed": [
+                    {
+                        "block_id": block.id,
+                        "error": str(exc),
+                        "scan_round": self._scan_round,
+                    }
+                    for block in self._blocks
+                ],
             })
 
 
@@ -564,12 +640,14 @@ class _FormulaPageScanWorker(QThread):
         page_nums: list[int],
         blocks: list[DocumentBlock],
         doc_hash: str = "",
+        scan_round: str = FormulaScanRound.PDF_STRUCTURE.value,
     ) -> None:
         super().__init__()
         self._filepath = filepath
         self._page_nums = [int(page_num) for page_num in page_nums]
         self._blocks = [block.model_copy(deep=True) for block in blocks]
         self._doc_hash = doc_hash
+        self._scan_round = scan_round
 
     def run(self) -> None:
         import fitz
@@ -606,6 +684,7 @@ class _FormulaPageScanWorker(QThread):
             doc.close()
             self.finished_signal.emit({
                 "doc_hash": self._doc_hash,
+                "scan_round": self._scan_round,
                 "done_pages": done_pages,
                 "failed": failed,
                 "detected": detected,
@@ -613,6 +692,7 @@ class _FormulaPageScanWorker(QThread):
         except Exception as exc:
             self.finished_signal.emit({
                 "doc_hash": self._doc_hash,
+                "scan_round": self._scan_round,
                 "done_pages": done_pages,
                 "failed": [
                     {"page_num": page_num, "error": str(exc)}

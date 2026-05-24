@@ -3,6 +3,7 @@ from src.app.formula_index_scheduler import (
     FormulaScanPolicy,
     FormulaScanTrigger,
 )
+from src.app.formula_index_store import FormulaScanRound
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -30,6 +31,7 @@ def test_viewport_plan_is_cache_only_and_scoped_to_visible_pages() -> None:
     assert plan.batch_budget == 2
     assert plan.cache_only is True
     assert plan.drain_queue is False
+    assert plan.scan_round == FormulaScanRound.CACHED_RECOGNITION.value
 
 
 def test_evidence_plan_prioritizes_evidence_pages() -> None:
@@ -59,6 +61,7 @@ def test_high_precision_plan_can_use_model_and_drain_queue() -> None:
     assert plan.batch_budget == 12
     assert plan.cache_only is False
     assert plan.drain_queue is True
+    assert plan.scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value
 
 
 def test_background_budget_is_reduced_for_large_documents() -> None:
@@ -73,3 +76,4 @@ def test_background_budget_is_reduced_for_large_documents() -> None:
     assert plan.batch_budget == 4
     assert plan.cache_only is True
     assert plan.drain_queue is False
+    assert plan.scan_round == FormulaScanRound.CACHED_RECOGNITION.value

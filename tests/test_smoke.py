@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,7 @@ def test_build_services_smoke() -> None:
             "config_manager", "glossary_manager", "navigator", "page_cache",
             "ai_cache", "chroma_repo", "embed_client", "embedding_service",
             "knowledge_engine", "ai_engine", "graph_index_flow",
-            "document_engine",
+            "formula_semantic_review", "document_engine",
         }
         missing = required - names
         assert not missing, missing
@@ -58,6 +59,28 @@ def test_build_services_smoke() -> None:
         """
     )
     assert "service smoke ok" in result.stdout
+
+
+def test_setup_logging_prunes_old_app_logs(tmp_path, monkeypatch) -> None:
+    from src import main
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    stale = log_dir / "old-app.log"
+    stale.write_text("old", encoding="utf-8")
+    fresh = log_dir / "fresh-app.log"
+    fresh.write_text("fresh", encoding="utf-8")
+    keep_awake = log_dir / "keep_awake_watchdog.log"
+    keep_awake.write_text("keep", encoding="utf-8")
+    old_time = time.time() - main._LOG_RETENTION_SEC - 60
+    os.utime(stale, (old_time, old_time))
+    os.utime(keep_awake, (old_time, old_time))
+
+    main._prune_old_logs(log_dir)
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert keep_awake.exists()
 
 
 def test_ollama_reachability_negative_result_is_fast_and_cached() -> None:
@@ -118,6 +141,23 @@ def test_fts_fallback_does_not_initialize_chroma_repo() -> None:
         """
     )
     assert "fts avoids chroma smoke ok" in result.stdout
+
+
+def test_formula_semantic_review_service_is_lazy_registered() -> None:
+    result = _run_python(
+        """
+        from src.main import setup_logging, build_services
+
+        setup_logging()
+        services = build_services(test_mode=True)
+        assert "formula_semantic_review" in services.registered_services
+        assert "formula_semantic_review" not in services._singletons
+        assert "ai_engine" not in services._singletons
+        services.shutdown()
+        print("formula semantic review lazy registration ok")
+        """
+    )
+    assert "formula semantic review lazy registration ok" in result.stdout
 
 
 def test_sample_pdf_parse_smoke() -> None:
@@ -193,6 +233,7 @@ def test_main_window_smoke() -> None:
         assert window.findChild(QWidget, "ai_answer_view") is not None
         assert window.findChild(QAction, "high_precision_formula_action") is not None
         assert window.findChild(QAction, "high_precision_formula_toolbar_action") is not None
+        assert window._formula_idle_timer.interval() == 5000
         QTimer.singleShot(500, window.close)
         QTimer.singleShot(1500, app.quit)
         code = app.exec()

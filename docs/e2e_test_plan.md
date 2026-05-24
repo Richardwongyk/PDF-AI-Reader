@@ -9,6 +9,9 @@
 
 测试必须同时检查功能正确性、交互闭环、渲染稳定性、性能和日志。
 
+新会话接手时必须先读 `AGENTS.md` 和 `docs/next_session_handoff.md`。当前闭环测试不是
+单纯跑 UI，而是要验证多轮公式解析、全文 RAG/GraphRAG、日志和性能是否偏离设计边界。
+
 ## 工具选择
 
 - `pywinauto`：启动进程、等待 Windows 窗口、设置焦点、退出应用。
@@ -47,6 +50,8 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/test_log_audit.py --
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --output test_artifacts/formula_audit_attention.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case napkin --max-pages 120 --output test_artifacts/formula_audit_napkin_120.json
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.py --case attention --quality-gate --output test_artifacts/formula_audit_gate.json
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case attention --max-pages 8 --output test_artifacts/formula_index_performance/attention_report.json --db test_artifacts/formula_index_performance/attention_jobs.db
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case napkin --max-pages 12 --output test_artifacts/formula_index_performance/napkin_report.json --db test_artifacts/formula_index_performance/napkin_jobs.db
 ```
 
 ## 判定标准
@@ -61,6 +66,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 - 输出 `test_artifacts/e2e/report.json`。
 - 公式审计输出 LaTeX 对照报告；使用 `--quality-gate` 时，若公式质量低于阈值必须返回非零退出码。
 - 当前公式质量未过门禁时，E2E 总体应失败并写明 `expected_quality_gate_failure`，不能把低质量公式识别当作通过。
+- 多轮公式索引性能报告必须证明导入热路径不加载 OCR/MFR 模型，并输出 `r0_pdf_structure`、`r1_cached_recognition`、`r3_cloud_semantic_review` 等轮次任务统计。
+- 多轮公式解析必须覆盖 r0/r1/r2/r3/r4/r5 的设计边界：每轮落库、输入 hash 跳过、低置信只写候选、r3 不覆盖正文、GraphRAG 不阻塞阅读。
+- r3 语义复核测试必须证明云端修正只写候选 JSON，不覆盖原始公式块；后台 QThread smoke 必须通过；真实 DeepSeek 调用作为可选 smoke test 单独运行，不能进入默认导入热路径。
 
 公式审计门槛：
 
@@ -83,6 +91,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 - Napkin 全文知识库仍使用哈希嵌入兜底，不是真语义 embedding。
 - 右侧全文问答已有证据面板、检索状态、引用页跳转和追问建议；仍需补真实模型质量评估和更细粒度的引用高亮。
 - 公式审计已经能统计 LaTeX 源和 PDF 抽取差距；扫描/图片公式已接入 Pix2Text MFR OCR，但整体 LaTeX 保真仍明显不足，需要继续做源码对齐和文本公式恢复。
+- 外部工具环境已清理，当前没有可直接调用的 MinerU/PaddleOCR/PDF-Extract-Kit/UniMERNet 独立 worker；下一次必须先按版本矩阵重建并真实烟测。
 
 ## 本轮闭环结果
 
@@ -104,3 +113,12 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/formula_latex_audit.
 - 手动“构建/重建知识库”已改为先检查现有索引，不再默认强制删除重建。
 - Napkin 二次闭环中知识库检查耗时从约 108.5s 降到约 0.273s，等待来源为测试事件 `kb_rebuilt`。
 - 本轮 Napkin 日志仍无 `ERROR/WARNING/CRITICAL`；公式质量门禁继续失败，属于预期未完成项。
+
+2026-05-24 多轮公式索引性能基准：
+
+- 新增 `tools/formula_index_performance.py`，只测导入阶段结构解析和多轮任务持久化，不加载 OCR/MFR 模型。
+- Attention 前 8 页：结构解析 1.3314s，持久化 0.0036s，轮次任务 `r0_pdf_structure:queued=8`、`r3_cloud_semantic_review:queued=10`。
+- Napkin 前 12 页：结构解析 0.9658s，持久化 0.0037s，轮次任务 `r0_pdf_structure:queued=12`、`r3_cloud_semantic_review:queued=2`。
+- 最新 `--case all` 检测：Attention 15 页总 2.1970s、持久化 0.0046s；Napkin 前 16 页总 1.2997s、持久化 0.0306s。
+- 当前报告证明任务入库开销极小；还不能证明全量 Napkin 1050 页、真实云端修正和高精度模型 worker 的性能，需要继续扩展闭环。
+- r3 语义复核已有单元测试覆盖候选写回、坏 JSON 失败记录、缺失块跳过、批量限制和真实 QThread 后台 smoke；E2E 仍需补充真实 DeepSeek smoke 与 accepted 门禁验证。

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from src.app.formula_index_store import FormulaScanRound
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -33,6 +34,7 @@ class FormulaScanPlan:
     batch_budget: int
     drain_queue: bool
     cache_only: bool
+    scan_round: str = FormulaScanRound.CACHED_RECOGNITION.value
 
 
 class FormulaScanPolicy:
@@ -73,6 +75,7 @@ class FormulaScanPolicy:
             batch_budget=batch_budget,
             drain_queue=trigger is FormulaScanTrigger.HIGH_PRECISION,
             cache_only=trigger is not FormulaScanTrigger.HIGH_PRECISION,
+            scan_round=self._scan_round(trigger),
         )
 
     def _batch_budget(self, trigger: FormulaScanTrigger, page_count: int) -> int:
@@ -88,6 +91,12 @@ class FormulaScanPolicy:
         if page_count >= self.large_doc_pages:
             budget = max(1, budget // 2)
         return budget
+
+    @staticmethod
+    def _scan_round(trigger: FormulaScanTrigger) -> str:
+        if trigger is FormulaScanTrigger.HIGH_PRECISION:
+            return FormulaScanRound.LOCAL_HIGH_PRECISION.value
+        return FormulaScanRound.CACHED_RECOGNITION.value
 
     @staticmethod
     def _pending_formula_blocks(blocks: list[DocumentBlock]) -> list[DocumentBlock]:

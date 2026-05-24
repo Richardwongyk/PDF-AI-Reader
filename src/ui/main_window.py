@@ -111,8 +111,13 @@ class MainWindow(QMainWindow):
         # 公式索引流程：异步补扫图片/扫描公式，并增量写回知识库
         from src.app.formula_index_flow import FormulaIndexFlow
         from src.app.formula_index_scheduler import FormulaIndexScheduler
+        from src.app.formula_semantic_review import FormulaSemanticReviewFlow
         self._formula_index_flow = FormulaIndexFlow(self)
         self._formula_index_scheduler = FormulaIndexScheduler()
+        self._formula_semantic_review_flow = FormulaSemanticReviewFlow(
+            lambda: services.get("formula_semantic_review"),
+            self,
+        )
 
         # 当前文档状态
         self._current_doc_hash: str = ""
@@ -137,7 +142,7 @@ class MainWindow(QMainWindow):
         self._formula_viewport_timer.timeout.connect(self._schedule_viewport_formula_scan)
         self._formula_idle_timer = QTimer(self)
         self._formula_idle_timer.setSingleShot(True)
-        self._formula_idle_timer.setInterval(30000)
+        self._formula_idle_timer.setInterval(5000)
         self._formula_idle_timer.timeout.connect(self._schedule_idle_formula_scan)
 
         self._init_ui()
@@ -382,6 +387,9 @@ class MainWindow(QMainWindow):
         self._formula_index_flow.formulas_updated.connect(self._on_background_formula_blocks_updated)
         self._formula_index_flow.formula_blocks_detected.connect(self._on_formula_blocks_updated)
         self._formula_index_flow.scan_finished.connect(self._on_formula_index_scan_finished)
+        self._formula_semantic_review_flow.review_finished.connect(
+            self._on_formula_semantic_review_finished
+        )
 
         # PdfViewer → 内部处理
         self._pdf_viewer.block_double_clicked.connect(self._on_block_double_clicked)
@@ -458,6 +466,7 @@ class MainWindow(QMainWindow):
         self._pymupdf4llm_pending_result = None
         self._pending_kb_upserts.clear()
         self._formula_index_flow.stop()
+        self._formula_semantic_review_flow.stop()
         self._formula_viewport_timer.stop()
         self._formula_idle_timer.stop()
         self._last_formula_viewport_pages.clear()
@@ -534,7 +543,7 @@ class MainWindow(QMainWindow):
         self._pymupdf4llm_pending_result = result
         QTimer.singleShot(15000, self._maybe_run_pymupdf4llm_enhance)
         self._formula_viewport_timer.start(1200)
-        self._formula_idle_timer.start()
+        self._formula_idle_timer.start(5000)
 
     def _refresh_knowledge_status(self) -> None:
         """延后检查知识库状态，避免卡住长文档首屏加载。"""
@@ -697,6 +706,24 @@ class MainWindow(QMainWindow):
                 f"知识库就绪\n公式索引: 本批识别 {recognized}，待补扫 {pending}"
             )
 
+    def _on_formula_semantic_review_finished(self, result: dict[str, object]) -> None:
+        """r3 semantic review finished one bounded batch."""
+        if str(result.get("doc_hash", "")) != self._current_doc_hash:
+            return
+        done = int(result.get("done", 0) or 0)
+        failed = int(result.get("failed", 0) or 0)
+        skipped = int(result.get("skipped", 0) or 0)
+        pending = int(result.get("pending", 0) or 0)
+        error = str(result.get("error", "") or "")
+        if error:
+            self.logger.warning("公式语义复核失败: %s", error)
+        if done or failed or skipped or pending:
+            self._ai_doc_status.setText(
+                f"知识库就绪\n公式语义复核: 完成 {done}，失败 {failed}，跳过 {skipped}，待复核 {pending}"
+            )
+        if pending > 0 and self._viewer_document_loaded:
+            self._formula_idle_timer.start(8000)
+
     def _on_viewport_changed(self, value: int, maximum: int) -> None:
         """Schedule a tiny cache-only formula scan for pages near the viewport."""
         if not self._viewer_document_loaded or not self._current_doc_hash:
@@ -714,16 +741,21 @@ class MainWindow(QMainWindow):
         """Run one low-priority background formula/index batch."""
         if not self._viewer_document_loaded or not self._current_doc_hash:
             return
-        if self._formula_index_flow.is_running:
-            self._formula_idle_timer.start(15000)
+        if self._formula_index_flow.is_running or self._formula_semantic_review_flow.is_running:
+            self._formula_idle_timer.start(5000)
             return
         before_pending = self._pending_formula_work_count()
         if before_pending <= 0:
             return
-        if not self._start_import_page_scan_batch():
+        if (
+            self._pending_formula_block_count() > 0
+            or self._formula_index_flow.pending_count(self._current_doc_hash) > 0
+        ):
             self._schedule_formula_scan(pages=set(), trigger=FormulaScanTrigger.BACKGROUND)
+        elif not self._start_formula_semantic_review_batch():
+            self._start_import_page_scan_batch()
         if self._pending_formula_work_count() > 0:
-            self._formula_idle_timer.start(45000)
+            self._formula_idle_timer.start(8000)
 
     def _on_high_precision_formula_scan(self) -> None:
         """User-triggered high-precision formula scan for current viewport first."""
@@ -811,14 +843,23 @@ class MainWindow(QMainWindow):
             doc_hash=self._current_doc_hash,
             batch_budget=0,
         )
-        if queued_blocks or queued_pages:
+        queued_reviews = self._formula_index_flow.enqueue_semantic_review_blocks(
+            filepath=filepath,
+            doc_hash=self._current_doc_hash,
+            blocks=[
+                block for block in self._current_blocks
+                if block.block_type == BlockType.FORMULA
+            ],
+        )
+        if queued_blocks or queued_pages or queued_reviews:
             self.logger.info(
-                "导入后全篇公式任务入队: block_ocr=%d page_mfd=%d",
+                "导入后全篇公式任务入队: block_ocr=%d page_mfd=%d semantic_review=%d",
                 queued_blocks,
                 queued_pages,
+                queued_reviews,
             )
             self._ai_doc_status.setText(
-                f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}"
+                f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}，复核 {queued_reviews}"
             )
 
     def _start_import_page_scan_batch(self) -> bool:
@@ -834,7 +875,7 @@ class MainWindow(QMainWindow):
             blocks=self._current_blocks,
             allowed_pages=pages,
             priority_pages=pages,
-            batch_budget=1,
+            batch_budget=2,
         )
         if started:
             self.logger.info("页面级公式检测启动: pages=%s batch=%d", sorted(pages), started)
@@ -843,11 +884,25 @@ class MainWindow(QMainWindow):
             filepath=filepath,
             doc_hash=self._current_doc_hash,
             blocks=self._current_blocks,
-            batch_budget=1,
+            batch_budget=2,
         )
         if started:
             self.logger.info("页面级公式检测启动: batch=%d", started)
         return bool(started)
+
+    def _start_formula_semantic_review_batch(self) -> bool:
+        if not self._current_doc_hash:
+            return False
+        if self._formula_semantic_review_flow.pending_count(self._current_doc_hash) <= 0:
+            return False
+        started = self._formula_semantic_review_flow.start_batch(
+            self._current_doc_hash,
+            self._current_blocks,
+            limit=4,
+        )
+        if started:
+            self.logger.info("公式语义复核启动: batch=4")
+        return started
 
     def _pending_formula_block_count(self) -> int:
         return sum(
@@ -864,6 +919,7 @@ class MainWindow(QMainWindow):
             self._pending_formula_block_count()
             + self._formula_index_flow.pending_count(self._current_doc_hash)
             + self._formula_index_flow.page_pending_count(self._current_doc_hash)
+            + self._formula_semantic_review_flow.pending_count(self._current_doc_hash)
         )
 
     # =========================================================================

@@ -47,10 +47,12 @@ DISPLAY_ENVS = (
 
 MATH_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
 SOURCE_FORMULA_PATTERNS = [
-    re.compile(r"\\\[(.+?)\\\]", re.DOTALL),
+    re.compile(r"(?<!\\)\\\[(.+?)(?<!\\)\\\]", re.DOTALL),
     re.compile(r"\$\$(.+?)\$\$", re.DOTALL),
     re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", re.DOTALL),
 ]
+LATEX_INCLUDE_RE = re.compile(r"\\(?:input|include)\s*\{([^{}]+)\}")
+DOCUMENT_BODY_RE = re.compile(r"\\begin\{document\}(.+?)\\end\{document\}", re.DOTALL)
 
 
 @dataclass
@@ -68,6 +70,9 @@ class FormulaReport:
     elapsed_sec: float
     pages: int
     source_tex_files: int
+    source_total_tex_files: int
+    source_selected_tex_files: int
+    source_coverage: dict[str, Any]
     source_formula_snippets: int
     source_display_snippets: int
     source_inline_snippets: int
@@ -97,6 +102,26 @@ class FormulaReport:
     sample_needs_ocr_blocks: list[dict[str, Any]]
     born_digital_diagnostics: dict[str, Any]
     quality_gate: dict[str, Any]
+
+
+@dataclass
+class SourceFormulaExtraction:
+    display: list[str]
+    inline: list[str]
+    tex_files: int
+    total_tex_files: int
+    selected_tex_files: int
+    coverage: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SourceTexEntry:
+    path: Path
+    text: str
+    order: int
+    title: str = ""
+    toc_page: int | None = None
+    effective_page: int | None = None
 
 
 def _cases() -> list[CasePaths]:
@@ -132,14 +157,28 @@ def _strip_comments(tex: str) -> str:
 
 
 def _extract_source_formulas(latex_root: Path) -> tuple[list[str], list[str], int]:
+    extraction = _extract_source_formulas_detailed(latex_root)
+    return extraction.display, extraction.inline, extraction.tex_files
+
+
+def _extract_source_formulas_detailed(
+    latex_root: Path,
+    pdf: Path | None = None,
+    max_pages: int = 0,
+) -> SourceFormulaExtraction:
+    entries = _ordered_source_entries(latex_root)
+    all_source_files = _all_source_tex_files(latex_root)
+    selected_entries, coverage = _select_source_entries_for_pdf_pages(
+        entries,
+        latex_root=latex_root,
+        pdf=pdf,
+        max_pages=max_pages,
+    )
+
     display: list[str] = []
     inline: list[str] = []
-    tex_files = [p for p in latex_root.rglob("*.tex") if p.is_file()]
-    for path in tex_files:
-        try:
-            text = _strip_comments(path.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            continue
+    for entry in selected_entries:
+        text = entry.text
         for env in DISPLAY_ENVS:
             escaped_env = re.escape(env)
             pattern = re.compile(
@@ -150,7 +189,290 @@ def _extract_source_formulas(latex_root: Path) -> tuple[list[str], list[str], in
         display.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[0].finditer(text))
         display.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[1].finditer(text))
         inline.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[2].finditer(text))
-    return display, inline, len(tex_files)
+
+    return SourceFormulaExtraction(
+        display=display,
+        inline=inline,
+        tex_files=len(selected_entries),
+        total_tex_files=len(all_source_files),
+        selected_tex_files=len(selected_entries),
+        coverage=coverage,
+    )
+
+
+def _all_source_tex_files(latex_root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in latex_root.rglob("*.tex")
+        if path.is_file() and "build" not in path.relative_to(latex_root).parts
+    )
+
+
+def _ordered_source_entries(latex_root: Path) -> list[SourceTexEntry]:
+    main = _find_main_tex(latex_root)
+    if main is None:
+        return [
+            SourceTexEntry(
+                path=path,
+                text=_read_tex(path),
+                order=index,
+                title=_source_title(_read_tex(path)),
+            )
+            for index, path in enumerate(_all_source_tex_files(latex_root))
+        ]
+
+    entries: list[SourceTexEntry] = []
+    visited: set[Path] = set()
+
+    def append_entry(path: Path, text: str) -> None:
+        if not text.strip():
+            return
+        entries.append(
+            SourceTexEntry(
+                path=path,
+                text=text,
+                order=len(entries),
+                title=_source_title(text),
+            )
+        )
+
+    def walk(path: Path, body_only: bool = False) -> None:
+        resolved = path.resolve()
+        if resolved in visited:
+            return
+        visited.add(resolved)
+        text = _read_tex(path)
+        if body_only:
+            text = _document_body(text)
+        append_entry(path, text)
+        for target in LATEX_INCLUDE_RE.findall(_strip_comments(text)):
+            child = _resolve_tex_include(latex_root, path.parent, target)
+            if child is not None:
+                walk(child)
+
+    walk(main, body_only=True)
+    return entries
+
+
+def _find_main_tex(latex_root: Path) -> Path | None:
+    candidates = [
+        path
+        for path in _all_source_tex_files(latex_root)
+        if r"\begin{document}" in _read_tex(path)
+    ]
+    if not candidates:
+        return None
+    root_hint = _normalize_title(latex_root.name)
+    return sorted(
+        candidates,
+        key=lambda path: (
+            0 if _normalize_title(path.stem) and _normalize_title(path.stem) in root_hint else 1,
+            len(path.relative_to(latex_root).parts),
+            str(path.relative_to(latex_root)).lower(),
+        ),
+    )[0]
+
+
+def _read_tex(path: Path) -> str:
+    try:
+        return _strip_comments(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return ""
+
+
+def _document_body(text: str) -> str:
+    match = DOCUMENT_BODY_RE.search(text)
+    return match.group(1) if match else text
+
+
+def _resolve_tex_include(latex_root: Path, current_dir: Path, target: str) -> Path | None:
+    raw = target.strip()
+    if not raw:
+        return None
+    candidate_names = [raw]
+    if not raw.lower().endswith(".tex"):
+        candidate_names.append(f"{raw}.tex")
+    for name in candidate_names:
+        candidate = Path(name)
+        paths = []
+        if candidate.is_absolute():
+            paths.append(candidate)
+        else:
+            paths.extend((current_dir / candidate, latex_root / candidate))
+        for path in paths:
+            if path.is_file():
+                return path
+    return None
+
+
+def _source_title(text: str) -> str:
+    match = re.search(
+        r"\\(?:chapter|section)\*?(?:\[[^\]]*\])?\s*\{([^{}]+)\}",
+        text,
+        re.DOTALL,
+    )
+    if match is None:
+        return ""
+    return _compact_latex_title(match.group(1))
+
+
+def _compact_latex_title(text: str) -> str:
+    value = re.sub(r"\$[^$]*\$", "", text)
+    value = re.sub(r"\\[A-Za-z]+\*?(?:\[[^\]]*\])?(?:\{([^{}]*)\})?", r"\1", value)
+    value = re.sub(r"[{}]", "", value)
+    return " ".join(value.split())
+
+
+def _select_source_entries_for_pdf_pages(
+    entries: list[SourceTexEntry],
+    latex_root: Path,
+    pdf: Path | None,
+    max_pages: int,
+) -> tuple[list[SourceTexEntry], dict[str, Any]]:
+    if max_pages <= 0 or pdf is None:
+        return entries, _source_coverage_payload(
+            entries,
+            entries,
+            latex_root,
+            method="ordered_main_tex" if _find_main_tex(latex_root) else "all_tex_files",
+            max_pages=max_pages,
+            toc_available=False,
+        )
+
+    toc_pages = _pdf_toc_title_pages(pdf)
+    if not toc_pages:
+        return entries, _source_coverage_payload(
+            entries,
+            entries,
+            latex_root,
+            method="ordered_main_tex_no_pdf_toc",
+            max_pages=max_pages,
+            toc_available=False,
+        )
+
+    annotated = _entries_with_toc_pages(entries, toc_pages)
+    selected = [
+        entry
+        for entry in annotated
+        if entry.effective_page is None or entry.effective_page <= max_pages
+    ]
+    return selected, _source_coverage_payload(
+        annotated,
+        selected,
+        latex_root,
+        method="ordered_main_tex_pdf_toc_file_coverage",
+        max_pages=max_pages,
+        toc_available=True,
+    )
+
+
+def _entries_with_toc_pages(
+    entries: list[SourceTexEntry],
+    toc_pages: dict[str, int],
+) -> list[SourceTexEntry]:
+    annotated: list[SourceTexEntry] = []
+    current_page: int | None = None
+    for entry in entries:
+        toc_page = _match_title_page(entry.title, toc_pages) if entry.title else None
+        if toc_page is not None:
+            current_page = toc_page
+        annotated.append(
+            SourceTexEntry(
+                path=entry.path,
+                text=entry.text,
+                order=entry.order,
+                title=entry.title,
+                toc_page=toc_page,
+                effective_page=toc_page if toc_page is not None else current_page,
+            )
+        )
+    return annotated
+
+
+def _pdf_toc_title_pages(pdf: Path) -> dict[str, int]:
+    try:
+        doc = fitz.open(pdf)
+    except Exception:
+        return {}
+    try:
+        pages: dict[str, int] = {}
+        for _level, title, page in doc.get_toc(simple=True):
+            normalized = _normalize_title(str(title))
+            if normalized and int(page) > 0:
+                pages.setdefault(normalized, int(page))
+        return pages
+    finally:
+        doc.close()
+
+
+def _match_title_page(title: str, toc_pages: dict[str, int]) -> int | None:
+    normalized = _normalize_title(title)
+    if not normalized:
+        return None
+    if normalized in toc_pages:
+        return toc_pages[normalized]
+    best_title = ""
+    best_score = 0.0
+    for candidate in toc_pages:
+        score = difflib.SequenceMatcher(None, normalized, candidate).ratio()
+        if score > best_score:
+            best_score = score
+            best_title = candidate
+    if best_score >= 0.88:
+        return toc_pages[best_title]
+    return None
+
+
+def _normalize_title(text: str) -> str:
+    text = _compact_latex_title(str(text or "")).lower()
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _source_coverage_payload(
+    entries: list[SourceTexEntry],
+    selected: list[SourceTexEntry],
+    latex_root: Path,
+    method: str,
+    max_pages: int,
+    toc_available: bool,
+) -> dict[str, Any]:
+    selected_paths = {entry.path for entry in selected}
+    mapped = [entry for entry in entries if entry.toc_page is not None]
+    unmapped = [entry for entry in entries if entry.toc_page is None]
+    excluded = [entry for entry in entries if entry.path not in selected_paths]
+    return {
+        "method": method,
+        "max_pages": max_pages,
+        "toc_available": toc_available,
+        "ordered_files": len(entries),
+        "selected_files": len(selected),
+        "excluded_files": len(excluded),
+        "toc_mapped_files": len(mapped),
+        "toc_unmapped_files": len(unmapped),
+        "selected_sample": [_relative_source_path(entry.path, latex_root) for entry in selected[:12]],
+        "excluded_sample": [_relative_source_path(entry.path, latex_root) for entry in excluded[:12]],
+        "toc_mapped_sample": [
+            {
+                "path": _relative_source_path(entry.path, latex_root),
+                "title": entry.title,
+                "page": entry.toc_page,
+            }
+            for entry in mapped[:12]
+        ],
+        "note": (
+            "Page-limited LaTeX coverage is selected at source-file granularity "
+            "using the PDF outline. It is a fairer diagnostic baseline than "
+            "comparing a partial PDF parse with the entire source tree, but it "
+            "is not line-level SyncTeX alignment."
+        ),
+    }
+
+
+def _relative_source_path(path: Path, latex_root: Path) -> str:
+    try:
+        return str(path.relative_to(latex_root))
+    except ValueError:
+        return str(path)
 
 
 def _command_counts(snippets: list[str]) -> Counter[str]:
@@ -472,7 +794,13 @@ def _audit_case(
     if not case.latex_root.exists():
         raise FileNotFoundError(case.latex_root)
 
-    source_display, source_inline, tex_files = _extract_source_formulas(case.latex_root)
+    source_extraction = _extract_source_formulas_detailed(
+        case.latex_root,
+        pdf=case.pdf,
+        max_pages=max_pages,
+    )
+    source_display = source_extraction.display
+    source_inline = source_extraction.inline
     if match_scope == "display":
         source_formulas = source_display
     elif match_scope == "inline":
@@ -541,7 +869,10 @@ def _audit_case(
         latex_root=str(case.latex_root),
         elapsed_sec=round(time.perf_counter() - start, 3),
         pages=page_count,
-        source_tex_files=tex_files,
+        source_tex_files=source_extraction.tex_files,
+        source_total_tex_files=source_extraction.total_tex_files,
+        source_selected_tex_files=source_extraction.selected_tex_files,
+        source_coverage=source_extraction.coverage,
         source_formula_snippets=len(source_formulas),
         source_display_snippets=len(source_display),
         source_inline_snippets=len(source_inline),

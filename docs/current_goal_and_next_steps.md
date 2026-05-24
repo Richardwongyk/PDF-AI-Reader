@@ -58,6 +58,33 @@
 4. **交互性能不回退**：打开、滚动、缩放、翻译、问答入口不能被后台索引或公式识别拖垮。
 5. **工具路线专业化**：可大胆迁移到更成熟工具，但必须调研、测试、版本隔离和可回滚。
 
+## 2026-05-24 新会话交接状态
+
+新终端/新会话接手时必须先读：
+
+1. 根目录 `AGENTS.md`
+2. `docs/next_session_handoff.md`
+3. `docs/async_formula_indexing_design.md`
+4. 本文件
+5. `TODO.md`
+
+当前真实状态：
+
+- 主程序环境仍是 `C:\Users\WYK\.conda\envs\pdf_ai_reader_314`。
+- 临时 PDF 工具环境已删除，最后一次 `conda env list` 没有 `pdf_tool_*` 或 `pdf_formula_*`。
+- 不要动用户已有环境，不要在主环境混装 MinerU/PaddleOCR/PDF-Extract-Kit/UniMERNet。
+- 防休眠脚本存在，但新会话必须重新确认进程和日志。
+- 公式多轮解析要求见 `docs/next_session_handoff.md` 的“多轮公式解析要求”章节，不能遗漏 r0/r1/r2/r3/r4/r5。
+
+多轮公式解析的核心边界：
+
+- r0：PDF 结构快扫，导入后全篇页面入队，不 OCR，不阻塞首屏。
+- r1：缓存优先识别，只处理图片/扫描/needs_ocr/已有公式块，命中缓存直接跳过。
+- r2：本地高精度多工具复核，独立 worker，只写候选。
+- r3：DeepSeek 等分析模型语义复核，写候选 JSON，不覆盖正文。
+- r4：公式/章节/定理/引用/概念关系异步写 GraphRAG。
+- r5：设计层轮次，代码尚未显式落地；accepted 高置信修正应增量写回全文索引，按 hash 跳过未变内容。
+
 ## 今晚执行边界
 
 优先顺序：
@@ -300,8 +327,18 @@
 - 公式索引任务数据库写入 `data/formula_index_jobs.db`，已加入 `.gitignore`，不会进入版本库。
 - 公式后台识别成功后会刷新页面 block，并通过 `KnowledgeEngine.upsert_blocks()` 增量写回知识库。
 - 如果公式识别早于基础知识库构建完成，主窗口会暂存增量块，等 `build_finished` 后统一写入，避免竞态导致全文问答漏掉公式。
+- `FormulaIndexStore` 已扩展为多轮公式任务存储：`scan_round` 区分 `r0_pdf_structure`、`r1_cached_recognition`、`r2_local_high_precision`、`r3_cloud_semantic_review`、`r4_knowledge_graph`。
+- 新增 `formula_round_jobs` 统一记录非 OCR 轮次和跨轮状态，主键为 `doc_hash + scan_round + target_type + target_id`。
+- 导入时所有页进入 `r0_pdf_structure`，`needs_ocr=True` 公式进入 `r1_cached_recognition`，所有已解析公式进入 `r3_cloud_semantic_review` 复核记录。
+- 新增 `FormulaSemanticReviewService`，用于消费 r3 队列并把云端语义修正写成候选 JSON；它不会覆盖原始公式块，也不会自动 accepted。
+- 新增 `FormulaSemanticReviewFlow`，用于在 UI 空闲时通过后台 QThread 小批量消费 r3 队列，避免导入、滚动、缩放等待云端复核。
+- 显式高精度扫描使用 `r2_local_high_precision`，不会因为 `r1_cached_recognition` 已完成而被跳过。
+- 新增 `tools/formula_index_performance.py`，用于 Attention/Napkin 导入热路径性能检测，不加载 OCR/MFR 模型。
 
 ## 异步公式索引与知识图谱规划
+
+详尽的多轮异步扫描、持久化表、缓存 key、修正轮、DeepSeek 语义校对和
+C++17 加速边界见：[async_formula_indexing_design.md](async_formula_indexing_design.md)。
 
 这个过程分成三条可独立回滚的后台流水线，不能混成一个同步任务。
 
@@ -339,7 +376,38 @@ PDF 打开/滚动/缩放
 - 首屏阅读、滚动、缩放永远不等待 MFR 或 GraphRAG。
 - 基础知识库构建不等待全量公式 OCR。
 - 后台公式识别必须全部写缓存，二次打开不重复推理。
+- 每一轮修正必须写入持久存储：任务状态、输入 hash、模型版本、输出、置信度、耗时、错误和 accepted 状态都不能只存在内存里。
+- 本地模型、整页解析和云端修正必须分轮写回；DeepSeek 语义修正只能作为候选或通过门禁后的 accepted 修订，不能覆盖原始证据。
 - GraphRAG 只作为增强索引，失败不能影响基础全文问答。
+
+## 2026-05-24 多轮公式入队与性能检测
+
+新增代码与测试：
+
+- `src/app/formula_index_store.py`：多轮任务字段、`formula_round_jobs`、轮次统计和查询。
+- `src/app/formula_index_flow.py`：导入/后台/高精度任务带轮次，新增语义复核轮入队。
+- `src/app/formula_index_scheduler.py`：普通后台/视口/evidence 为 `r1_cached_recognition`，显式高精度为 `r2_local_high_precision`。
+- `src/ui/main_window.py`：导入后额外把所有公式块排入 `r3_cloud_semantic_review`。
+- `src/app/formula_semantic_review.py`：r3 语义复核服务和后台 flow，按批读取已持久化任务，调用分析模型后只写候选结果。
+- `src/ui/main_window.py`：空闲调度已纳入 r3 pending 计数；后台顺序为 OCR/缓存任务优先、r3 小批量语义复核、页面级检测兜底。
+- `tools/formula_index_performance.py`：真实 Attention/Napkin 资料的轻量性能基准。
+- `tests/test_formula_index_flow.py`、`tests/test_formula_index_scheduler.py`、`tests/test_formula_index_performance.py`：覆盖多轮不互相覆盖、导入轮次统计、性能报告字段。
+
+验证：
+
+- `pytest tests/test_formula_index_flow.py tests/test_formula_index_scheduler.py tests/test_formula_index_performance.py -q`：27 passed。
+- Attention 前 8 页：136 blocks，10 formula blocks，结构解析 1.3314s，持久化 0.0036s；`r0_pdf_structure:queued=8`、`r3_cloud_semantic_review:queued=10`。
+- Napkin 前 12 页：126 blocks，2 formula blocks，结构解析 0.9658s，持久化 0.0037s；`r0_pdf_structure:queued=12`、`r3_cloud_semantic_review:queued=2`。
+- 最新 `tools/formula_index_performance.py --case all`：Attention 15 页总 2.1970s、持久化 0.0046s；Napkin 前 16 页总 1.2997s、持久化 0.0306s。
+- r3 复核测试：`pytest tests/test_formula_semantic_review.py tests/test_formula_index_flow.py -q` 为 28 passed，包含真实 QThread smoke。
+- 最新默认测试：`pytest -q` 为 150 passed、3 skipped。
+
+仍未完成：
+
+- `r3_cloud_semantic_review` 已有独立服务消费、后台 flow、UI 空闲调度和候选写回，但还没有真实 DeepSeek smoke test、accepted 修订门禁和人工/自动验收策略。
+- `r2_local_high_precision` 已有轮次隔离，但还没有接 UniMERNet/MinerU/PDF-Extract-Kit 对照 worker。
+- 性能基准是限页热路径，不等同于完整 Napkin 1050 页闭环。
+- 公式准确率仍未达到目标，需要继续做 born-digital 源码对齐、高精度候选生成和多模型对照。
 
 ## 为什么不能直接“知识库构建时全量扫描公式”
 
@@ -527,3 +595,104 @@ PDF 打开/滚动/缩放
 - 默认交互式解析不加载 MFD 页检测模型。
 - 公式 OCR 缓存命中时不加载模型。
 - 提交信息和提交日志不出现额外自动署名。
+
+## 2026-05-24 暂停交接
+
+### 当前边界
+
+用户要求先停下思考。本阶段到这里为止，不再继续实现、不继续安装工具、不继续跑长测试、不做提交。当前需要保留现场，后续恢复时先从工作树和本节记录核对。
+
+当前工作树状态：
+
+- 已修改但未提交：`tools/formula_latex_audit.py`、`tests/test_formula_detector.py`。
+- 已修改但不应纳入本阶段提交：`TODO.md`。
+- 未跟踪且不应纳入提交：`测试资料/`。
+- 防休眠脚本仍在后台运行：`keep_awake.ps1` 两个实例，`keep_awake_watchdog.ps1` 一个实例。
+
+最近已提交成果：
+
+- `918d0e9 Canonicalize formula audit text commands`
+  - 公式审计把 `\text`、`\operatorname`、`\mathrm` 归为同一类直立文本/算子命令。
+  - 这是审计归一化，不是生产公式识别器，也不是样例硬凑。
+
+当前未提交但已验证的成果：
+
+- `tools/formula_latex_audit.py`
+  - 新增按主 TeX 的 `\input` / `\include` 顺序展开源码。
+  - 页数受限时使用 PDF outline/TOC 选择相关源码文件，避免用 Napkin 前 120 页 PDF 去对比整本书全部 LaTeX。
+  - 报告新增 `source_total_tex_files`、`source_selected_tex_files`、`source_coverage`，明确记录覆盖方法、选中文件、排除文件和 TOC 映射样本。
+  - 修复源码公式提取误判：排除 `\\[1ex]`、`\\[0.4cm]` 这类 LaTeX 换行间距，不再当作 `\[...\]` 行间公式。
+- `tests/test_formula_detector.py`
+  - 新增 `test_formula_audit_ignores_latex_line_break_spacing`。
+
+已跑过的目标验证：
+
+- `pytest` 目标用例：5 passed。
+- `py_compile tools/formula_latex_audit.py` 通过。
+- 禁用字样扫描当前改动文件无命中。
+- Attention display-scope 公式审计通过：
+  - `source_formula_snippets=5`
+  - `pdf_formula_blocks=11`
+  - `common_source_command_recall=0.667`
+  - `source_weak_match_rate=1.000`
+  - `average_best_similarity=0.815`
+  - `low_similarity_pdf_rate=0.545`
+- Napkin 前 120 页 display-scope 公式审计仍未通过，但口径已更可信：
+  - 源码覆盖：`source_selected_tex_files=13 / source_total_tex_files=112`
+  - `source_formula_snippets=122`
+  - `pdf_formula_blocks=116`
+  - `common_source_command_recall=0.128`
+  - `source_weak_match_rate=0.438`
+  - `average_best_similarity=0.544`
+  - `low_similarity_pdf_rate=0.336`
+  - 当前失败项只剩 `common_source_command_recall 0.128 < 0.350`
+
+### 当前问题判断
+
+1. Napkin 的旧失败指标被“审计口径不公平”严重放大过。
+   之前把前 120 页 PDF 与整本 LaTeX 源码比较，导致弱匹配率极低。现在改成 PDF outline 约束源码范围后，弱匹配率从约 `0.034` 提到 `0.438`，说明必须先保证审计基线正确，再谈识别质量。
+
+2. Napkin 当前主要瓶颈不是 OCR，也不是交互渲染，而是 born-digital PDF glyph 到语义 LaTeX 命令的恢复。
+   区域数量已经接近：前 120 页源码 display 公式 122 个，PDF 结构公式块 116 个。真正弱项是命令召回只有 `0.128`。
+
+3. 不能用 OCR 处理 born-digital PDF 公式。
+   对 Napkin 这种有文本层、字体、glyph bbox、PDF outline 的文档，继续走结构解析路线。Pix2Text/Paddle/UniMERNet 只作为图片/扫描公式或低置信补救层。
+
+4. 当前缺失命令主要来自语义归一化和二维结构恢复。
+   高频缺失包括 `\ZZ`、`\QQ`、`\RR`、`\phi`、`\to`、`\mapsto`、`\longmapsto`、`\star`、`\cong`、`\le`、`\mid`、`\lvert`、`\rvert`、`\defeq`、`\dots`、`\left`、`\right`、`\pmod`、`\inv` 等。PDF 侧已经能看到对应视觉符号或字体线索，但还没有稳定恢复为源码命令。
+
+5. 当前 PDF 公式重建仍有明显结构问题。
+   典型问题包括表格/矩阵/多行对齐误合并、正文数学句子误入 display 公式、罗马单词被过度包装为 `\mathrm{...}`、黑板粗体字体如 `MSBM10` 未映射到 `\mathbb{}`、希腊字母和关系符号映射不足。
+
+6. RAG/QA 仍未达到目标。
+   E2E 中问答链路可以走通，但仍存在“云端模型不可用时降级”的情况；用户要求后续使用配置里的真实 API、用 DeepSeek V4 Pro 作为分析回答模型，并做真实云端 smoke test。当前不能把 QA/RAG 视为完成。
+
+7. 性能方向不能回退。
+   Napkin E2E 交互链路能完成，日志无 ERROR/WARNING/CRITICAL，缩放/渲染在当前预算内。后续所有公式、RAG、知识图谱增强都必须保持默认打开、滚动、缩放、翻译不等待重任务。
+
+### 下一步建议顺序
+
+1. 先决定是否提交当前未提交的审计基线改动。
+   提交前只暂存 `tools/formula_latex_audit.py` 和 `tests/test_formula_detector.py`，不要暂存 `TODO.md` 和 `测试资料/`。
+
+2. 若提交，提交前必须再跑：
+   - `python -X utf8 -m pytest tests\test_formula_detector.py::test_formula_audit_ignores_latex_line_break_spacing tests\test_formula_detector.py::test_formula_latex_audit_can_match_display_scope tests\test_formula_detector.py::test_formula_audit_quality_gate_flags_low_recall -q`
+   - `python -X utf8 tools\formula_latex_audit.py --case attention --born-digital-math --born-digital-semantics --no-legacy-formula-heuristic --match-scope display --quality-gate --output test_artifacts\formula_audit_attention_display_scope.json`
+   - `python -X utf8 tools\formula_latex_audit.py --case napkin --max-pages 120 --born-digital-math --born-digital-semantics --no-legacy-formula-heuristic --match-scope display --quality-gate --output test_artifacts\formula_audit_napkin_120_toc_scope.json`
+   Napkin 当前预期仍会因命令召回失败返回非零；这是正确的问题暴露，不应当强行调阈值掩盖。
+
+3. 下一轮公式重点不应继续写零散正则。
+   应做一个可解释、可扩展的 glyph/font 到 LaTeX 语义映射层：
+   - 基于 Unicode math ranges 和 PDF font family，如 `MSBM10`、`LMMathSymbols`、`LMMathItalic`。
+   - 统一同义命令审计，如 `≤` 对 `\le` / `\leq`，`→` 对 `\to`，`∼` 对 `\sim`。
+   - 把符号映射表和审计等价类做成数据驱动，不嵌在业务流程里。
+   - 先用于审计和离线重建，验证 Attention/Napkin 指标提升后再考虑进入主路径。
+
+4. 继续用 Napkin 前 120 页作为公式结构压力测试。
+   目标先把 `common_source_command_recall` 从 `0.128` 提升到门槛以上，同时保证 `source_weak_match_rate` 不下降、耗时不明显增加。
+
+5. 再推进 RAG/知识图谱。
+   方向仍是导入即建基础索引，后台异步补全公式、图谱和高精度理解；首屏与滚动不等待 GraphRAG。需要补真实云端模型测试，确认配置 API、模型名和日志错误。
+
+6. 长文档 E2E 仍是最终验收。
+   Attention 必须保持通过；Napkin 只有在交互性能、日志、QA、公式审计同时满足后，才算接近完成。

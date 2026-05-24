@@ -11,6 +11,7 @@ import sys
 import argparse
 import socket
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
@@ -29,7 +30,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
-from src.core.models import AppConfig
+from src.core.models import AppConfig, TaskType
 from src.core.model_providers import normalize_litellm_model
 from src.core.service_container import ServiceContainer
 from src.data.config_manager import ConfigManager
@@ -39,6 +40,9 @@ REQUIRED_PYTHON = (3, 14, 4)
 _OLLAMA_REACHABILITY_CACHE: dict[str, tuple[float, bool]] = {}
 _OLLAMA_REACHABILITY_TTL_SEC = 15.0
 _OLLAMA_PROBE_TIMEOUT_SEC = 0.12
+_APP_LOG_MAX_BYTES = 2 * 1024 * 1024
+_APP_LOG_BACKUP_COUNT = 3
+_LOG_RETENTION_SEC = 3 * 24 * 60 * 60
 
 
 def _is_configured_api_key(value: str | None) -> bool:
@@ -84,14 +88,32 @@ def _ollama_endpoint(host: str) -> tuple[str, int] | None:
     return (hostname, int(port))
 
 
+def _prune_old_logs(log_dir: Path, now: float | None = None) -> None:
+    cutoff = (now if now is not None else time.time()) - _LOG_RETENTION_SEC
+    for path in log_dir.glob("*.log*"):
+        if path.name.startswith("keep_awake"):
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            continue
+
+
 def setup_logging() -> None:
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
+    _prune_old_logs(log_dir)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_dir / "app.log", encoding="utf-8"),
+            RotatingFileHandler(
+                log_dir / "app.log",
+                maxBytes=_APP_LOG_MAX_BYTES,
+                backupCount=_APP_LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            ),
             logging.StreamHandler(sys.stdout),
         ],
     )
@@ -298,6 +320,22 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         return AIEngine(router, translation_service, qa_service, config)
 
     container.register_singleton("ai_engine", _build_ai_engine)
+
+    def _build_formula_semantic_review():
+        """Build cloud formula review service; scheduling remains explicit/bounded."""
+        from src.app.formula_semantic_review import FormulaSemanticReviewService
+        from src.app.formula_index_store import FormulaIndexStore
+
+        ai_engine = cast(object, container.get("ai_engine"))
+        router = getattr(ai_engine, "router")
+        client = router.route(TaskType.QA)
+        return FormulaSemanticReviewService(
+            FormulaIndexStore(),
+            client,
+            batch_size=2 if not test_mode else 1,
+        )
+
+    container.register_singleton("formula_semantic_review", _build_formula_semantic_review)
 
     # ── 5. 工厂模式 (per-document instances) ──
 

@@ -426,6 +426,27 @@ def test_formula_audit_canonicalizes_upright_text_commands() -> None:
     assert r"\operatorname" not in counts
 
 
+def test_formula_audit_ignores_latex_line_break_spacing(tmp_path) -> None:
+    from tools.formula_latex_audit import _extract_source_formulas
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(
+        r"""
+        \begin{document}
+        ordinary prose \\[1ex]
+        \[x+y=1\]
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+
+    display, inline, _count = _extract_source_formulas(latex_root)
+
+    assert display == ["x+y=1"]
+    assert inline == []
+
+
 def test_formula_latex_audit_can_match_display_scope(monkeypatch, tmp_path) -> None:
     from tools import formula_latex_audit as audit
 
@@ -670,6 +691,90 @@ def test_formula_recognizer_registry_exposes_default_backend() -> None:
     assert "pix2text-mfr" in FormulaRecognizerRegistry.available_names()
 
 
+def test_pix2text_formula_recognizer_uses_batch_api_and_score() -> None:
+    import io
+
+    from PIL import Image
+
+    from src.core.formula_recognizers import Pix2TextFormulaRecognizer
+
+    calls: list[dict[str, object]] = []
+
+    class FakePix2Text:
+        def recognize_formula(self, paths: list[str], **kwargs: object) -> list[dict[str, object]]:
+            calls.append({"paths": paths, **kwargs})
+            return [
+                {"text": r"\alpha+\beta", "score": 0.91},
+                {"text": r"\frac{a}{b}", "score": "0.82"},
+            ]
+
+    def png_bytes() -> bytes:
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    recognizer = Pix2TextFormulaRecognizer(batch_size=8, num_threads=1)
+    recognizer._p2t = FakePix2Text()
+
+    results = recognizer.recognize_batch_with_metadata([png_bytes(), png_bytes()])
+
+    assert [result.latex for result in results] == [r"\alpha+\beta", r"\frac{a}{b}"]
+    assert [result.score for result in results] == [0.91, 0.82]
+    assert calls[0]["batch_size"] == 8
+    assert calls[0]["return_text"] is False
+    assert len(calls[0]["paths"]) == 2
+
+
+def test_pix2text_formula_recognizer_falls_back_for_old_api() -> None:
+    import io
+
+    from PIL import Image
+
+    from src.core.formula_recognizers import Pix2TextFormulaRecognizer
+
+    calls: list[object] = []
+
+    class FakeOldPix2Text:
+        def recognize_formula(self, paths: list[str], *args: object, **kwargs: object) -> list[str]:
+            calls.append((list(paths), args, dict(kwargs)))
+            if "return_text" in kwargs:
+                raise TypeError("old api")
+            return [r"\gamma"]
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buffer, format="PNG")
+    recognizer = Pix2TextFormulaRecognizer(batch_size=3, num_threads=1)
+    recognizer._p2t = FakeOldPix2Text()
+
+    assert recognizer.recognize_batch([buffer.getvalue()]) == [r"\gamma"]
+    assert len(calls) == 2
+    assert calls[0][2]["return_text"] is False
+    assert calls[1][2]["batch_size"] == 3
+
+
+def test_pix2text_formula_recognizer_normalizes_nested_outputs() -> None:
+    from src.core.formula_recognizers import Pix2TextFormulaRecognizer
+
+    class ResultObject:
+        rec_text = r"\int_0^1 x\,dx"
+        probability = "0.77"
+
+    results = Pix2TextFormulaRecognizer._normalize_outputs(
+        [
+            {"res": {"rec_formula": r"\sqrt{x}", "confidence": "0.73"}},
+            ResultObject(),
+        ],
+        expected=3,
+    )
+
+    assert [result.latex for result in results] == [
+        r"\sqrt{x}",
+        r"\int_0^1 x\,dx",
+        "",
+    ]
+    assert [result.score for result in results] == [0.73, 0.77, None]
+
+
 def test_formula_recognizer_registry_exposes_paddle_backend() -> None:
     from src.core.formula_recognizers import FormulaRecognizerRegistry
 
@@ -699,6 +804,135 @@ def test_paddle_formula_recognizer_extracts_official_result_shapes() -> None:
         [{"rec_formula": r"x"}, {"res": {"rec_formula": r"y"}}],
         expected=3,
     ) == [r"x", r"y", ""]
+
+
+def test_formula_ocr_benchmark_marks_pure_formula_samples() -> None:
+    from tools.formula_ocr_benchmark import _formula_sample_profile
+
+    short_formula = DocumentBlock(
+        id="f0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"x_n \to x",
+        bbox=(0, 0, 10, 10),
+    )
+    mixed_prose = DocumentBlock(
+        id="f1",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content="We have (x_n, y_n) -> (x, y) if and only if x_n -> x.",
+        bbox=(0, 0, 10, 10),
+    )
+
+    assert _formula_sample_profile(short_formula).selection_reason == "pure_formula_like"
+    assert _formula_sample_profile(mixed_prose).selection_reason == "mixed_text_formula"
+
+
+def test_formula_ocr_benchmark_short_mixed_formula_is_not_pure() -> None:
+    from tools.formula_ocr_benchmark import _formula_sample_profile
+
+    block = DocumentBlock(
+        id="f0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content="head_i = Attention(QW_i^Q, KW_i^K, VW_i^V)",
+        bbox=(0, 0, 10, 10),
+    )
+
+    profile = _formula_sample_profile(block)
+
+    assert profile.selection_reason == "mixed_but_short"
+    assert profile.words <= 8
+    assert profile.math_markers >= 2
+
+
+def test_formula_ocr_benchmark_plain_symbol_equation_is_pure() -> None:
+    from tools.formula_ocr_benchmark import _formula_sample_profile
+
+    block = DocumentBlock(
+        id="f0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content="x+y=1",
+        bbox=(0, 0, 10, 10),
+    )
+
+    assert _formula_sample_profile(block).selection_reason == "pure_formula_like"
+
+
+def test_formula_ocr_benchmark_long_latex_prose_is_not_pure() -> None:
+    from tools.formula_ocr_benchmark import _formula_sample_profile
+
+    block = DocumentBlock(
+        id="f0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"Given vectors \alpha and \beta, the equation is used in the proof.",
+        bbox=(0, 0, 10, 10),
+    )
+
+    assert _formula_sample_profile(block).selection_reason == "mixed_text_formula"
+
+
+def test_formula_ocr_benchmark_pure_formula_filter_excludes_mixed_blocks(monkeypatch) -> None:
+    from pathlib import Path
+
+    from tools import formula_ocr_benchmark as benchmark
+
+    blocks = [
+        DocumentBlock(
+            id="pure",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content="x+y=1",
+            bbox=(0, 0, 10, 10),
+        ),
+        DocumentBlock(
+            id="mixed",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content="head_i = Attention(QW_i^Q, KW_i^K, VW_i^V)",
+            bbox=(0, 0, 10, 10),
+        ),
+        DocumentBlock(
+            id="prose",
+            page_num=0,
+            block_type=BlockType.FORMULA,
+            content="We use x_n -> x after taking the limit.",
+            bbox=(0, 0, 10, 10),
+        ),
+    ]
+
+    class FakeDoc:
+        page_count = 1
+
+        def close(self) -> None:
+            return None
+
+    class FakeChunker:
+        def chunk_page(self, doc: object, page_num: int) -> list[DocumentBlock]:
+            return blocks
+
+    monkeypatch.setattr(benchmark.fitz, "open", lambda pdf: FakeDoc())
+    monkeypatch.setattr(benchmark, "DocumentChunker", lambda: FakeChunker())
+
+    _, filtered, _ = benchmark._parse_formula_blocks(
+        Path("fake.pdf"),
+        start_page=0,
+        max_pages=1,
+        sample_limit=10,
+        pure_formula_only=True,
+    )
+    _, unfiltered, _ = benchmark._parse_formula_blocks(
+        Path("fake.pdf"),
+        start_page=0,
+        max_pages=1,
+        sample_limit=10,
+        pure_formula_only=False,
+    )
+
+    assert [block.id for block in filtered] == ["pure"]
+    assert [block.id for block in unfiltered] == ["pure", "mixed", "prose"]
 
 
 def test_paddle_formula_recognizer_uses_batch_predict_api(monkeypatch) -> None:
@@ -942,6 +1176,133 @@ def test_math_ocr_zero_uncached_budget_uses_cache_only(monkeypatch, tmp_path) ->
         "",
         r"\int f(x)\,dx",
     ]
+
+
+def test_math_ocr_metadata_cache_only_does_not_load_model(monkeypatch, tmp_path) -> None:
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    cached_image = b"cached-png"
+    cache.put(cache.hash_image(cached_image), r"\sum_i x_i", "pix2text-mfr")
+
+    ocr = MathOCR()
+    ocr._cache = cache
+
+    monkeypatch.setattr(
+        type(ocr),
+        "is_available",
+        property(lambda self: (_ for _ in ()).throw(AssertionError("availability should not be checked"))),
+    )
+    monkeypatch.setattr(
+        ocr,
+        "_recognize_batch_with_metadata_impl",
+        lambda images: (_ for _ in ()).throw(AssertionError("model should not be called")),
+    )
+
+    results = ocr.recognize_batch_with_metadata(
+        [b"miss", cached_image],
+        max_uncached=0,
+    )
+
+    assert [result.latex for result in results] == ["", r"\sum_i x_i"]
+    assert results[1].score is None
+    assert "cache_hit" in results[1].warnings
+
+
+def test_math_ocr_metadata_deduplicates_uncached_images(monkeypatch, tmp_path) -> None:
+    from src.core.formula_recognizers import FormulaRecognitionResult
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    ocr = MathOCR()
+    ocr._cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    called_batches: list[list[bytes]] = []
+
+    monkeypatch.setattr(type(ocr), "is_available", property(lambda self: True))
+    monkeypatch.setattr(ocr, "_ensure_model", lambda: None)
+
+    def fake_recognize_batch_impl(images: list[bytes]) -> list[FormulaRecognitionResult]:
+        called_batches.append(images)
+        return [
+            FormulaRecognitionResult(latex=r"\alpha", score=0.9),
+            FormulaRecognitionResult(latex=r"\beta", score=0.8),
+        ]
+
+    monkeypatch.setattr(
+        ocr,
+        "_recognize_batch_with_metadata_impl",
+        fake_recognize_batch_impl,
+    )
+
+    results = ocr.recognize_batch_with_metadata(
+        [b"same-image", b"same-image", b"other-image"],
+        max_uncached=3,
+    )
+
+    assert called_batches == [[b"same-image", b"other-image"]]
+    assert [result.latex for result in results] == [r"\alpha", r"\alpha", r"\beta"]
+    assert [result.score for result in results] == [0.9, 0.9, 0.8]
+
+
+def test_math_ocr_metadata_uncached_budget_counts_duplicate_images_once(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.core.formula_recognizers import FormulaRecognitionResult
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    ocr = MathOCR()
+    ocr._cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    called_batches: list[list[bytes]] = []
+
+    monkeypatch.setattr(type(ocr), "is_available", property(lambda self: True))
+    monkeypatch.setattr(ocr, "_ensure_model", lambda: None)
+
+    def fake_recognize_batch_impl(images: list[bytes]) -> list[FormulaRecognitionResult]:
+        called_batches.append(images)
+        return [FormulaRecognitionResult(latex=r"\alpha", score=0.9)]
+
+    monkeypatch.setattr(
+        ocr,
+        "_recognize_batch_with_metadata_impl",
+        fake_recognize_batch_impl,
+    )
+
+    results = ocr.recognize_batch_with_metadata(
+        [b"same-image", b"same-image", b"other-image"],
+        max_uncached=1,
+    )
+
+    assert called_batches == [[b"same-image"]]
+    assert [result.latex for result in results] == [r"\alpha", r"\alpha", ""]
+    assert [result.score for result in results] == [0.9, 0.9, None]
+
+
+def test_math_ocr_metadata_writes_recognized_latex_to_cache(monkeypatch, tmp_path) -> None:
+    from src.core.formula_recognizers import FormulaRecognitionResult
+    from src.core.math_ocr import MathOCR, _FormulaOcrCache
+
+    MathOCR._instance = None
+    cache = _FormulaOcrCache(str(tmp_path / "formula_cache.db"))
+    ocr = MathOCR()
+    ocr._cache = cache
+
+    monkeypatch.setattr(type(ocr), "is_available", property(lambda self: True))
+    monkeypatch.setattr(ocr, "_ensure_model", lambda: None)
+    monkeypatch.setattr(
+        ocr,
+        "_recognize_batch_with_metadata_impl",
+        lambda images: [FormulaRecognitionResult(latex=r"\eta", score=0.7)],
+    )
+
+    results = ocr.recognize_batch_with_metadata([b"new-image"], max_uncached=1)
+    image_hash = cache.hash_image(b"new-image")
+
+    assert results[0].latex == r"\eta"
+    assert results[0].score == 0.7
+    assert cache.get(image_hash, "pix2text-mfr") == r"\eta"
 
 
 def test_scanned_formula_ocr_budget_keeps_placeholders(monkeypatch) -> None:

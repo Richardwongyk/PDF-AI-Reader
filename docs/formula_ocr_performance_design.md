@@ -11,14 +11,20 @@
 硬约束：
 
 - 默认打开、滚动、缩放、翻译不等待 MFD/MFR。
-- 不把新虚拟环境作为默认部署方案。
-- 不默认引入 PaddleOCR 这类重依赖。
+- 不把新虚拟环境作为主程序默认部署方案；重工具只能作为独立 worker。
+- 不把 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet 等重依赖混进主环境。
 - 任何新后端必须先通过 Attention/Napkin 的速度和 LaTeX 对齐审计。
 - 同一图片、同一模型、同一预处理版本必须命中缓存，不能重复推理。
+- OCR/MFR 只属于 r1/r2 补救轮；born-digital r0 默认不 OCR。
 
 ## 当前判断
 
 当前主环境是 Python 3.14 + CPU PyTorch + ONNXRuntime，无 CUDA。PaddlePaddle 没有可用的 Python 3.14 wheel，因此 PaddleOCR 不能直接装进主环境。单独新建 Python 3.12 worker 能跑，但会增加部署复杂度和磁盘体积，不适合作为默认方案。
+
+2026-05-24 后续补充：外部工具环境尝试后已清理，最后一次确认没有 `pdf_tool_*`
+或 `pdf_formula_*` 环境。下一次评估 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet
+时，必须按 `docs/next_session_handoff.md` 的矩阵独立建 worker 环境，并记录真实 PDF
+小页烟测、冷启动、推理耗时、峰值内存和源码对照质量。
 
 PaddleOCR 官方公式模块提供 `FormulaRecognition(model_name=...)` 和 `predict(input=..., batch_size=...)`，输出字段为 `rec_formula`。官方数据里 `PP-FormulaNet_plus-S` 侧重速度和英文公式，CPU 高性能模式约 260ms/公式；`PP-FormulaNet_plus-M/L` 准确率更高但 CPU 推理明显更慢。RapidLaTeXOCR 使用 ONNXRuntime/OpenVINO，技术路线更轻，但当前包对 Python 3.14 不友好，不能无代价接入主环境。
 
@@ -54,6 +60,13 @@ PDF 打开
   -> 有预算才推理
   -> 可暂停/恢复
 ```
+
+与多轮公式解析对应：
+
+- r0：只做 PDF 结构快扫，不走 OCR/MFR。
+- r1：缓存优先 OCR/MFR，处理图片/扫描/needs_ocr 候选。
+- r2：本地高精度 worker 复核低置信或用户精扫候选。
+- r3：云端语义复核只校对候选，不替代 OCR/MFR 或 PDF 结构证据。
 
 ## 后端策略
 

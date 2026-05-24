@@ -53,7 +53,48 @@
 - 未默认安装：pdfminer.six、pdfplumber、Marker、Docling、MinerU、PaddleOCR、RapidLaTeXOCR。
 - 不新建慢速大环境作为默认动作；重依赖必须做成可选 worker，不污染主 Python 3.14 环境。
 
+## 2026-05-24 外部工具环境教训
+
+本轮曾尝试安装和验证 MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR Formula、
+magic-pdf 等工具。结论不是“这些工具不能用”，而是当前安装方式不合格：
+
+- 不能把多个大型 PDF/公式工具栈混进一个环境。
+- 不能污染主程序环境，也不能触碰用户已有环境。
+- `pip check` 通过不代表 CLI 或真实 PDF 解析可用；必须跑 import、CLI、真实 PDF 小页烟测。
+- Windows 上不要并行 `conda create`，容易出现缓存/锁冲突。
+- 能用 conda/mamba 解决的底层依赖优先用 conda/mamba；PyPI-only 包再用 pip。
+- 使用国内镜像只解决下载速度，不解决版本兼容。
+
+当前真实状态：
+
+- 临时环境 `pdf_formula_tools_310`、`pdf_tool_mineru310`、`pdf_tool_magic310`、
+  `pdf_tool_paddle310`、`pdf_tool_pek310` 已删除。
+- 最后一次 `conda env list` 没有 `pdf_tool_*` 或 `pdf_formula_*`。
+- 下一次重新安装必须先写版本矩阵，再逐个环境验证。
+
+建议矩阵：
+
+| 环境 | 目标 | 验证门槛 |
+| --- | --- | --- |
+| `pdf_tool_pix2text` | 复测 Pix2Text 现有链路，解释“论文准确率高但本地效果差”的原因 | 同一公式图多 DPI/裁剪/预处理 ablation、耗时、置信度 |
+| `pdf_tool_paddle310` | PaddleOCR FormulaRecognition | import、示例图、Attention/Napkin 裁剪图、峰值内存 |
+| `pdf_tool_mineru311` | MinerU 最新本地解析 | CLI/API、Attention 前几页、公式 Markdown、冷启动和总耗时 |
+| `pdf_tool_pek310` | PDF-Extract-Kit + UniMERNet | API/CLI、真实 PDF 小页、模型下载和入口可用性 |
+| `pdf_tool_magic310` | 旧 magic-pdf 对照 | CLI/API、Attention 小页、与 MinerU 新版本差异 |
+
+每个工具必须输出：
+
+- 版本、模型版本、模型路径、依赖检查结果。
+- 冷启动耗时、单页/单公式耗时、峰值内存。
+- 真实 Attention/Napkin 样例输出。
+- 与 LaTeX 源码的近似匹配和失败样例。
+- 是否适合默认路径、后台 r1/r2、还是只适合离线审计。
+
 ## 目标流水线
+
+异步任务、存储表、缓存 key、修正轮和 C++17 加速边界详见
+[async_formula_indexing_design.md](async_formula_indexing_design.md)。本节只保留
+公式抽取本身的高层流水线。
 
 ```text
 PDF 导入
@@ -292,6 +333,107 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - 旧 span 级公式启发式会把表格数值、复杂证明句、列表项误判为公式；后续应逐步降级为 fallback，默认公式入口转向结构事实层。
 - semantic v1 已证明命令恢复可量化提升，但仍不是高精度成品。下一步重点不是扩大字符规则，而是做 region 级类型判别、表格/列表/正文混排隔离、矩阵/对齐环境建模和 LaTeX 源码页级对齐审计。
 
+## 2026-05-24 本地可部署模型专项调研
+
+目标硬件按 16G RAM / 4 核 CPU 设计，主攻 born-digital PDF。结论不是
+“直接用一个大工具替换现有解析”，而是保留 PDF 原生结构热路径，把模型工具放到
+异步增强层：
+
+```text
+PDF 导入
+  -> 第 0 轮：PyMuPDF / MuPDF 原生结构抽取
+       文本、glyph、font、bbox、vector、ToUnicode、ActualText、图片块
+       立即生成基础阅读块和基础知识库索引
+  -> 第 1 轮：结构公式区检测与置信度审计
+       display / inline / table-like / prose-like / unknown-glyph
+       仍不跑 OCR，不阻塞 UI
+  -> 第 2 轮：本地模型 worker
+       只处理图片公式、扫描公式、低置信纯公式裁剪、或整页离线对照
+       Pix2Text -> UniMERNet / PDF-Extract-Kit -> MinerU 整页基准
+  -> 第 3 轮：云端语义修正
+       DeepSeek 只基于 PDF 证据、公式候选和上下文做校对建议
+       自动替换必须通过语法、结构和上下文一致性门禁
+  -> 增量写回缓存、知识库、GraphRAG
+```
+
+### 工具结论
+
+| 工具 | 本地部署 | 适合角色 | 不适合角色 | 当前建议 |
+| --- | --- | --- | --- | --- |
+| MinerU | 支持 CLI / API / Docker，本地 pipeline / VLM / hybrid 后端；依赖重 | 整页离线解析、Markdown/JSON 基准、RAG 增强 worker | 不应接管首轮打开和滚动路径；不是纯 PDF 结构公式还原器 | 先作为异步整页增强和基准，不进热路径 |
+| Pix2Text | 本机已装，已有 `mfd-1.5-onnx`、`mfr-1.5-onnx`、doclayout 模型缓存 | 纯公式图片 MFR、混合文本公式 OCR 对照、图片/扫描公式默认本地后端 | 不应对 born-digital 文本公式整段截图 OCR；不应同步加载 | 先修正使用方式和 benchmark，再决定是否保留默认 |
+| UniMERNet | 可本地模型部署，PDF-Extract-Kit 使用它做公式识别 | 高精度纯公式裁剪的第二层修正 worker | CPU 速度和依赖体积未知；不能默认阻塞 | 作为 Pix2Text 之后的高精度备选，必须跑同样样本 |
+| PDF-Extract-Kit | 本地工具箱，包含 layout detection、formula detection、UniMERNet、PaddleOCR | 独立模型工具箱、检测/识别分模块评估 | 工程集成和依赖更重；许可证和环境边界要单独处理 | 先用独立 worker/命令行评估，不直接嵌入主进程 |
+
+MinerU 的价值在于“完整文档解析工程”和统一输出，不在于替代 PDF 原生事实层。
+对非扫描 PDF，最可靠、最快、最可解释的第一层仍是 MuPDF/Poppler 读取文本层、
+字体、坐标和矢量事实。模型输出只能作为增强候选，不能把它当作没有证据的真值。
+
+### 为什么本地 Pix2Text 效果很差
+
+已有基准不是在证明 Pix2Text 模型无效，而是在暴露当前管线用错了输入和层级：
+
+- Pix2Text 的 `recognize_formula()` 是“纯数学公式图片 -> LaTeX”。当前样本把
+  包含英文句子的整行或整段截图送进去，例如 `Where the projections are...`，
+  所以输出大量 `\mathrm{W h e r e ...}` 是预期失败，不是纯公式识别能力本身的结论。
+- 对 born-digital PDF，第一选择不应是截图后 OCR。PDF 已经有 glyph、font、bbox
+  和 ToUnicode 信息，截图会丢掉可解释结构，再让视觉模型重新猜。
+- 当前 formula block 候选过宽，混入正文、例题叙述、定义句和表格行。MFR 对这种
+  混合输入会把自然语言也转成 LaTeX，导致看起来“公式识别一塌糊涂”。
+- `Pix2TextFormulaRecognizer` 已改为向底层 `recognize_formula()` 传递
+  `batch_size`，并尽量使用 `return_text=False` 保留 score；后续 benchmark 能记录
+  模型置信度，而不是只保存 LaTeX 字符串。
+- 现有 benchmark 的可用性检查包含模型冷启动和可能的模型初始化，Attention 样本
+  出现 102s 级冷启动，Napkin 约 21s。这个成本必须通过常驻 worker、懒加载和缓存
+  隔离，不能发生在打开、滚动、缩放、翻译路径。
+- benchmark 已增加 `--pure-formula-only`，用于把“纯公式 MFR 质量”与“候选块混入正文”
+  分开测；混合文本公式仍要走 PDF 结构拆分或 Pix2Text text-formula 对照。
+- 本机 Pix2Text 版本是 1.1.6，缓存模型是 `mfr-1.5-onnx`。升级或换模型前必须
+  单独 benchmark，不能污染主环境。
+
+因此 Pix2Text 后续正确用法是：
+
+1. 对图片/扫描公式：继续使用 MFD + MFR，但小批、缓存、后台执行。
+2. 对 born-digital 低置信公式：先用结构层裁出“纯公式区域”，再送 MFR。
+3. 对混合文本 + 行内公式：优先用 PDF 原生文本拆分；如果要用 Pix2Text，应走
+   `recognize_text_formula()` 对照，而不是纯 `recognize_formula()`。
+4. 对模型结果：保存 score、模型名、预处理版本、图片 hash 和原始 PDF 证据。
+
+### 推荐落地顺序
+
+1. 不把 MinerU 装进主环境，不让任何重模型参与首屏、滚动、缩放、翻译。
+2. 继续扩展 Pix2Text benchmark：当前已支持纯公式筛选、传递 batch_size、记录 score；
+   下一步区分冷启动/常驻 worker/缓存命中，并加入 text-formula 对照。
+3. 加一个统一的本地 worker 接口，四个候选都走同一输入输出：
+   `formula_image -> latex + score + model + duration + warnings`。
+4. 用同一批 Attention/Napkin 源码对照样本评测：
+   Pix2Text、UniMERNet、PDF-Extract-Kit formula_recognition、MinerU 整页输出。
+5. 若 MinerU 在 16G/4 核下整页解析质量和吞吐合格，就作为“导入后异步整页增强”
+   和 RAG Markdown 基准；若不合格，只保留为可选精扫。
+6. DeepSeek 只做语义校验和候选修正：输入必须包含上下文、原公式、PDF 结构证据、
+   模型置信度和可疑点；不能让云端模型凭空重写公式。
+
+验收线：
+
+- 默认阅读路径不加载任何 MFR/MinerU/PDF-Extract-Kit 模型。
+- 常驻 worker 的单公式缓存命中接近零成本；未命中时必须受 batch 和 CPU 预算限制。
+- 对 Attention/Napkin 源 LaTeX，模型 worker 必须同时报告 recall、weak match、
+  command recall、低相似率、冷启动、P50/P95、峰值内存。
+- 自动写回只允许高置信结果；低置信进入 UI 可见的修正队列和问答 evidence。
+
+### 多轮写回要求
+
+公式识别不是一次性任务，而是版本化修正流程：
+
+- Round 0 写入 PDF 原生结构块和基础索引。
+- Round 1 写入结构公式候选、风险标记和置信度。
+- Round 2 写入本地模型结果，按模型、版本、输入 hash 分开缓存。
+- Round 3 写入高精度复核结果，不直接覆盖已有 accepted 结果。
+- Round 4 写入 DeepSeek 语义修正候选，通过门禁后才切换 accepted 结果。
+- Round 5 将高置信结果增量 upsert 到知识库和 GraphRAG artifact。
+
+每一轮都必须落库；二次打开、崩溃恢复、模型切换和云端重试都必须能复用已有结果。
+
 ## 参考资料
 
 - PyMuPDF text extraction appendix: https://pymupdf.readthedocs.io/en/latest/app1.html
@@ -302,6 +444,9 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\formula_ocr_benchmar
 - Marker: https://github.com/datalab-to/marker
 - Docling: https://github.com/docling-project/docling
 - MinerU: https://github.com/opendatalab/MinerU
+- Pix2Text: https://github.com/breezedeus/Pix2Text
+- UniMERNet: https://github.com/opendatalab/UniMERNet
+- PDF-Extract-Kit: https://github.com/opendatalab/PDF-Extract-Kit
 - PaddleOCR formula recognition: https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/formula_recognition.html
 - RapidLaTeXOCR: https://github.com/RapidAI/RapidLaTeXOCR
 - DeepSeek API docs: https://api-docs.deepseek.com/

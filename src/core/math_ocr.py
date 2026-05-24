@@ -20,7 +20,11 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.core.formula_recognizers import FormulaRecognizer, FormulaRecognizerRegistry
+from src.core.formula_recognizers import (
+    FormulaRecognitionResult,
+    FormulaRecognizer,
+    FormulaRecognizerRegistry,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -283,6 +287,74 @@ class MathOCR:
             _logger.warning("MFR 批量识别失败: %s", e)
             return cached_results
 
+    def recognize_batch_with_metadata(
+        self, images: list[bytes], max_uncached: int | None = None
+    ) -> list[FormulaRecognitionResult]:
+        """Batch recognize formulas and preserve backend score metadata.
+
+        Cached results keep their LaTeX text but do not currently have a stored
+        score; future cache schema revisions can persist score without changing
+        this call surface.
+        """
+        if not images:
+            return []
+
+        cached_results, misses = self._read_cache(images)
+        results = [
+            FormulaRecognitionResult(
+                latex=latex,
+                warnings=("cache_hit",) if latex else (),
+            )
+            for latex in cached_results
+        ]
+        unique_misses: list[tuple[int, str]] = []
+        seen_hashes: set[str] = set()
+        for original_index, image_hash in misses:
+            if image_hash in seen_hashes:
+                continue
+            seen_hashes.add(image_hash)
+            unique_misses.append((original_index, image_hash))
+        if max_uncached is not None:
+            allowed = max(0, int(max_uncached))
+            unique_misses = unique_misses[:allowed]
+        if not unique_misses:
+            return results
+        if not self.is_available:
+            return results
+
+        try:
+            self._ensure_model()
+            miss_images = [images[i] for i, _ in unique_misses]
+            miss_results = self._recognize_batch_with_metadata_impl(miss_images)
+            cache_namespace = self._cache_namespace()
+            recognized_by_hash: dict[str, FormulaRecognitionResult] = {}
+            for (original_index, image_hash), result in zip(
+                unique_misses,
+                miss_results,
+                strict=False,
+            ):
+                cleaned = str(result.latex or "").strip()
+                normalized = FormulaRecognitionResult(
+                    latex=cleaned,
+                    score=result.score,
+                    raw=result.raw,
+                    warnings=result.warnings,
+                )
+                results[original_index] = normalized
+                recognized_by_hash[image_hash] = normalized
+                if cleaned:
+                    self._cache.put(image_hash, cleaned, cache_namespace)
+            for original_index, image_hash in misses:
+                if original_index < len(results) and not results[original_index].latex:
+                    results[original_index] = recognized_by_hash.get(
+                        image_hash,
+                        results[original_index],
+                    )
+            return results
+        except Exception as e:
+            _logger.warning("MFR 批量识别失败: %s", e)
+            return results
+
     # ------------------------------------------------------------------
     # 内部实现
     # ------------------------------------------------------------------
@@ -336,3 +408,9 @@ class MathOCR:
     def _recognize_batch_impl(self, images: list[bytes]) -> list[str]:
         """批量识别的实际实现。"""
         return self._get_recognizer().recognize_batch(images)
+
+    def _recognize_batch_with_metadata_impl(
+        self, images: list[bytes]
+    ) -> list[FormulaRecognitionResult]:
+        """Batch recognition implementation with optional backend metadata."""
+        return self._get_recognizer().recognize_batch_with_metadata(images)
