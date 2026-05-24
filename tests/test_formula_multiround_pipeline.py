@@ -623,6 +623,41 @@ def test_formula_fusion_keeps_multiple_inline_formulas_in_same_paragraph_separat
     assert all(row["candidate_count"] == 1 for row in rows.values())
 
 
+def test_formula_fusion_prioritizes_high_value_cloud_review_without_dropping_inline(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(
+        r"inline \(t\) and \(\sum_{i=1}^{n} x_i\)",
+        encoding="utf-8",
+    )
+    case = type("Case", (), {"name": "fake", "pdf": Path("fake.pdf"), "latex_root": latex_root})()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    paragraph = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content=r"inline \(t\) and \(\sum_{i=1}^{n} x_i\)",
+        bbox=(0, 0, 120, 20),
+    )
+
+    pipe._formula_fusion_report(case, store, "doc-1", [paragraph], [], max_pages=0, filepath="paper.pdf")
+
+    queued = store.list_round_records(
+        "doc-1",
+        statuses={"queued"},
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        limit=10,
+    )
+    assert {record.target_id for record in queued} == {"p0_b0_inline_0", "p0_b0_inline_1"}
+    assert queued[0].target_id == "p0_b0_inline_1"
+    assert queued[0].priority > queued[1].priority
+    assert queued[0].result_json["review_candidate"]["latex"] == r"\sum_{i=1}^{n} x_i"
+    assert "low_value_inline=True" in queued[1].result_json["review_priority_reason"]
+    assert "low_value_inline=False" in queued[0].result_json["review_priority_reason"]
+
+
 def test_pipeline_r4_writes_fusion_candidate_graph_nodes(tmp_path) -> None:
     from tools import formula_multiround_pipeline as pipe
     from src.app.graph_index_store import GraphIndexStore

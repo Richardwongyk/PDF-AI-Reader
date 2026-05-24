@@ -92,6 +92,8 @@ PDF 导入
 - `FormulaSemanticReviewFlow` 已把 r3 消费接入后台 QThread；MainWindow 空闲调度会小批量启动语义复核，导入热路径只负责入队。
 - r3 结果写入 `formula_round_jobs.result_json`，保留 `suggested_latex`、`confidence`、`reason`、`risks` 和原始响应。
 - r3 不覆盖 `DocumentBlock.content`，也不改 accepted 公式；低置信或未通过门禁的结果只能作为候选证据保存。
+- fusion 派生的 r3 任务带 `semantic_review_priority`、`review_priority` 和 `review_priority_reason`：结构证据、本地工具候选、低相似、候选冲突、风险项和复杂 LaTeX 优先；低价值单字符 inline 只降优先级，仍然入库等待审计。
+- r3 done 结果会合并原始排队 payload，保留 `review_candidate`、`queued_input_hash`、`review_input_hash`、优先级和优先级原因，保证审计时能复原云端审了哪个候选、基于哪个 fusion input。
 - 真实 DeepSeek r3 单条 smoke 已跑通，但生产门禁、accepted revision 表、r4 语义级图谱质量和 r5 增量写回闭环仍未完成；
   这些必须作为后续独立闭环完成。
 

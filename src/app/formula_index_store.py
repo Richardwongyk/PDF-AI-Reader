@@ -1500,6 +1500,13 @@ class FormulaIndexStore:
     @staticmethod
     def priority_for_block(block: DocumentBlock, priority_pages: set[int]) -> float:
         page_boost = 1000.0 if block.page_num in priority_pages else 0.0
+        review_priority = block.metadata.get("semantic_review_priority")
+        if review_priority is not None:
+            try:
+                review_score = float(review_priority)
+            except (TypeError, ValueError):
+                review_score = 0.0
+            return page_boost + review_score - block.page_num * 0.001
         score = float(block.metadata.get("formula_score", 0.0) or 0.0)
         area = max((block.bbox[2] - block.bbox[0]) * (block.bbox[3] - block.bbox[1]), 0.0)
         return page_boost + score * 100.0 + min(area / 1000.0, 100.0) - block.page_num * 0.001

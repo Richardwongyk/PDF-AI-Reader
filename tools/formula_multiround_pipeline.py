@@ -1433,6 +1433,8 @@ def _persist_fusion_rows(
                     "best_result_id": str(row.get("best_result_id", "") or ""),
                     "decision": str(row.get("decision", "") or ""),
                     "candidate_count": int(row.get("candidate_count", 0) or 0),
+                    "review_priority": target.metadata.get("semantic_review_priority", 0.0),
+                    "review_priority_reason": target.metadata.get("semantic_review_priority_reason", ""),
                     "model": "pending_semantic_review",
                     "model_version": "pending_semantic_review",
                     "review_candidate": {
@@ -1591,6 +1593,7 @@ def _fusion_review_block(
     block_map: dict[str, DocumentBlock],
 ) -> DocumentBlock | None:
     candidate_id = str(row.get("candidate_id", "") or "")
+    review_priority = _semantic_review_priority(row)
     block = block_map.get(candidate_id)
     if block is not None:
         return block.model_copy(
@@ -1599,6 +1602,8 @@ def _fusion_review_block(
                     **block.metadata,
                     "fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
                     "fusion_decision": str(row.get("decision", "") or ""),
+                    "semantic_review_priority": review_priority,
+                    "semantic_review_priority_reason": _semantic_review_priority_reason(row),
                 }
             },
             deep=True,
@@ -1607,7 +1612,113 @@ def _fusion_review_block(
     if target is None:
         return None
     target.metadata["fusion_decision"] = str(row.get("decision", "") or "")
+    target.metadata["semantic_review_priority"] = review_priority
+    target.metadata["semantic_review_priority_reason"] = _semantic_review_priority_reason(row)
     return target
+
+
+def _semantic_review_priority(row: dict[str, object]) -> float:
+    """Rank r3 cloud review work by expected value without accepting candidates."""
+    stages = {
+        str(stage)
+        for stage in row.get("stages", [])
+        if str(stage)
+    } if isinstance(row.get("stages"), list) else set()
+    risk_flags = [
+        str(flag)
+        for flag in row.get("risk_flags", [])
+        if str(flag)
+    ] if isinstance(row.get("risk_flags"), list) else []
+    best_latex = str(row.get("best_latex", "") or "").strip()
+    candidate_count = int(row.get("candidate_count", 0) or 0)
+    best_similarity = float(row.get("best_similarity", 0.0) or 0.0)
+    coverage = float(row.get("coverage", 0.0) or 0.0)
+    decision = str(row.get("decision", "") or "")
+
+    score = 500.0
+    if "inline_spans" in stages and len(stages) == 1:
+        score -= 120.0
+    if stages.intersection({"parsed_blocks", "pdf_structure"}):
+        score += 180.0
+    if "local_precise" in stages:
+        score += 90.0
+    if candidate_count > 1:
+        score += min(float(candidate_count - 1) * 30.0, 120.0)
+    score += max(0.0, 1.0 - best_similarity) * 220.0
+    score += coverage * 80.0
+    if decision == "ready_for_manual_accept":
+        score += 80.0
+    if risk_flags:
+        score += min(float(len(risk_flags)) * 45.0, 180.0)
+    if "local_precise_degraded_against_born_digital" in risk_flags:
+        score += 140.0
+
+    complexity = _latex_review_complexity(best_latex)
+    score += complexity * 16.0
+    if _is_low_value_inline_review(row, best_latex):
+        score -= 180.0
+    return round(max(score, 1.0), 3)
+
+
+def _semantic_review_priority_reason(row: dict[str, object]) -> str:
+    stages = ",".join(str(stage) for stage in row.get("stages", []) if str(stage)) \
+        if isinstance(row.get("stages"), list) else ""
+    risk_count = len(row.get("risk_flags", [])) if isinstance(row.get("risk_flags"), list) else 0
+    latex = str(row.get("best_latex", "") or "").strip()
+    return (
+        f"stages={stages or 'none'}; "
+        f"candidate_count={int(row.get('candidate_count', 0) or 0)}; "
+        f"best_similarity={float(row.get('best_similarity', 0.0) or 0.0):.3f}; "
+        f"coverage={float(row.get('coverage', 0.0) or 0.0):.3f}; "
+        f"risk_count={risk_count}; "
+        f"complexity={_latex_review_complexity(latex):.3f}; "
+        f"low_value_inline={_is_low_value_inline_review(row, latex)}"
+    )
+
+
+def _latex_review_complexity(latex: str) -> float:
+    text = str(latex or "").strip()
+    if not text:
+        return 0.0
+    normalized = (
+        text.replace(r"\(", "")
+        .replace(r"\)", "")
+        .replace("$$", "")
+        .replace("$", "")
+        .strip()
+    )
+    if not normalized:
+        return 0.0
+    score = min(len(normalized) / 18.0, 2.0)
+    score += min(normalized.count("\\") * 0.35, 1.4)
+    score += min(sum(1 for char in normalized if char.isdigit()) * 0.18, 0.9)
+    score += min(sum(1 for char in normalized if char in "_^{}[]()") * 0.14, 1.2)
+    score += min(sum(1 for char in normalized if char in "+-=<>/|,") * 0.12, 1.0)
+    if any(ord(char) > 127 for char in normalized):
+        score += 0.5
+    return round(score, 3)
+
+
+def _is_low_value_inline_review(row: dict[str, object], latex: str) -> bool:
+    stages = {
+        str(stage)
+        for stage in row.get("stages", [])
+        if str(stage)
+    } if isinstance(row.get("stages"), list) else set()
+    if stages != {"inline_spans"}:
+        return False
+    if int(row.get("candidate_count", 0) or 0) != 1:
+        return False
+    if row.get("risk_flags"):
+        return False
+    normalized = _normalize_formula_for_match(latex)
+    if not normalized:
+        return True
+    if len(normalized) <= 1:
+        return True
+    if len(normalized) <= 2 and normalized.isalpha():
+        return True
+    return False
 
 
 def _fusion_graph_blocks(formula_fusion: dict[str, object]) -> list[DocumentBlock]:

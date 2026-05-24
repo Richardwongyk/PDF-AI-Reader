@@ -262,6 +262,8 @@ def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_p
             target.id: {
                 "input_hash": "fusion-hash",
                 "decision": "needs_more_evidence",
+                "review_priority": 420.0,
+                "review_priority_reason": "stages=inline_spans; low_value_inline=False",
                 "review_candidate": {
                     "latex": r"x_i",
                     "page_num": 0,
@@ -287,6 +289,11 @@ def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_p
     )[0]
     assert record.status == "done"
     assert record.result_json["suggested_latex"] == r"\(x_i\)"
+    assert record.result_json["queued_input_hash"] == "fusion-hash"
+    assert record.result_json["review_input_hash"] == record.result_json["input_hash"]
+    assert record.result_json["review_priority"] == 420.0
+    assert record.result_json["review_priority_reason"] == "stages=inline_spans; low_value_inline=False"
+    assert record.result_json["review_candidate"]["source_context"] == "inline context with x_i and y_j"
     assert "paragraph_inline_math" in client.messages[0][1]["content"]
     assert "inline context with x_i and y_j" in client.messages[0][1]["content"]
 

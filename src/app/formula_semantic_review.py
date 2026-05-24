@@ -125,7 +125,7 @@ class FormulaSemanticReviewService:
                     FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
                     "block",
                     record.target_id,
-                    result.to_json(),
+                    _merge_review_payload(record.result_json, result.to_json()),
                     elapsed_ms=elapsed_ms,
                 )
                 counts["done"] += 1
@@ -417,6 +417,28 @@ def _review_error_message(exc: Exception) -> str:
         raw = " ".join(exc.raw.split())
         return f"{exc}; raw_response_excerpt={raw[:360]}"
     return str(exc)
+
+
+def _merge_review_payload(existing: dict[str, object], result: dict[str, object]) -> dict[str, object]:
+    merged = dict(result)
+    for key in (
+        "fusion_version",
+        "best_result_id",
+        "decision",
+        "candidate_count",
+        "review_priority",
+        "review_priority_reason",
+        "review_candidate",
+    ):
+        if key in existing and key not in merged:
+            merged[key] = existing[key]
+    pending_hash = str(existing.get("input_hash", "") or "")
+    result_hash = str(result.get("input_hash", "") or "")
+    if pending_hash:
+        merged["queued_input_hash"] = pending_hash
+    if result_hash:
+        merged["review_input_hash"] = result_hash
+    return merged
 
 
 def _review_input_hash(
