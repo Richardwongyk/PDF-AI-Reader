@@ -416,6 +416,16 @@ def test_formula_audit_similarity_matches_latex_variants() -> None:
     assert low_pdf == []
 
 
+def test_formula_audit_canonicalizes_upright_text_commands() -> None:
+    from tools.formula_latex_audit import _command_counts
+
+    counts = _command_counts([r"\text{where}+\operatorname{softmax}(x)+\mathrm{A}"])
+
+    assert counts[r"\mathrm"] == 3
+    assert r"\text" not in counts
+    assert r"\operatorname" not in counts
+
+
 def test_formula_latex_audit_can_match_display_scope(monkeypatch, tmp_path) -> None:
     from tools import formula_latex_audit as audit
 

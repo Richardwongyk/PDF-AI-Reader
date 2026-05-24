@@ -156,8 +156,14 @@ def _extract_source_formulas(latex_root: Path) -> tuple[list[str], list[str], in
 def _command_counts(snippets: list[str]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for snippet in snippets:
-        counts.update(MATH_COMMAND_RE.findall(snippet))
+        counts.update(_canonical_math_command(command) for command in MATH_COMMAND_RE.findall(snippet))
     return counts
+
+
+def _canonical_math_command(command: str) -> str:
+    if command in {r"\text", r"\operatorname"}:
+        return r"\mathrm"
+    return command
 
 
 MACRO_EXPANSIONS = {
