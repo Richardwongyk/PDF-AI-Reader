@@ -608,6 +608,12 @@ def test_formula_index_store_persists_status_transitions(tmp_path) -> None:
     assert tasks[0].image_hash == "hash-1"
     assert tasks[0].scan_round == FormulaScanRound.CACHED_RECOGNITION.value
     assert store.round_counts("doc-1") == {"r1_cached_recognition:done": 1}
+    round_record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.CACHED_RECOGNITION,
+    )[0]
+    assert round_record.result_json["input_hash"] == "hash-1"
+    assert round_record.result_json["model"] == "pix2text-mfr"
 
 
 def test_formula_index_store_requeues_changed_done_block(tmp_path) -> None:
@@ -686,6 +692,8 @@ def test_formula_index_flow_records_high_precision_worker_round(tmp_path) -> Non
                 "latex": r"\beta",
                 "image_hash": "hash-2",
                 "model": "pix2text-mfr",
+                "model_version": "pix2text-mfr",
+                "preprocess_version": "crop-dpi300-pad6",
                 "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
             }],
             "skipped": [],
@@ -698,6 +706,13 @@ def test_formula_index_flow_records_high_precision_worker_round(tmp_path) -> Non
     assert store.round_counts("doc-1") == {
         "r2_local_high_precision:done": 1,
     }
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    )[0]
+    assert record.result_json["input_hash"] == "hash-2"
+    assert record.result_json["model_version"] == "pix2text-mfr"
+    assert record.result_json["preprocess_version"] == "crop-dpi300-pad6"
     record = store.list_round_records(
         "doc-1",
         scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
@@ -952,6 +967,8 @@ def test_high_precision_worker_outputs_candidate_only(monkeypatch, tmp_path) -> 
         "latex": r"\int_0^1 x dx",
         "image_hash": hashlib.sha256(b"png-bytes").hexdigest(),
         "model": "pix2text-mfr",
+        "model_version": "pix2text-mfr",
+        "preprocess_version": "crop-dpi300-pad6",
         "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
     }]
 
@@ -1053,6 +1070,8 @@ def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> 
             "latex": r"\alpha",
             "image_hash": image_hash,
             "model": "pix2text-mfr",
+            "model_version": "pix2text-mfr",
+            "preprocess_version": "crop-dpi300-pad6",
             "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
         },
         {

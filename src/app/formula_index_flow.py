@@ -306,6 +306,16 @@ class FormulaIndexFlow(QObject):
             for block in blocks
             if block.block_type == BlockType.FORMULA
         ]
+        payloads = {
+            block.id: {
+                "stage": FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value,
+                "input_hash": FormulaIndexStore.content_hash(block),
+                "content_hash": FormulaIndexStore.content_hash(block),
+                "model": "pending_semantic_review",
+                "model_version": "pending_semantic_review",
+            }
+            for block in formula_blocks
+        }
         return self._store.enqueue_round_records(
             doc_hash,
             filepath,
@@ -313,6 +323,7 @@ class FormulaIndexFlow(QObject):
             "block",
             formula_blocks,
             priority_pages=priority_pages,
+            result_json_by_target=payloads,
         )
 
     def stop(self) -> None:
@@ -440,6 +451,10 @@ class FormulaIndexFlow(QObject):
                 image_hash,
                 str(item.get("model", "pix2text-mfr") or "pix2text-mfr"),
                 scan_round=scan_round,
+                model_version=str(item.get("model_version", "") or ""),
+                preprocess_version=str(item.get("preprocess_version", "") or ""),
+                score=self._optional_float(item.get("score")),
+                warnings=self._string_list(item.get("warnings")),
             )
         for item in result.get("skipped", []):
             if not isinstance(item, dict):
@@ -772,6 +787,8 @@ class _FormulaOcrWorker(QThread):
                     "latex": cleaned,
                     "image_hash": image_hash,
                     "model": "pix2text-mfr",
+                    "model_version": "pix2text-mfr",
+                    "preprocess_version": "crop-dpi300-pad6",
                     "scan_round": self._scan_round,
                 })
             if self._scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value:

@@ -82,7 +82,7 @@ PDF 导入
 - r2 当前通过 `ExternalFormulaToolRunner` 和 `tools/formula_tool_worker.py` 调独立工具环境，
   已支持 Paddle Formula 与 Pix2Text 公式图候选；所有 r2 结果默认 `accepted=false`。
 - `formula_round_jobs.result_json` 和 `formula_recognition_results` 已记录输入 hash、模型和预处理版本；同一轮次同一输入完成后，二次打开或 `--reuse-db` 会跳过已完成 r0/r2 重任务。
-- 新增 `tools/formula_multiround_pipeline.py`，用于 r0-r4 端到端 smoke/benchmark：默认 born-digital 路线不 OCR，显式 `--r2-sample-formulas` 才把现有公式块送入 r2 多工具候选复核，`--run-cloud-review` 可跑真实 DeepSeek r3。
+- 新增 `tools/formula_multiround_pipeline.py`，用于 r0-r5 端到端 smoke/benchmark：默认 born-digital 路线不 OCR，显式 `--r2-sample-formulas` 才把现有公式块送入 r2 多工具候选复核，`--run-cloud-review` 可跑真实 DeepSeek r3，r4/r5 可用小批量 drain 验证图谱和知识库增量更新。
 - 多轮报告已接入源 LaTeX 对照准确率复核：每个 stage/model 都输出 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 必须证明准确率逐轮递增，未达门槛的结果不能 accepted。
 - 多工具协同细设计见 `docs/formula_multitool_fusion_design.md`：下一步实现候选级 fusion table、coverage-comparable 检查、accepted 门禁和 r5 增量写回；自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
 

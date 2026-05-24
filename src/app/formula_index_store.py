@@ -531,6 +531,10 @@ class FormulaIndexStore:
         image_hash: str,
         model: str = "pix2text-mfr",
         scan_round: str | FormulaScanRound | None = None,
+        model_version: str = "",
+        preprocess_version: str = "",
+        score: float | None = None,
+        warnings: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         now = _now()
         with self._lock:
@@ -547,9 +551,15 @@ class FormulaIndexStore:
                 scan_round=scan_round,
                 now=now,
                 result_json={
+                    "stage": _round_value(scan_round) if scan_round is not None else "",
                     "latex": latex,
+                    "input_hash": image_hash,
                     "image_hash": image_hash,
                     "model": model,
+                    "model_version": model_version,
+                    "preprocess_version": preprocess_version,
+                    "score": score,
+                    "warnings": [str(item) for item in (warnings or []) if str(item)],
                 },
             )
             self._conn.commit()

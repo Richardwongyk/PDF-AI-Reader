@@ -1,4 +1,4 @@
-# 新终端交接文档（2026-05-24）
+# 新终端交接文档（2026-05-25）
 
 本文件给新终端/新 AI 助手接手用。先读根目录 `AGENTS.md`，再读本文件，然后再看
 `TODO.md`、`docs/current_goal_and_next_steps.md`、`docs/async_formula_indexing_design.md`、
@@ -7,6 +7,8 @@
 ## 先读结论
 
 当前主线目标没有完成，不能宣称项目已达标。今晚目标被明确提高为：不间断运行，公式扫描准确度最终高于 99.9%，建立完整 RAG/知识系统，并在此基础上继续全线优化；未用 Attention/Napkin 大样本、行内公式、数学字体、真实性能和交互闭环证明前，不得标记完成。已经完成的是：闭环测试方案、部分 E2E/日志/公式审计工具、RAG/GraphRAG 设计、公式多轮任务表、`formula_recognition_results` 候选表、`formula_fusion_records` 融合记录表、r0 born-digital facts-only 结构候选落库、r1 缓存优先队列、r2 本地多工具候选 worker、r3 带候选/fusion 证据的语义复核候选写回、r4 结构图谱批处理第一版、r5 accepted 公式增量知识库 upsert service，以及 `tools/formula_multiround_pipeline.py` 对 r0-r5 的可审计流水线 smoke/benchmark。没有完成的是：born-digital 公式高精度 LaTeX 还原、行内公式高覆盖、外部工具大样本准确率/性能对比、PEK/UniMERNet 跑通、r4 语义级图谱质量、RAG/GraphRAG 的最终产品级体验、缩放/翻译/滚动渲染问题的最终闭环验收。
+
+2026-05-25 最新补充：r3/r4 已不只是设计文档。`FormulaSemanticReviewService` 可以从 fusion payload 合成 inline/formula 候选块，真实 DeepSeek smoke 已跑通小批量候选，只写 JSON；`FormulaKnowledgeGraphService` 已消费 `r4_knowledge_graph` 队列，把普通公式和 fusion candidate-only 公式写入 `GraphIndexStore` artifact。`tools/formula_multiround_pipeline.py` 现在支持 `--drain-r2/--drain-r3/--drain-r4/--drain-r5`，报告 `formula_fusion_snapshots` 展示每次 fusion 的写入、缓存命中和派生 r2/r3/r5 入队数量。新增质量门禁：如果 r2 本地 MFR 候选比 born-digital 结构候选更差，会记录 `local_precise_degraded_against_born_digital`，不能进入 `ready_for_manual_accept`，不能写正文/RAG/GraphRAG accepted。
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
@@ -18,7 +20,7 @@
 - 2026-05-24 已重新按独立 worker 思路建立外部工具环境，当前 `conda env list` 显示：
   `pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、`pdf_tool_magic310`、`pdf_tool_pek310`。
   这些都是隔离工具环境，不是主程序环境。
-- 当前代码在 `6cb0860 Add formula multiround pipeline runner` 和 `a83986d Add formula fusion quality gates` 后继续推进了 fusion 持久化、r5 增量知识库接线、多工具 worker 扩展、行内公式候选审计和反硬编码 guard：r0 不走 OCR，不默认调用自写 LaTeX 重建器，只写 born-digital PDF facts 候选；r2 通过低置信结构候选或显式精扫调用 Paddle/Pix2Text/MinerU/PEK 等隔离 worker 写未接受候选；r3 可用 mock 或真实 DeepSeek，并读取候选/fusion 证据；r4 写结构图谱任务和 artifact；r5 只消费 accepted 变化，按 input hash 增量 upsert。
+- 当前代码在 `6cb0860 Add formula multiround pipeline runner`、`a83986d Add formula fusion quality gates` 之后继续推进了 fusion 持久化、r4 公式图谱、r5 增量知识库接线、多工具 worker 扩展、行内公式候选审计和反硬编码 guard：r0 不走 OCR，不默认调用自写 LaTeX 重建器，只写 born-digital PDF facts 候选；r2 通过低置信结构候选或显式精扫调用 Paddle/Pix2Text/MinerU/PEK 等隔离 worker 写未接受候选；r3 可用 mock 或真实 DeepSeek，并读取候选/fusion 证据；r4 写结构图谱任务和 artifact；r5 只消费 accepted 变化，按 input hash 增量 upsert。
 - 防休眠脚本仍应检查，不要假设一定有效。脚本在 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`。
 - 当前工作树必须以 `git status --short` 为准。不要随手回退，也不要把 `测试资料/`、日志、缓存、临时 benchmark 输出提交。
 
@@ -73,6 +75,25 @@
 
 ## 本轮已完成事项
 
+2026-05-25 本轮新增：
+
+- 新增 `src/app/formula_knowledge_graph.py`：r4 公式图谱服务读取 `r4_knowledge_graph` round jobs，按 input/content hash 跳过已完成任务，写入 `GraphIndexStore` artifact，结果 JSON 包含 stage、input hash、model/model_version、node/edge 数、candidate-only 状态和 fusion 决策。
+- `src/app/graph_index_flow.py` 支持 candidate-only 公式节点：未过门禁的 fusion 候选写成 `formula_candidate` 节点和 `suggests_formula_candidate` 边，不伪装成 accepted 公式。
+- `src/ui/main_window.py` 已接入 r4/r5 空闲调度：导入时排 r4 公式图谱任务，r3 后可继续小批量 r4，r5 只消费 accepted 变化。
+- `src/app/formula_semantic_review.py` 已记录 r3 input hash、model/model_version，并规范化云端 `risks` 字段；即使 DeepSeek 返回字符串 risks，也保存为单个风险项，不再拆成逐字符日志。
+- `tools/formula_multiround_pipeline.py` 已能 drain r2/r3/r4/r5；r4 使用真实 `FormulaKnowledgeGraphService`；fusion 将 inline 候选按 candidate id 分开，不再把同一段落多个行内公式合并；报告新增 `fusion_best:*` 准确率组和 `formula_fusion_snapshots`。
+- fusion 门禁已加严：存在 r2 但 r2 质量低于 r0/parsed/inline born-digital 证据时，记录 `local_precise_degraded_against_born_digital`，最终仍为 `needs_more_evidence`，不进入 accepted/r5。
+- 新增/更新测试覆盖：r4 公式图谱、candidate-only graph 节点、r3 payload inline 候选、r3 风险字段规范化、r1/r2 结果 JSON 的 input hash/model version、r2 降质不接受、fusion_best 准确率组、drain r2/r3/r4。
+
+2026-05-25 验证结果：
+
+- 相关测试：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_graph.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py -q` 为 `170 passed`。
+- Attention 前 2 页默认非 OCR 多轮：约 0.993s；`r0_pdf_structure:done=2`、`r3_cloud_semantic_review:done=9`、`r4_knowledge_graph:done=9`；首次 fusion 写入 9 条并派生 r3 9 条，r3 后同 input hash 全部缓存命中。
+- Attention 前 6 页默认非 OCR 多轮：约 5.755s；`r0_pdf_structure:done=13`、`r3_cloud_semantic_review:done=122`、`r4_knowledge_graph:done=122`；`ready_for_manual_accept=0`、`needs_more_evidence=122`；严格质量门禁失败，r0/fusion/inline 仍远未达 99.9%。
+- Attention 前 6 页 targeted r2 + drain：`r2_local_high_precision:done=7`、`r3=122`、`r4=122`；`local_precise:pix2text-mfr` 平均 best similarity 约 0.578，低于 r0 的 0.668；fusion 记录 `local_precise_degraded=5`、`ready_for_manual_accept=0`，证明降质 r2 只保留候选，不覆盖正文。
+- Attention 前 2 页真实 DeepSeek r3 smoke：约 35.777s；实际 client 为 `deepseek/deepseek-v4-pro`，处理 2 条、剩余 7 条保持 queued；只写候选 JSON 和 fusion/r4 candidate，不 accepted。
+- Napkin 前 8 页轻量多轮：约 7.873s；r0 处理 8 页，没有公式候选时 r1/r2/r3/r4 正确跳过，证明大 PDF 前言区不会误触发 OCR/MFR。
+
 文档与计划：
 
 - 写入根目录 `AGENTS.md`，作为新会话第一入口。
@@ -103,7 +124,7 @@
 - 已有 `tools/formula_tool_comparison.py`，用于同一批公式图的外部工具候选对比，并把 r2 候选写入 `formula_recognition_results`。
 - 已有 `tools/formula_index_performance.py`，用于多轮公式索引任务入库性能检测。
 - 已有 `tools/test_log_audit.py`，用于清理和审计日志。
-- 最新相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 `157 passed`。
+- 此前相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 `157 passed`；2026-05-25 本轮已更新到 `171 passed`，见上方验证结果。
 - Attention 前 6 页真实多轮流水线验证：
   - facts-only 默认 born-digital 路线：r0 处理 6 页约 0.95s，写入 7 个 `pdf_structure:pymupdf_born_digital_structure` 结果；不初始化 OCR/MFR，不使用自写 LaTeX 重建器；r1/r2 正确跳过；r3 mock 写候选，r4 写结构图谱，r5 无 accepted 时跳过。
   - `--reuse-db` 二次运行：r0 `processed_pages=0`、`skipped_completed_pages=6`，证明已完成页跳过，整条报告约 1.69s。
@@ -235,7 +256,7 @@
 - `tools/formula_latex_audit.py`：公式与 LaTeX 源码对照审计。
 - `tools/formula_ocr_benchmark.py`：OCR/MFR 抽样性能测试。
 - `tools/formula_tool_comparison.py`：外部公式工具候选对比和 r2 落库审计。
-- `tools/formula_multiround_pipeline.py`：r0-r4 端到端多轮公式流水线 smoke/benchmark，支持默认 born-digital 路线、显式 r2 多工具精扫、真实/模拟 r3、r4 图谱批处理和 `--reuse-db` 跳过验证。
+- `tools/formula_multiround_pipeline.py`：r0-r5 端到端多轮公式流水线 smoke/benchmark，支持默认 born-digital 路线、显式 r2 多工具精扫、真实/模拟 r3、r4 图谱批处理、r5 增量更新 smoke、drain 批处理和 `--reuse-db` 跳过验证。
 - `tools/formula_index_performance.py`：多轮公式索引任务入库性能测试。
 - `tools/external_formula_tools_smoke.py`：外部公式工具烟测入口。
 - `tools/test_log_audit.py`：日志清理和审计。

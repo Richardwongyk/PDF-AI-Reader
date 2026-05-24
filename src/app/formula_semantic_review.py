@@ -8,6 +8,7 @@ gate.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -31,6 +32,9 @@ class FormulaSemanticReviewResult:
     reason: str
     risks: list[str]
     raw_response: str
+    input_hash: str = ""
+    model: str = ""
+    model_version: str = ""
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -40,6 +44,10 @@ class FormulaSemanticReviewResult:
             "reason": self.reason,
             "risks": self.risks,
             "raw_response": self.raw_response,
+            "input_hash": self.input_hash,
+            "model": self.model,
+            "model_version": self.model_version,
+            "stage": FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value,
         }
 
 
@@ -96,7 +104,7 @@ class FormulaSemanticReviewService:
         )
         counts = {"done": 0, "failed": 0, "skipped": 0}
         for record in records:
-            block = block_map.get(record.target_id)
+            block = block_map.get(record.target_id) or _block_from_record_payload(record)
             started = time.perf_counter()
             if block is None or block.block_type != BlockType.FORMULA:
                 self._store.mark_round_failed(
@@ -139,10 +147,12 @@ class FormulaSemanticReviewService:
         record: FormulaRoundRecord,
         block: DocumentBlock,
     ) -> FormulaSemanticReviewResult:
+        candidates = self._candidate_records_for_block(record.doc_hash, record.target_id)
+        fusion_records = self._fusion_records_for_block(record.doc_hash, record.target_id)
         messages = self._build_messages(
             block,
-            candidates=self._candidate_records_for_block(record.doc_hash, record.target_id),
-            fusion_records=self._fusion_records_for_block(record.doc_hash, record.target_id),
+            candidates=candidates,
+            fusion_records=fusion_records,
         )
         raw = self._client.generate(
             messages,
@@ -158,12 +168,11 @@ class FormulaSemanticReviewService:
             should_replace=bool(parsed.get("should_replace", False)),
             confidence=_bounded_float(parsed.get("confidence", 0.0)),
             reason=str(parsed.get("reason", "") or "").strip(),
-            risks=[
-                str(item)
-                for item in parsed.get("risks", [])
-                if isinstance(item, str)
-            ],
+            risks=_normalize_risks(parsed.get("risks", [])),
             raw_response=raw,
+            input_hash=_review_input_hash(block, candidates, fusion_records),
+            model=self._client.model_name,
+            model_version=self._client.model_name,
         )
 
     def _candidate_records_for_block(self, doc_hash: str, candidate_id: str) -> list[dict[str, object]]:
@@ -379,9 +388,73 @@ def _parse_review_json(raw: str) -> dict[str, Any]:
     return value
 
 
+def _review_input_hash(
+    block: DocumentBlock,
+    candidates: list[dict[str, object]],
+    fusion_records: list[dict[str, object]],
+) -> str:
+    payload = {
+        "block_id": block.id,
+        "page_num": block.page_num,
+        "bbox": [round(float(value), 3) for value in block.bbox],
+        "content": block.content,
+        "metadata": block.metadata,
+        "recognition_candidates": candidates,
+        "fusion_records": fusion_records,
+    }
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _block_from_record_payload(record: FormulaRoundRecord) -> DocumentBlock | None:
+    payload = record.result_json
+    candidate = payload.get("review_candidate")
+    if not isinstance(candidate, dict):
+        return None
+    latex = str(candidate.get("latex", "") or "").strip()
+    if not latex:
+        return None
+    bbox_value = candidate.get("bbox", (0, 0, 0, 0))
+    if not isinstance(bbox_value, (list, tuple)) or len(bbox_value) != 4:
+        bbox = (0.0, 0.0, 0.0, 0.0)
+    else:
+        try:
+            bbox = tuple(float(value) for value in bbox_value)
+        except (TypeError, ValueError):
+            bbox = (0.0, 0.0, 0.0, 0.0)
+    page_value = candidate.get("page_num", record.page_num)
+    try:
+        page_num = int(page_value)
+    except (TypeError, ValueError):
+        page_num = record.page_num
+    return DocumentBlock(
+        id=record.target_id,
+        page_num=page_num,
+        block_type=BlockType.FORMULA,
+        content=latex,
+        bbox=bbox,  # type: ignore[arg-type]
+        metadata={
+            "source": str(candidate.get("source", "formula_round_payload") or "formula_round_payload"),
+            "fusion_input_hash": str(payload.get("input_hash", "") or ""),
+            "fusion_decision": str(payload.get("decision", "") or ""),
+            "candidate_only": True,
+        },
+    )
+
+
 def _bounded_float(value: object) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError):
         return 0.0
     return max(0.0, min(1.0, number))
+
+
+def _normalize_risks(value: object) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []

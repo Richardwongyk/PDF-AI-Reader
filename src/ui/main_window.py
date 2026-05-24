@@ -111,6 +111,7 @@ class MainWindow(QMainWindow):
         # 公式索引流程：异步补扫图片/扫描公式，并增量写回知识库
         from src.app.formula_index_flow import FormulaIndexFlow
         from src.app.formula_index_scheduler import FormulaIndexScheduler
+        from src.app.formula_knowledge_graph import FormulaKnowledgeGraphService
         from src.app.formula_knowledge_update import FormulaKnowledgeUpdateService
         from src.app.formula_semantic_review import FormulaSemanticReviewFlow
         self._formula_index_flow = FormulaIndexFlow(self)
@@ -122,6 +123,12 @@ class MainWindow(QMainWindow):
         self._formula_knowledge_update_service = FormulaKnowledgeUpdateService(
             self._formula_index_flow.store,
             self._knowledge_engine,
+        )
+        graph_flow = services.get("graph_index_flow")
+        graph_store = getattr(graph_flow, "_store", None)
+        self._formula_knowledge_graph_service = FormulaKnowledgeGraphService(
+            self._formula_index_flow.store,
+            graph_store,
         )
 
         # 当前文档状态
@@ -758,8 +765,9 @@ class MainWindow(QMainWindow):
         ):
             self._schedule_formula_scan(pages=set(), trigger=FormulaScanTrigger.BACKGROUND)
         elif not self._start_formula_semantic_review_batch():
-            if not self._run_formula_knowledge_update_batch():
-                self._start_import_page_scan_batch()
+            if not self._run_formula_knowledge_graph_batch():
+                if not self._run_formula_knowledge_update_batch():
+                    self._start_import_page_scan_batch()
         if self._pending_formula_work_count() > 0:
             self._formula_idle_timer.start(8000)
 
@@ -857,15 +865,21 @@ class MainWindow(QMainWindow):
                 if block.block_type == BlockType.FORMULA
             ],
         )
-        if queued_blocks or queued_pages or queued_reviews:
+        queued_graph = self._formula_knowledge_graph_service.enqueue_formula_blocks(
+            filepath,
+            self._current_doc_hash,
+            self._current_blocks,
+        )
+        if queued_blocks or queued_pages or queued_reviews or queued_graph:
             self.logger.info(
-                "导入后全篇公式任务入队: block_ocr=%d page_mfd=%d semantic_review=%d",
+                "导入后全篇公式任务入队: block_ocr=%d page_mfd=%d semantic_review=%d knowledge_graph=%d",
                 queued_blocks,
                 queued_pages,
                 queued_reviews,
+                queued_graph,
             )
             self._ai_doc_status.setText(
-                f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}，复核 {queued_reviews}"
+                f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}，复核 {queued_reviews}，图谱 {queued_graph}"
             )
 
     def _start_import_page_scan_batch(self) -> bool:
@@ -935,6 +949,33 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def _run_formula_knowledge_graph_batch(self) -> bool:
+        if not self._current_doc_hash:
+            return False
+        service = self._formula_knowledge_graph_service
+        if service.pending_count(self._current_doc_hash) <= 0:
+            return False
+        filepath = getattr(self._doc_engine, "_filepath", "")
+        result = service.run_batch(
+            self._current_doc_hash,
+            filepath,
+            self._current_blocks,
+            limit=8,
+        )
+        if result.done or result.failed or result.skipped:
+            self.logger.info(
+                "公式 r4 图谱增强: done=%d failed=%d skipped=%d pending=%d",
+                result.done,
+                result.failed,
+                result.skipped,
+                result.pending,
+            )
+            self._ai_doc_status.setText(
+                f"知识库就绪\n公式图谱: 完成 {result.done}，失败 {result.failed}，跳过 {result.skipped}，待处理 {result.pending}"
+            )
+            return True
+        return False
+
     def _pending_formula_block_count(self) -> int:
         return sum(
             1 for block in self._current_blocks
@@ -952,6 +993,7 @@ class MainWindow(QMainWindow):
             + self._formula_index_flow.page_pending_count(self._current_doc_hash)
             + self._formula_index_flow.round_pending_count(self._current_doc_hash)
             + self._formula_semantic_review_flow.pending_count(self._current_doc_hash)
+            + self._formula_knowledge_graph_service.pending_count(self._current_doc_hash)
             + self._formula_knowledge_update_service.pending_count(self._current_doc_hash)
         )
 

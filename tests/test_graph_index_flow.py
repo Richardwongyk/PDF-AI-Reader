@@ -42,6 +42,30 @@ def test_structural_graph_extractor_records_formula_and_section_facts() -> None:
     assert any(node.get("latex") == r"$$E = mc^2$$" for node in result.nodes)
 
 
+def test_structural_graph_extractor_marks_candidate_only_formula_facts() -> None:
+    block = DocumentBlock(
+        id="p0_b0_inline_0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"x_i",
+        bbox=(0, 0, 10, 10),
+        metadata={
+            "candidate_only": True,
+            "source": "formula_fusion_graph_candidate",
+            "fusion_decision": "needs_more_evidence",
+            "fusion_input_hash": "fusion-hash",
+        },
+    )
+
+    result = StructuralGraphExtractor().extract("doc-1", block)
+
+    formula_nodes = [node for node in result.nodes if node.get("type") == "formula_candidate"]
+    assert len(formula_nodes) == 1
+    assert formula_nodes[0]["candidate_only"] is True
+    assert formula_nodes[0]["fusion_input_hash"] == "fusion-hash"
+    assert any(edge["type"] == "suggests_formula_candidate" for edge in result.edges)
+
+
 def test_run_graph_index_batch_persists_artifacts(tmp_path) -> None:
     store = GraphIndexStore(str(tmp_path / "graph_jobs.db"))
     blocks = [

@@ -112,21 +112,26 @@ class StructuralGraphExtractor:
                 })
 
         if block.block_type == BlockType.FORMULA:
-            formula_id = f"formula:{doc_hash}:{block.id}"
+            candidate_only = bool(block.metadata.get("candidate_only"))
+            formula_type = "formula_candidate" if candidate_only else "formula"
+            formula_id = f"{formula_type}:{doc_hash}:{block.id}"
             nodes.append({
                 "id": formula_id,
-                "type": "formula",
+                "type": formula_type,
                 "doc_hash": doc_hash,
                 "block_id": block.id,
                 "page": block.page_num + 1,
                 "latex": block.content,
                 "needs_ocr": bool(block.metadata.get("needs_ocr")),
                 "source": str(block.metadata.get("source", "")),
+                "candidate_only": candidate_only,
+                "fusion_decision": str(block.metadata.get("fusion_decision", "")),
+                "fusion_input_hash": str(block.metadata.get("fusion_input_hash", "")),
             })
             edges.append({
                 "source": block_id,
                 "target": formula_id,
-                "type": "expresses_formula",
+                "type": "suggests_formula_candidate" if candidate_only else "expresses_formula",
                 "evidence_block_id": block.id,
             })
 

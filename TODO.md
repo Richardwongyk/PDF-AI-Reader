@@ -41,20 +41,28 @@
 
 2026-05-25 最新实现检查点：
 
-- 最新待提交实现：r0-r5 命令行流水线已完整显示 `r5_knowledge_incremental_update`；新增 `formula_fusion_records` 持久化表，fusion 记录包含 `fusion_version`、`input_hash`、best/ranked result ids、coverage、agreement、risk flags、decision 和完整 result JSON；同 input hash 二次运行跳过 fusion 派生 r2/r3/r5 队列。
+- 本轮最新实现：r4 公式知识图谱服务已落地到 `src/app/formula_knowledge_graph.py`，UI idle 调度能在 r3 后继续消费 r4；candidate-only fusion 公式写入 GraphRAG artifact 时标记为 `formula_candidate`，不会伪装为 accepted 公式。
+- `tools/formula_multiround_pipeline.py` 现在支持 `--drain-r2/--drain-r3/--drain-r4/--drain-r5`，并输出 `formula_fusion_snapshots`，能看清每次 fusion 写入、同 input hash 缓存命中、派生 r2/r3/r5 入队。
+- fusion 门禁已加严：r2 本地 MFR 候选若比 born-digital 结构候选降质，会记录 `local_precise_degraded_against_born_digital`，决策保持 `needs_more_evidence`，不进入 `ready_for_manual_accept`、不触发 r5 accepted 写回。
+- r3 云端路径真实 smoke 暴露并修复了两个问题：融合读取云端 confidence 缺少 `_optional_float`；DeepSeek 返回字符串 `risks` 时不能拆成逐字符风险。现在 r3 result JSON 保留 input hash、model/model_version，并规范化 risks。
+- 最新相关测试基线已提升为 `171 passed`：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_graph.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py -q`。
+- 最新实跑：Attention 前 2 页默认非 OCR 多轮约 0.993s，r0=2、r3=9、r4=9；Attention 前 6 页默认非 OCR 多轮约 5.755s，r3/r4 各 122 个候选，`ready_for_manual_accept=0`；Attention 前 6 页 targeted r2 + drain 中 `local_precise:pix2text-mfr` 平均 similarity 约 0.578，低于 r0 约 0.668，fusion 记录 `local_precise_degraded=5`；DeepSeek r3 小样本约 35.777s 处理 2 条候选，只写 JSON；Napkin 前 8 页 r0 处理 8 页且无公式候选时 r1/r2/r3/r4 正确跳过。
+- 结论必须明确：r1/r3/r4/r5 的异步落库链路已经跑通，降质候选也不会污染正文/RAG；但是 99.9% 公式准确率和产品级 RAG/GraphRAG 未完成，下一步应集中提升 born-digital LaTeX 恢复质量、Napkin 大样本门禁、常驻 worker 性能和 accepted/revision UI。
+
+- 此前实现：r0-r5 命令行流水线已完整显示 `r5_knowledge_incremental_update`；新增 `formula_fusion_records` 持久化表，fusion 记录包含 `fusion_version`、`input_hash`、best/ranked result ids、coverage、agreement、risk flags、decision 和完整 result JSON；同 input hash 二次运行跳过 fusion 派生 r2/r3/r5 队列。
 - 新增 `FormulaKnowledgeUpdateService`：消费 r5 round jobs，只有 accepted 结果变化后才把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文；UI idle 调度已接入 r5。
 - r3 语义复核 prompt 已增强为读取同一 candidate 的 `formula_recognition_results` 和 `formula_fusion_records`，云端只写 `suggested_latex/confidence/reason/risks/raw_response` 候选，不覆盖正文。
 - r2 外部工具统一 worker 已扩展：Paddle Formula、Pix2Text、MinerU 3.1.15 页级后端、PEK/UniMERNet 后端都能作为独立工具 spec；不可用或空输出也按工具身份写 failed/warning 候选，不能互相覆盖。当前 PEK 环境仍缺 `unimernet`，MinerU 能启动但单页/单候选耗时很高。
 - 行内公式已纳入审计和多轮报告：段落中的 `\(...\)`/`$...$` 候选进入 `inline_spans:document_chunker` 指标和 fusion；纯脚注/装饰符号不再包成公式；纯 inline 候选默认不进入 OCR/MFR，只进入候选审计/r3 复核。
-- 最新相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 `157 passed`。
+- 此前相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 `157 passed`。
 - Attention 前 6 页最新真实基线：默认 r0/r1/r3/r4/r5 pipeline 约 14s；fusion 34 个候选区域，`ready_for_manual_accept=0`，`needs_more_evidence=34`，`missing_or_insufficient_r2=6`，`inline_candidate_only_needs_review=10`；r2 队列只派发结构/display 候选，不默认 OCR inline。inline 审计从原先几乎 0 提升到 `pdf_inline_formula_snippets=115`、`inline_source_weak_match_rate=0.299`、`inline_source_unmatched_count=54`，仍远未达 99.9%。
 - Attention 单公式多工具 targeted r2：`--auto-local-tools --run-targeted-r2-after-fusion --r2-limit 1` 跑通 Paddle/Pix2Text/Pix2Text-MFR，PEK 写 unavailable warning；MinerU 后端参与会显著拉长耗时，当前更适合离线页级对照。
-- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`、`6cb0860`，并继续完成候选融合、facts-only r0、行内公式指标和反硬编码测试，待本轮提交。
+- 已提交 `11fe4da`、`b3b1eaa`、`d0dc26e`、`9a02945`、`6cb0860`，之后继续完成候选融合、facts-only r0、行内公式指标和反硬编码测试。
 - r0 当前默认只走 PDF 结构事实，不初始化 OCR/MFR，不默认调用自写 LaTeX 重建器；r2 只有低置信候选或显式 `--r2-sample-formulas` 精扫才通过独立 worker 调 Paddle/Pix2Text 等工具，结果只作为未接受候选。
-- 新增 `tools/formula_multiround_pipeline.py`：可跑 r0-r4 状态、任务统计、识别结果统计、`--reuse-db` 跳过验证、显式 r2 多工具、可选 DeepSeek r3 smoke。
+- 新增 `tools/formula_multiround_pipeline.py`：可跑 r0-r5 状态、任务统计、识别结果统计、`--reuse-db` 跳过验证、显式 r2 多工具、可选 DeepSeek r3 smoke、r4 图谱和 r5 增量更新 smoke。
 - 多轮流水线已接入源 LaTeX 准确率复核。源码只用于测试/验收，真实用户运行路径不能依赖源码；LaTeX 中 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 包裹内容都算公式。每个 stage/model 输出 exact/near/weak/average similarity、inline 指标和低相似候选；Attention 前 6 页 facts-only r0 平均约 0.668、near match 0.429、`inline_weak_match_rate=0.026`，显式 r2 单样本最佳约 0.854，有提升但远未达到 99.9% 最终目标。
 - 新增/更新 `docs/formula_multitool_fusion_design.md`：明确多工具潜力要通过候选级 fusion、coverage-comparable 检查、accepted 门禁和 r5 增量写回挖掘；禁止手写硬编码公式解析规则；每次验收必须检查生产路径无样本词表/正则/手写修复链。
-- 相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 142 passed。
+- 历史相关测试基线：`tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py` 为 142 passed。
 - Attention 前 6 页真实验证：facts-only 默认 r0 约 0.95s 写入 7 个 born-digital 结构公式候选，r1/r2 正确跳过；`--reuse-db` 二次 r0 `processed_pages=0`、`skipped_completed_pages=6`；fusion 合并为 7 个公式区域，0 个 ready，全部 `needs_more_evidence`；显式 r2 多工具单样本写入 `pix2text-mfr`、Paddle Formula、Pix2Text 三类候选但冷启动约 245s，复用后约 1.2s；真实 DeepSeek r3 单条约 60s。
 - Attention 多轮入库最新基准：15 页总约 2.31s，持久化约 0.006s，入队 `r0_pdf_structure:15`、`r3_cloud_semantic_review:11`。
 - 工具 smoke：MinerU 3.1.15 本地新模型 Attention 单页跑通；Paddle Formula/Pix2Text 单张公式图 worker 跑通但质量仍只能候选；magic-pdf 缺旧权重；PEK/UniMERNet 未跑通。

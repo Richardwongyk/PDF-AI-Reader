@@ -88,6 +88,10 @@ def test_formula_semantic_review_writes_candidate_without_overwriting_block(tmp_
     assert record.attempts == 1
     assert record.result_json["should_replace"] is True
     assert record.result_json["confidence"] == 0.83
+    assert record.result_json["input_hash"]
+    assert record.result_json["model"] == "fake-reasoning"
+    assert record.result_json["model_version"] == "fake-reasoning"
+    assert record.result_json["stage"] == FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value
     assert r"\sqrt{d_k}" in str(record.result_json["suggested_latex"])
     assert "公式块证据" in client.messages[0][1]["content"]
 
@@ -164,6 +168,79 @@ def test_formula_semantic_review_skips_missing_block(tmp_path) -> None:
     record = store.list_round_records("doc-1")[0]
     assert record.status == "skipped"
     assert record.error == "missing_formula_block"
+
+
+def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    target = DocumentBlock(
+        id="p0_b0_inline_0",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"x_i",
+        bbox=(0, 0, 10, 10),
+    )
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [target],
+        result_json_by_target={
+            target.id: {
+                "input_hash": "fusion-hash",
+                "decision": "needs_more_evidence",
+                "review_candidate": {
+                    "latex": r"x_i",
+                    "page_num": 0,
+                    "bbox": [1, 2, 3, 4],
+                    "source": "paragraph_inline_math",
+                },
+            }
+        },
+    )
+    client = _ReviewClient(
+        '{"suggested_latex":"x_i","should_replace":false,"confidence":0.7,"reason":"inline","risks":[]}'
+    )
+    service = FormulaSemanticReviewService(store, client, batch_size=1)
+
+    counts = service.run_batch("doc-1", [])
+
+    assert counts == {"done": 1, "failed": 0, "skipped": 0}
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+    )[0]
+    assert record.status == "done"
+    assert record.result_json["suggested_latex"] == "x_i"
+    assert "paragraph_inline_math" in client.messages[0][1]["content"]
+
+
+def test_formula_semantic_review_keeps_string_risk_as_single_item(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [block],
+    )
+    response = json.dumps({
+        "suggested_latex": "",
+        "should_replace": False,
+        "confidence": 0.0,
+        "reason": "evidence is insufficient",
+        "risks": "insufficient_evidence",
+    })
+    service = FormulaSemanticReviewService(store, _ReviewClient(response), batch_size=1)
+
+    service.run_batch("doc-1", [block])
+
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+    )[0]
+    assert record.result_json["risks"] == ["insufficient_evidence"]
 
 
 def test_formula_semantic_review_records_bad_json_failure(tmp_path) -> None:

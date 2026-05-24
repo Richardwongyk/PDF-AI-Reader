@@ -140,6 +140,8 @@ FormulaFusionRecord 描述“候选融合结果”，也仍然不是正文。
   `inline_unmatched_count=75`。行内公式和数学字体必须作为单独门槛。
 - 因此 r0 只能作为事实层和候选层，不能直接作为最终知识库公式。
 
+2026-05-25 最新实跑：Attention 前 6 页默认非 OCR 多轮中，r0 写 13 个结构任务，fusion/inline/r3/r4 形成 122 个候选，严格质量门禁仍失败；`fusion_best` 平均 best similarity 约 0.634，说明候选覆盖扩大但最终格式还原并未达标。
+
 ### r1: 缓存优先补救层
 
 职责：
@@ -187,6 +189,7 @@ FormulaFusionRecord 描述“候选融合结果”，也仍然不是正文。
 - Fusion 不做字符串改写修复，只做候选排序和门禁。
 - 如果一个工具比 r0 分数高但覆盖样本少，报告必须写明 `coverage_comparable=false`。
 - r2 首轮冷启动慢，必须后续优化常驻 worker、批处理和缓存，不得放入默认热路径。
+- 如果 r2 本地 MFR 候选低于 r0/parsed/inline born-digital 证据，必须记录 `local_precise_degraded_against_born_digital`，并保持 `needs_more_evidence` 或 `candidate_only`。2026-05-25 Attention 前 6 页 targeted r2 + drain 已验证：Pix2Text-MFR 7 个样本平均 similarity 约 0.578，低于 r0 的 0.668；fusion 记录 `local_precise_degraded=5`、`ready_for_manual_accept=0`，因此没有污染正文或知识库。
 
 ### r3: 云端语义校对层
 
@@ -211,6 +214,7 @@ FormulaFusionRecord 描述“候选融合结果”，也仍然不是正文。
 - 只写候选 JSON。
 - 不直接 accepted，不覆盖正文。
 - 当 r2 多工具候选冲突时，r3 必须解释选择依据或标记证据不足。
+- 云端返回必须规范化：`risks` 可以是数组或字符串，但入库必须是风险项列表，不能拆成逐字符日志。真实 DeepSeek smoke 只允许写 `formula_round_jobs.result_json` 和 fusion/r4 候选。
 
 ### r4/r5: 图谱与知识库写回
 
@@ -218,6 +222,7 @@ r4：
 
 - 读取 accepted 或高置信候选，写公式/章节/定理/引用/概念结构图。
 - 当前已完成结构图谱第一版，但语义级图谱仍需增强。
+- 当前实现还会把未过门禁的 fusion 候选写成 `formula_candidate` 节点和 `suggests_formula_candidate` 边，作为可审计证据；这不是 accepted 公式，不能被 RAG 当成正文事实。
 
 r5：
 
