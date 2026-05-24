@@ -76,6 +76,7 @@
 
 - r1 在哪里：`FormulaIndexStore` 的 `r1_cached_recognition` queue 和 `FormulaIndexFlow` cache-first OCR/MFR worker；默认 born-digital Attention/Napkin 不触发 r1 未命中推理，只有 `needs_ocr=True` 图片/扫描/乱码/缺文本层候选才进入。
 - r3 在哪里：`src/app/formula_semantic_review.py` 和 UI idle 调度；候选/fusion 证据进入 prompt，DeepSeek 或 mock 返回的 `suggested_latex/confidence/reason/risks/raw_response` 写入 `formula_round_jobs.result_json`，不覆盖正文。
+- r3 最新边界：prompt 使用压缩证据包，inline 候选带 `source_context`，输出自动补数学定界符但仍只作为候选；DeepSeek 非 JSON 响应会 failed 落库并保存 raw response 摘要。
 - r4 在哪里：`src/app/formula_knowledge_graph.py` 和 `src/app/graph_index_flow.py`；普通公式写 `formula` 节点，未过门禁的 fusion 候选写 `formula_candidate` 节点，只做图谱候选证据。
 - 最新测试集合为 `170 passed`。Attention 前 6 页默认非 OCR pipeline：r3/r4 各处理 122 个候选；targeted r2 后发现 Pix2Text-MFR 对 born-digital 7 个样本平均 similarity 约 0.578，低于 r0 约 0.668，因此 fusion 记录 `local_precise_degraded=5` 且 `ready_for_manual_accept=0`。
 - 结论：多轮高性能解析框架已经跑通，质量门禁也能阻止降质候选污染正文；但“公式准确率 >99.9%”没有达成，当前任务不能完成。下一步必须提升 born-digital LaTeX 还原本身，而不是继续堆 OCR。

@@ -595,6 +595,8 @@ def test_formula_fusion_report_includes_inline_math_candidates(tmp_path) -> None
     rows = {row["candidate_id"]: row for row in report["candidate_rows"]}
     assert "p0_b0_inline_0" in rows
     assert rows["p0_b0_inline_0"]["best_stage"] == "inline_spans"
+    inline_candidate = rows["p0_b0_inline_0"]["ranked_candidates"][0]
+    assert inline_candidate["evidence"]["source_context"] == r"inline \(x_i\)"
     assert not any(item["candidate_id"] == "p0_b0_inline_0" for item in report["targeted_r2_queue"])
 
 

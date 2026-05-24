@@ -93,6 +93,7 @@ def test_formula_semantic_review_writes_candidate_without_overwriting_block(tmp_
     assert record.result_json["model_version"] == "fake-reasoning"
     assert record.result_json["stage"] == FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value
     assert r"\sqrt{d_k}" in str(record.result_json["suggested_latex"])
+    assert str(record.result_json["suggested_latex"]).startswith("$$")
     assert "公式块证据" in client.messages[0][1]["content"]
 
 
@@ -145,6 +146,78 @@ def test_formula_semantic_review_prompt_includes_candidate_and_fusion_evidence(t
     assert "fusion_records" in prompt
     assert result_id in prompt
     assert "ready_for_manual_accept" in prompt
+    assert "ranked_candidates" in prompt
+    assert "output_delimiter" in prompt
+    assert "源 TeX" in client.messages[0][0]["content"]
+
+
+def test_formula_semantic_review_prompt_summarizes_pdf_evidence(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula().model_copy(
+        update={
+            "metadata": {
+                "source": "pdf_structure_display_region",
+                "born_digital_diagnostics": {
+                    "classification": "formula_candidate",
+                    "risks": [],
+                    "evidence": ["math_font", "script_size"],
+                    "math_density": 0.55,
+                    "operator_count": 3,
+                    "raw_glyph_dump": "this should not be copied wholesale",
+                },
+            }
+        },
+        deep=True,
+    )
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [block],
+    )
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="pdf_structure",
+        model="pymupdf_born_digital_structure",
+        model_version="v1",
+        preprocess_version="glyph",
+        input_hash="glyph-hash",
+        latex=r"softmax(QK T / sqrt(d_k))V",
+        normalized_latex=r"softmax(QK T / sqrt(d_k))V",
+        evidence={
+            "page_num": 0,
+            "bbox": [10, 20, 100, 40],
+            "source": "born_digital_pdf_structure",
+            "text": "softmax(QK T / sqrt(d_k))V",
+            "details": {
+                "diagnostics": {
+                    "classification": "formula_candidate",
+                    "evidence": ["math_font"],
+                    "math_density": 0.5,
+                }
+            },
+            "large_unused_payload": "x" * 200,
+        },
+    )
+    response = '{"suggested_latex":"A=\\\\operatorname{softmax}(QK^T)V","should_replace":false,"confidence":0.6,"reason":"candidate","risks":[]}'
+    client = _ReviewClient(response)
+    service = FormulaSemanticReviewService(store, client, batch_size=1)
+
+    service.run_batch("doc-1", [block])
+
+    prompt = client.messages[0][1]["content"]
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+    )[0]
+    assert "raw_glyph_dump" not in prompt
+    assert "large_unused_payload" not in prompt
+    assert "math_density" in prompt
+    assert "born_digital_diagnostics" in prompt
+    assert str(record.result_json["suggested_latex"]).startswith("$$")
+    assert r"\operatorname{softmax}" in str(record.result_json["suggested_latex"])
 
 
 def test_formula_semantic_review_skips_missing_block(tmp_path) -> None:
@@ -194,6 +267,8 @@ def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_p
                     "page_num": 0,
                     "bbox": [1, 2, 3, 4],
                     "source": "paragraph_inline_math",
+                    "source_block_id": "p0_b0",
+                    "source_context": "inline context with x_i and y_j",
                 },
             }
         },
@@ -211,8 +286,9 @@ def test_formula_semantic_review_uses_payload_candidate_for_inline_targets(tmp_p
         scan_round=FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
     )[0]
     assert record.status == "done"
-    assert record.result_json["suggested_latex"] == "x_i"
+    assert record.result_json["suggested_latex"] == r"\(x_i\)"
     assert "paragraph_inline_math" in client.messages[0][1]["content"]
+    assert "inline context with x_i and y_j" in client.messages[0][1]["content"]
 
 
 def test_formula_semantic_review_keeps_string_risk_as_single_item(tmp_path) -> None:
@@ -261,6 +337,28 @@ def test_formula_semantic_review_records_bad_json_failure(tmp_path) -> None:
     record = store.list_round_records("doc-1")[0]
     assert record.status == "failed"
     assert "JSON" in record.error
+    assert "raw_response_excerpt=not json" in record.error
+
+
+def test_formula_semantic_review_prompt_requires_json_only(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [block],
+    )
+    client = _ReviewClient(
+        '{"suggested_latex":"","should_replace":false,"confidence":0,"reason":"","risks":[]}'
+    )
+    service = FormulaSemanticReviewService(store, client)
+
+    service.run_batch("doc-1", [block])
+
+    assert "只输出一个 JSON 对象" in client.messages[0][0]["content"]
+    assert "不要输出 Markdown" in client.messages[0][0]["content"]
 
 
 def test_formula_semantic_review_respects_batch_limit(tmp_path) -> None:

@@ -45,8 +45,10 @@
 - `tools/formula_multiround_pipeline.py` 现在支持 `--drain-r2/--drain-r3/--drain-r4/--drain-r5`，并输出 `formula_fusion_snapshots`，能看清每次 fusion 写入、同 input hash 缓存命中、派生 r2/r3/r5 入队。
 - fusion 门禁已加严：r2 本地 MFR 候选若比 born-digital 结构候选降质，会记录 `local_precise_degraded_against_born_digital`，决策保持 `needs_more_evidence`，不进入 `ready_for_manual_accept`、不触发 r5 accepted 写回。
 - r3 云端路径真实 smoke 暴露并修复了两个问题：融合读取云端 confidence 缺少 `_optional_float`；DeepSeek 返回字符串 `risks` 时不能拆成逐字符风险。现在 r3 result JSON 保留 input hash、model/model_version，并规范化 risks。
+- r3 prompt 继续增强：云端输入改为压缩后的 PDF/fusion/tool 证据包，inline 候选携带来源段落 `source_context`；系统提示要求只输出 JSON 对象。若 DeepSeek 返回非 JSON，任务会 failed 落库并记录 raw response 摘要，后续可按同 input hash 重试和审计。
 - 最新相关测试基线已提升为 `171 passed`：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_graph.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_smoke.py -q`。
 - 最新实跑：Attention 前 2 页默认非 OCR 多轮约 0.993s，r0=2、r3=9、r4=9；Attention 前 6 页默认非 OCR 多轮约 5.755s，r3/r4 各 122 个候选，`ready_for_manual_accept=0`；Attention 前 6 页 targeted r2 + drain 中 `local_precise:pix2text-mfr` 平均 similarity 约 0.578，低于 r0 约 0.668，fusion 记录 `local_precise_degraded=5`；DeepSeek r3 小样本约 35.777s 处理 2 条候选，只写 JSON；Napkin 前 8 页 r0 处理 8 页且无公式候选时 r1/r2/r3/r4 正确跳过。
+- r3 证据包复测：Attention 前 2 页 mock drain 约 0.926s，r3/r4 各 9 条；真实 DeepSeek 限 1 条约 37.304s，遇到非 JSON 响应时 failed 落库，保留 raw response 摘要，正文和 accepted 结果不变。
 - 结论必须明确：r1/r3/r4/r5 的异步落库链路已经跑通，降质候选也不会污染正文/RAG；但是 99.9% 公式准确率和产品级 RAG/GraphRAG 未完成，下一步应集中提升 born-digital LaTeX 恢复质量、Napkin 大样本门禁、常驻 worker 性能和 accepted/revision UI。
 
 - 此前实现：r0-r5 命令行流水线已完整显示 `r5_knowledge_incremental_update`；新增 `formula_fusion_records` 持久化表，fusion 记录包含 `fusion_version`、`input_hash`、best/ranked result ids、coverage、agreement、risk flags、decision 和完整 result JSON；同 input hash 二次运行跳过 fusion 派生 r2/r3/r5 队列。

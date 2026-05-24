@@ -783,6 +783,7 @@ def _inline_formula_candidate_items(blocks: list[DocumentBlock]) -> list[dict[st
                     "page_num": block.page_num,
                     "bbox": list(block.bbox),
                     "block_id": block.id,
+                    "source_context": _context_excerpt(content),
                 }
             )
     return candidates
@@ -976,6 +977,7 @@ def _formula_fusion_report(
                     "page_num": item.get("page_num"),
                     "bbox": item.get("bbox"),
                     "block_id": item.get("block_id"),
+                    "source_context": item.get("source_context", ""),
                 },
             )
         )
@@ -1438,6 +1440,8 @@ def _persist_fusion_rows(
                         "page_num": target.page_num,
                         "bbox": list(target.bbox),
                         "source": target.metadata.get("source", "formula_fusion_review"),
+                        "source_block_id": target.metadata.get("source_block_id", ""),
+                        "source_context": target.metadata.get("source_context", ""),
                     },
                 }
         if _row_has_accepted_result(row):
@@ -1543,6 +1547,10 @@ def _fusion_target_block(
             "review_trigger": "formula_fusion_needs_more_evidence",
             "formula_score": float(row.get("best_similarity", 0.0) or 0.0),
             "fusion_input_hash": str(row.get("fusion_input_hash", "") or ""),
+            "source_block_id": str(candidate.get("evidence", {}).get("block_id", "") or "")
+            if isinstance(candidate.get("evidence"), dict) else "",
+            "source_context": str(candidate.get("evidence", {}).get("source_context", "") or "")
+            if isinstance(candidate.get("evidence"), dict) else "",
         },
     )
 
@@ -1705,6 +1713,11 @@ def _block_input_hash(block: DocumentBlock) -> str:
 
 def _round_record_input_hash(payload: dict[str, object]) -> str:
     return _json_hash(payload)
+
+
+def _context_excerpt(text: str, limit: int = 500) -> str:
+    compact = " ".join(str(text or "").split())
+    return compact[: max(0, int(limit))]
 
 
 def _optional_float(value: object) -> float | None:

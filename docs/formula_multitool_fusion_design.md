@@ -215,6 +215,7 @@ FormulaFusionRecord 描述“候选融合结果”，也仍然不是正文。
 - 不直接 accepted，不覆盖正文。
 - 当 r2 多工具候选冲突时，r3 必须解释选择依据或标记证据不足。
 - 云端返回必须规范化：`risks` 可以是数组或字符串，但入库必须是风险项列表，不能拆成逐字符日志。真实 DeepSeek smoke 只允许写 `formula_round_jobs.result_json` 和 fusion/r4 候选。
+- r3 prompt 应使用压缩证据包，而不是整段数据库 JSON：保留 PDF diagnostics、candidate model/version/input hash、fusion gate、ranked candidates、inline `source_context`。模型必须只输出 JSON 对象；非 JSON 响应要作为 failed 任务落库并保留 raw response 摘要，方便审计和重试。
 
 ### r4/r5: 图谱与知识库写回
 

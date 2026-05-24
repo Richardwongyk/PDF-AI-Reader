@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from src.app.formula_index_store import FormulaIndexStore, FormulaRoundRecord, FormulaScanRound
 from src.core.ai_engine import BaseLLMClient
-from src.core.models import BlockType, DocumentBlock
+from src.core.models import BlockType, DocumentBlock, is_math_wrapped, wrap_math_text
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,7 @@ class FormulaSemanticReviewService:
                     FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
                     "block",
                     record.target_id,
-                    str(exc),
+                    _review_error_message(exc),
                     elapsed_ms=elapsed_ms,
                 )
                 counts["failed"] += 1
@@ -161,7 +161,10 @@ class FormulaSemanticReviewService:
             timeout=self._timeout_sec,
         )
         parsed = _parse_review_json(raw)
-        suggested = str(parsed.get("suggested_latex", "") or "").strip()
+        suggested = _normalize_suggested_latex(
+            parsed.get("suggested_latex", ""),
+            display=not _is_inline_review_target(block),
+        )
         return FormulaSemanticReviewResult(
             target_id=record.target_id,
             suggested_latex=suggested,
@@ -236,23 +239,35 @@ class FormulaSemanticReviewService:
             "content": block.content,
             "bbox": list(block.bbox),
             "section_title": block.section_title,
-            "metadata": block.metadata,
-            "recognition_candidates": candidates or [],
-            "fusion_records": fusion_records or [],
+            "metadata": _semantic_metadata_summary(block.metadata),
+            "recognition_candidates": _semantic_candidate_summaries(candidates or []),
+            "fusion_records": _semantic_fusion_summaries(fusion_records or []),
+            "instructions": {
+                "goal": "produce a faithful LaTeX candidate from the provided PDF/fusion/tool evidence",
+                "output_delimiter": "display formulas must use $$...$$; inline formulas must use \\(...\\)",
+                "candidate_only": True,
+                "no_source_assumption": "do not assume access to original TeX source; use only this evidence",
+                "insufficient_evidence": "return suggested_latex='' and should_replace=false when evidence is not enough",
+            },
         }
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是数学公式 LaTeX 语义复核器。只根据给定 PDF 证据和上下文提出候选修正，"
-                    "不要凭空生成新公式。输出必须是 JSON。"
+                    "你是数学公式 LaTeX 语义复核器。你只根据给定 PDF glyph/bbox/font、"
+                    "本地工具候选和 fusion 证据提出候选 LaTeX，不访问也不假设源 TeX。"
+                    "你的输出只是候选 JSON，不会自动覆盖正文。只输出一个 JSON 对象，"
+                    "不要输出 Markdown、解释文本或代码块。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "请复核下面公式块。若可见证据不足，请 should_replace=false。\n"
-                    "JSON 字段必须包含 suggested_latex, should_replace, confidence, reason, risks。\n"
+                    "请复核下面公式块并尽量给出规范 LaTeX 候选。"
+                    "必须保留数学语义、上下标、分式、根号、矩阵/多行结构和数学字体信息；"
+                    "不要把普通正文补成公式。若证据不足，请 suggested_latex 为空且 should_replace=false。\n"
+                    "JSON 字段必须包含 suggested_latex, should_replace, confidence, reason, risks。"
+                    "suggested_latex 必须带数学定界符：行间 $$...$$，行内 \\(...\\)。\n"
                     f"公式块证据: {json.dumps(context, ensure_ascii=False)}"
                 ),
             },
@@ -381,11 +396,27 @@ def _parse_review_json(raw: str) -> dict[str, Any]:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            raise ValueError("semantic review response is not JSON")
-        value = json.loads(text[start:end + 1])
+            raise FormulaSemanticReviewParseError(raw)
+        try:
+            value = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise FormulaSemanticReviewParseError(raw) from exc
     if not isinstance(value, dict):
         raise ValueError("semantic review response must be a JSON object")
     return value
+
+
+class FormulaSemanticReviewParseError(ValueError):
+    def __init__(self, raw: str) -> None:
+        self.raw = str(raw or "")
+        super().__init__("semantic review response is not JSON")
+
+
+def _review_error_message(exc: Exception) -> str:
+    if isinstance(exc, FormulaSemanticReviewParseError):
+        raw = " ".join(exc.raw.split())
+        return f"{exc}; raw_response_excerpt={raw[:360]}"
+    return str(exc)
 
 
 def _review_input_hash(
@@ -437,9 +468,145 @@ def _block_from_record_payload(record: FormulaRoundRecord) -> DocumentBlock | No
             "source": str(candidate.get("source", "formula_round_payload") or "formula_round_payload"),
             "fusion_input_hash": str(payload.get("input_hash", "") or ""),
             "fusion_decision": str(payload.get("decision", "") or ""),
+            "source_block_id": str(candidate.get("source_block_id", "") or ""),
+            "source_context": str(candidate.get("source_context", "") or ""),
             "candidate_only": True,
         },
     )
+
+
+def _semantic_metadata_summary(metadata: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        "source",
+        "needs_ocr",
+        "confidence",
+        "evidence",
+        "warnings",
+        "line_count",
+        "vector_count",
+        "formula_score",
+        "candidate_only",
+        "fusion_decision",
+        "fusion_input_hash",
+        "source_block_id",
+        "source_context",
+        "born_digital_diagnostics",
+    }
+    summary: dict[str, object] = {}
+    for key in allowed:
+        if key not in metadata:
+            continue
+        value = metadata[key]
+        if key == "born_digital_diagnostics" and isinstance(value, dict):
+            summary[key] = {
+                name: value.get(name)
+                for name in (
+                    "classification",
+                    "risks",
+                    "evidence",
+                    "math_density",
+                    "math_glyph_count",
+                    "operator_count",
+                    "digit_count",
+                    "line_count",
+                    "vector_count",
+                )
+                if name in value
+            }
+        else:
+            summary[key] = value
+    return summary
+
+
+def _semantic_candidate_summaries(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for item in candidates[:12]:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence")
+        evidence_summary: dict[str, object] = {}
+        if isinstance(evidence, dict):
+            evidence_summary = {
+                key: evidence.get(key)
+                for key in ("page_num", "bbox", "source", "text", "diagnostics", "block_id", "source_context")
+                if key in evidence
+            }
+            details = evidence.get("details")
+            if isinstance(details, dict) and "diagnostics" in details:
+                evidence_summary["diagnostics"] = details.get("diagnostics")
+        summaries.append({
+            "result_id": item.get("result_id", ""),
+            "stage": item.get("stage", ""),
+            "model": item.get("model", ""),
+            "model_version": item.get("model_version", ""),
+            "preprocess_version": item.get("preprocess_version", ""),
+            "input_hash": item.get("input_hash", ""),
+            "latex": item.get("latex", ""),
+            "score": item.get("score"),
+            "warnings": item.get("warnings", []),
+            "accepted": bool(item.get("accepted", False)),
+            "evidence": evidence_summary,
+        })
+    return summaries
+
+
+def _semantic_fusion_summaries(fusion_records: list[dict[str, object]]) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for item in fusion_records[:5]:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result_json")
+        result_json = result if isinstance(result, dict) else {}
+        ranked = result_json.get("ranked_candidates", [])
+        ranked_summary: list[dict[str, object]] = []
+        if isinstance(ranked, list):
+            for candidate in ranked[:6]:
+                if not isinstance(candidate, dict):
+                    continue
+                ranked_summary.append({
+                    "stage": candidate.get("stage", ""),
+                    "model": candidate.get("model", ""),
+                    "latex": candidate.get("latex", ""),
+                    "source_similarity": candidate.get("source_similarity"),
+                    "score": candidate.get("score"),
+                    "warnings": candidate.get("warnings", []),
+                })
+        summaries.append({
+            "fusion_version": item.get("fusion_version", ""),
+            "input_hash": item.get("input_hash", ""),
+            "decision": item.get("decision", ""),
+            "coverage": item.get("coverage"),
+            "agreement_score": item.get("agreement_score"),
+            "source_similarity": item.get("source_similarity"),
+            "syntax_valid": item.get("syntax_valid"),
+            "risk_flags": item.get("risk_flags", []),
+            "accepted_gate": item.get("accepted_gate", {}),
+            "best_latex": result_json.get("best_latex", ""),
+            "best_stage": result_json.get("best_stage", ""),
+            "best_model": result_json.get("best_model", ""),
+            "stage_quality": result_json.get("stage_quality", {}),
+            "ranked_candidates": ranked_summary,
+        })
+    return summaries
+
+
+def _normalize_suggested_latex(value: object, *, display: bool) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if is_math_wrapped(text):
+        return text
+    return wrap_math_text(text, display=display)
+
+
+def _is_inline_review_target(block: DocumentBlock) -> bool:
+    source = str(block.metadata.get("source", "") or "")
+    if "inline" in source:
+        return True
+    if str(block.id).lower().find("inline") >= 0:
+        return True
+    text = str(block.content or "").strip()
+    return bool(text and "\n" not in text and len(text) <= 80 and not text.startswith("$$"))
 
 
 def _bounded_float(value: object) -> float:
