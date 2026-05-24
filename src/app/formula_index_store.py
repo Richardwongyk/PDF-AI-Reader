@@ -861,8 +861,8 @@ class FormulaIndexStore:
                 self._conn.execute(
                     """UPDATE formula_recognition_results
                        SET accepted=0
-                       WHERE doc_hash=? AND candidate_id=? AND stage=?""",
-                    (doc_hash, candidate_id, stage),
+                       WHERE doc_hash=? AND candidate_id=?""",
+                    (doc_hash, candidate_id),
                 )
             self._conn.execute(
                 """INSERT INTO formula_recognition_results

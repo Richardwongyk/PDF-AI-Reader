@@ -590,6 +590,37 @@ def test_formula_recognition_results_use_exact_input_hash_for_cache(tmp_path) ->
     assert miss is None
 
 
+def test_formula_recognition_results_keep_one_accepted_per_candidate(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b1",
+        stage="local_fast",
+        model="pix2text-mfr",
+        input_hash="image-1",
+        latex=r"\alpha",
+        accepted=True,
+    )
+
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b1",
+        stage="cloud_semantic",
+        model="deepseek",
+        model_version="v4",
+        input_hash="prompt-1",
+        latex=r"\beta",
+        accepted=True,
+    )
+
+    accepted = store.list_recognition_results("doc-1", candidate_id="p0_b1", accepted=True)
+    all_results = store.list_recognition_results("doc-1", candidate_id="p0_b1")
+    assert len(accepted) == 1
+    assert accepted[0].stage == "cloud_semantic"
+    assert accepted[0].latex == r"\beta"
+    assert len(all_results) == 2
+
+
 def test_formula_index_flow_queues_semantic_review_for_all_formula_blocks(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     flow = FormulaIndexFlow(store=store)
