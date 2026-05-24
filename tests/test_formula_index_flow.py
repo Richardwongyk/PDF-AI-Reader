@@ -500,6 +500,94 @@ def test_formula_index_flow_records_high_precision_worker_round(tmp_path) -> Non
     )[0]
     assert record.result_json["latex"] == r"\beta"
     assert record.result_json["image_hash"] == "hash-2"
+    results = store.list_recognition_results(
+        "doc-1",
+        candidate_id="p0_b1",
+        stage="local_precise",
+    )
+    assert len(results) == 1
+    assert results[0].latex == r"\beta"
+    assert results[0].accepted is False
+
+
+def test_formula_index_flow_records_cached_round_as_accepted_result(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    flow = FormulaIndexFlow(store=store)
+    block = _formula("p0_b1", 0)
+    flow.enqueue_blocks(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        batch_budget=0,
+    )
+
+    flow._on_worker_finished(
+        {
+            "doc_hash": "doc-1",
+            "updated": [],
+            "pending": 0,
+            "done": [{
+                "block_id": "p0_b1",
+                "latex": r"\alpha",
+                "image_hash": "hash-1",
+                "model": "pix2text-mfr",
+            }],
+            "skipped": [],
+            "failed": [],
+        },
+        "paper.pdf",
+        1,
+    )
+
+    results = store.list_recognition_results("doc-1", candidate_id="p0_b1")
+    assert len(results) == 1
+    assert results[0].stage == "local_fast"
+    assert results[0].accepted is True
+
+
+def test_formula_recognition_results_use_exact_input_hash_for_cache(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b1",
+        stage="pdf_structure",
+        model="mupdf_rawdict",
+        model_version="fitz-1",
+        preprocess_version="glyph-json-v1",
+        input_hash="input-1",
+        latex=r"\gamma",
+        score=0.91,
+        warnings=["low_confidence"],
+        evidence={"page": 0},
+    )
+
+    cached = store.get_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b1",
+        stage="pdf_structure",
+        model="mupdf_rawdict",
+        model_version="fitz-1",
+        preprocess_version="glyph-json-v1",
+        input_hash="input-1",
+    )
+    miss = store.get_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b1",
+        stage="pdf_structure",
+        model="mupdf_rawdict",
+        model_version="fitz-1",
+        preprocess_version="glyph-json-v1",
+        input_hash="input-2",
+    )
+
+    assert cached is not None
+    assert cached.result_id == result_id
+    assert cached.latex == r"\gamma"
+    assert cached.score == 0.91
+    assert cached.warnings == ("low_confidence",)
+    assert cached.evidence == {"page": 0}
+    assert miss is None
 
 
 def test_formula_index_flow_queues_semantic_review_for_all_formula_blocks(tmp_path) -> None:
@@ -572,6 +660,65 @@ def test_formula_index_flow_records_worker_result_in_store(tmp_path) -> None:
 
     assert store.counts("doc-1") == {"done": 1}
     assert store.list_tasks("doc-1")[0].latex == r"\sum_i x_i"
+
+
+def test_high_precision_worker_outputs_candidate_only(monkeypatch, tmp_path) -> None:
+    import hashlib
+    import sys
+    from types import ModuleType
+
+    import src.app.formula_index_flow as module
+
+    block = _formula("p0_b1", 0)
+    worker = module._FormulaOcrWorker(
+        "paper.pdf",
+        [block],
+        doc_hash="doc-1",
+        cache_only=False,
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+    )
+    emitted: list[dict[str, object]] = []
+    worker.finished_signal.connect(lambda payload: emitted.append(payload))
+
+    class FakeDoc:
+        def close(self) -> None:
+            pass
+
+    class FakeDetector:
+        @staticmethod
+        def _crop_bbox_image(doc: object, page_num: int, bbox: tuple[float, float, float, float], dpi: int, pad: float) -> bytes:
+            return b"png-bytes"
+
+        @staticmethod
+        def _normalize_latex(latex: str) -> str:
+            return latex.strip()
+
+    class FakeMathOCR:
+        def recognize_batch(self, images: list[bytes], max_uncached: int = 0) -> list[str]:
+            assert max_uncached == 1
+            return [r"\int_0^1 x dx"]
+
+    fake_fitz = ModuleType("fitz")
+    fake_fitz.open = lambda path: FakeDoc()  # type: ignore[attr-defined]
+    fake_detector_module = ModuleType("src.core.formula_detector")
+    fake_detector_module.Pix2TextMFDDetector = FakeDetector  # type: ignore[attr-defined]
+    fake_math_ocr_module = ModuleType("src.core.math_ocr")
+    fake_math_ocr_module.MathOCR = FakeMathOCR  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
+    monkeypatch.setitem(sys.modules, "src.core.formula_detector", fake_detector_module)
+    monkeypatch.setitem(sys.modules, "src.core.math_ocr", fake_math_ocr_module)
+
+    worker.run()
+
+    assert len(emitted) == 1
+    assert emitted[0]["updated"] == []
+    assert emitted[0]["done"] == [{
+        "block_id": "p0_b1",
+        "latex": r"\int_0^1 x dx",
+        "image_hash": hashlib.sha256(b"png-bytes").hexdigest(),
+        "model": "pix2text-mfr",
+        "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
+    }]
 
 
 class _Signal:

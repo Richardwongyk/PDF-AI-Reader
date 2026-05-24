@@ -34,6 +34,7 @@ class FormulaScanRound(StrEnum):
     LOCAL_HIGH_PRECISION = "r2_local_high_precision"
     CLOUD_SEMANTIC_REVIEW = "r3_cloud_semantic_review"
     KNOWLEDGE_GRAPH = "r4_knowledge_graph"
+    KNOWLEDGE_INCREMENTAL_UPDATE = "r5_knowledge_incremental_update"
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,29 @@ class FormulaRoundRecord:
     error: str = ""
     attempts: int = 0
     updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class FormulaRecognitionRecord:
+    """One persisted output from a formula extraction or recognition backend."""
+
+    result_id: str
+    candidate_id: str
+    doc_hash: str
+    stage: str
+    model: str
+    model_version: str
+    preprocess_version: str
+    input_hash: str
+    latex: str
+    normalized_latex: str
+    score: float | None
+    duration_ms: int
+    peak_memory_mb: float | None
+    warnings: tuple[str, ...]
+    evidence: dict[str, object]
+    accepted: bool
+    created_at: str = ""
 
 
 class FormulaIndexStore:
@@ -164,6 +188,32 @@ class FormulaIndexStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_formula_round_jobs_status "
             "ON formula_round_jobs(doc_hash, scan_round, status, priority DESC, page_num ASC)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS formula_recognition_results (
+                result_id          TEXT PRIMARY KEY,
+                candidate_id       TEXT NOT NULL,
+                doc_hash           TEXT NOT NULL,
+                stage              TEXT NOT NULL,
+                model              TEXT NOT NULL,
+                model_version      TEXT NOT NULL DEFAULT '',
+                preprocess_version TEXT NOT NULL DEFAULT '',
+                input_hash         TEXT NOT NULL,
+                latex              TEXT NOT NULL DEFAULT '',
+                normalized_latex   TEXT NOT NULL DEFAULT '',
+                score              REAL,
+                duration_ms        INTEGER NOT NULL DEFAULT 0,
+                peak_memory_mb     REAL,
+                warnings_json      TEXT NOT NULL DEFAULT '[]',
+                evidence_json      TEXT NOT NULL DEFAULT '{}',
+                accepted           INTEGER NOT NULL DEFAULT 0,
+                created_at         TEXT NOT NULL,
+                UNIQUE(doc_hash, candidate_id, stage, model, model_version, preprocess_version, input_hash)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_recognition_lookup "
+            "ON formula_recognition_results(doc_hash, candidate_id, stage, accepted, created_at DESC)"
         )
         self._migrate_schema()
         self._conn.commit()
@@ -771,6 +821,158 @@ class FormulaIndexStore:
             )
             self._conn.commit()
 
+    def put_recognition_result(
+        self,
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        stage: str,
+        model: str,
+        input_hash: str,
+        latex: str = "",
+        normalized_latex: str = "",
+        model_version: str = "",
+        preprocess_version: str = "",
+        score: float | None = None,
+        duration_ms: int = 0,
+        peak_memory_mb: float | None = None,
+        warnings: list[str] | tuple[str, ...] | None = None,
+        evidence: dict[str, object] | None = None,
+        accepted: bool = False,
+    ) -> str:
+        """Persist one backend result and return its stable result id."""
+        if not doc_hash or not candidate_id or not stage or not model or not input_hash:
+            raise ValueError("doc_hash, candidate_id, stage, model, and input_hash are required")
+        now = _now()
+        result_id = self.recognition_result_id(
+            doc_hash=doc_hash,
+            candidate_id=candidate_id,
+            stage=stage,
+            model=model,
+            model_version=model_version,
+            preprocess_version=preprocess_version,
+            input_hash=input_hash,
+        )
+        warning_values = [str(item) for item in (warnings or ()) if str(item)]
+        payload_warnings = json.dumps(warning_values, ensure_ascii=False, separators=(",", ":"))
+        payload_evidence = json.dumps(evidence or {}, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            if accepted:
+                self._conn.execute(
+                    """UPDATE formula_recognition_results
+                       SET accepted=0
+                       WHERE doc_hash=? AND candidate_id=? AND stage=?""",
+                    (doc_hash, candidate_id, stage),
+                )
+            self._conn.execute(
+                """INSERT INTO formula_recognition_results
+                   (result_id, candidate_id, doc_hash, stage, model, model_version,
+                    preprocess_version, input_hash, latex, normalized_latex, score,
+                    duration_ms, peak_memory_mb, warnings_json, evidence_json,
+                    accepted, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(doc_hash, candidate_id, stage, model, model_version,
+                               preprocess_version, input_hash) DO UPDATE SET
+                     latex=excluded.latex,
+                     normalized_latex=excluded.normalized_latex,
+                     score=excluded.score,
+                     duration_ms=excluded.duration_ms,
+                     peak_memory_mb=excluded.peak_memory_mb,
+                     warnings_json=excluded.warnings_json,
+                     evidence_json=excluded.evidence_json,
+                     accepted=excluded.accepted,
+                     created_at=excluded.created_at""",
+                (
+                    result_id,
+                    candidate_id,
+                    doc_hash,
+                    stage,
+                    model,
+                    model_version,
+                    preprocess_version,
+                    input_hash,
+                    latex,
+                    normalized_latex or latex,
+                    score,
+                    max(0, int(duration_ms)),
+                    peak_memory_mb,
+                    payload_warnings,
+                    payload_evidence,
+                    1 if accepted else 0,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        return result_id
+
+    def get_recognition_result(
+        self,
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        stage: str,
+        model: str,
+        input_hash: str,
+        model_version: str = "",
+        preprocess_version: str = "",
+    ) -> FormulaRecognitionRecord | None:
+        """Return a cached backend result for the exact input/tool identity."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT result_id, candidate_id, doc_hash, stage, model,
+                          model_version, preprocess_version, input_hash, latex,
+                          normalized_latex, score, duration_ms, peak_memory_mb,
+                          warnings_json, evidence_json, accepted, created_at
+                   FROM formula_recognition_results
+                   WHERE doc_hash=? AND candidate_id=? AND stage=? AND model=?
+                     AND model_version=? AND preprocess_version=? AND input_hash=?""",
+                (
+                    doc_hash,
+                    candidate_id,
+                    stage,
+                    model,
+                    model_version,
+                    preprocess_version,
+                    input_hash,
+                ),
+            ).fetchone()
+        return self._row_to_recognition_record(row) if row else None
+
+    def list_recognition_results(
+        self,
+        doc_hash: str,
+        candidate_id: str | None = None,
+        stage: str | None = None,
+        accepted: bool | None = None,
+        limit: int = 100,
+    ) -> list[FormulaRecognitionRecord]:
+        """List persisted recognition outputs for audit and backend comparison."""
+        params: list[object] = [doc_hash]
+        where = "doc_hash=?"
+        if candidate_id is not None:
+            where += " AND candidate_id=?"
+            params.append(candidate_id)
+        if stage is not None:
+            where += " AND stage=?"
+            params.append(stage)
+        if accepted is not None:
+            where += " AND accepted=?"
+            params.append(1 if accepted else 0)
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT result_id, candidate_id, doc_hash, stage, model,
+                           model_version, preprocess_version, input_hash, latex,
+                           normalized_latex, score, duration_ms, peak_memory_mb,
+                           warnings_json, evidence_json, accepted, created_at
+                    FROM formula_recognition_results
+                    WHERE {where}
+                    ORDER BY created_at DESC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._row_to_recognition_record(row) for row in rows]
+
     def _update_status(
         self,
         doc_hash: str,
@@ -1019,6 +1221,31 @@ class FormulaIndexStore:
         return digest.hexdigest()
 
     @staticmethod
+    def recognition_result_id(
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        stage: str,
+        model: str,
+        model_version: str,
+        preprocess_version: str,
+        input_hash: str,
+    ) -> str:
+        digest = hashlib.sha256()
+        for value in (
+            doc_hash,
+            candidate_id,
+            stage,
+            model,
+            model_version,
+            preprocess_version,
+            input_hash,
+        ):
+            digest.update(str(value).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @staticmethod
     def priority_for_block(block: DocumentBlock, priority_pages: set[int]) -> float:
         page_boost = 1000.0 if block.page_num in priority_pages else 0.0
         score = float(block.metadata.get("formula_score", 0.0) or 0.0)
@@ -1074,6 +1301,42 @@ class FormulaIndexStore:
             error=str(row[10]),
             attempts=int(row[11]),
             updated_at=str(row[12]),
+        )
+
+    @staticmethod
+    def _row_to_recognition_record(row: tuple[object, ...]) -> FormulaRecognitionRecord:
+        try:
+            warnings_json = json.loads(str(row[13] or "[]"))
+        except json.JSONDecodeError:
+            warnings_json = []
+        if not isinstance(warnings_json, list):
+            warnings_json = []
+        try:
+            evidence_json = json.loads(str(row[14] or "{}"))
+        except json.JSONDecodeError:
+            evidence_json = {}
+        if not isinstance(evidence_json, dict):
+            evidence_json = {}
+        score = row[10]
+        peak_memory_mb = row[12]
+        return FormulaRecognitionRecord(
+            result_id=str(row[0]),
+            candidate_id=str(row[1]),
+            doc_hash=str(row[2]),
+            stage=str(row[3]),
+            model=str(row[4]),
+            model_version=str(row[5]),
+            preprocess_version=str(row[6]),
+            input_hash=str(row[7]),
+            latex=str(row[8]),
+            normalized_latex=str(row[9]),
+            score=float(score) if score is not None else None,
+            duration_ms=int(row[11]),
+            peak_memory_mb=float(peak_memory_mb) if peak_memory_mb is not None else None,
+            warnings=tuple(str(item) for item in warnings_json),
+            evidence=evidence_json,
+            accepted=bool(row[15]),
+            created_at=str(row[16]),
         )
 
 

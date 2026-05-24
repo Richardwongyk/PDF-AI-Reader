@@ -394,13 +394,38 @@ class FormulaIndexFlow(QObject):
         for item in result.get("done", []):
             if not isinstance(item, dict):
                 continue
+            scan_round = str(item.get("scan_round", self._scan_round) or self._scan_round)
+            block_id = str(item.get("block_id", ""))
+            image_hash = str(item.get("image_hash", "") or "")
+            if doc_hash and block_id and image_hash:
+                self._store.put_recognition_result(
+                    doc_hash=doc_hash,
+                    candidate_id=block_id,
+                    stage=self._stage_for_round(scan_round),
+                    model=str(item.get("model", "pix2text-mfr") or "pix2text-mfr"),
+                    model_version=str(item.get("model_version", "") or ""),
+                    preprocess_version=str(item.get("preprocess_version", "") or ""),
+                    input_hash=image_hash,
+                    latex=str(item.get("latex", "") or ""),
+                    normalized_latex=str(item.get("normalized_latex", item.get("latex", "")) or ""),
+                    score=self._optional_float(item.get("score")),
+                    duration_ms=int(item.get("duration_ms", 0) or 0),
+                    peak_memory_mb=self._optional_float(item.get("peak_memory_mb")),
+                    warnings=self._string_list(item.get("warnings")),
+                    evidence={
+                        "scan_round": scan_round,
+                        "source": "formula_index_worker",
+                        "block_id": block_id,
+                    },
+                    accepted=scan_round == FormulaScanRound.CACHED_RECOGNITION.value,
+                )
             self._store.mark_done(
                 doc_hash,
-                str(item.get("block_id", "")),
+                block_id,
                 str(item.get("latex", "")),
-                str(item.get("image_hash", "")),
+                image_hash,
                 str(item.get("model", "pix2text-mfr") or "pix2text-mfr"),
-                scan_round=str(item.get("scan_round", self._scan_round) or self._scan_round),
+                scan_round=scan_round,
             )
         for item in result.get("skipped", []):
             if not isinstance(item, dict):
@@ -501,6 +526,39 @@ class FormulaIndexFlow(QObject):
         page_boost = 1 if page_num in priority_pages else 0
         return (page_boost, -page_num)
 
+    @staticmethod
+    def _stage_for_round(scan_round: str) -> str:
+        if scan_round == FormulaScanRound.PDF_STRUCTURE.value:
+            return "pdf_structure"
+        if scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value:
+            return "local_precise"
+        if scan_round == FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value:
+            return "cloud_semantic"
+        if scan_round == FormulaScanRound.KNOWLEDGE_GRAPH.value:
+            return "knowledge_graph"
+        if scan_round == FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE.value:
+            return "knowledge_incremental_update"
+        return "local_fast"
+
+    @staticmethod
+    def _optional_float(value: object) -> float | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _string_list(value: object) -> list[str]:
+        if not isinstance(value, list | tuple):
+            return []
+        return [str(item) for item in value if str(item)]
+
 
 class _FormulaOcrWorker(QThread):
     """Recognize a small batch of pending formula blocks off the UI thread."""
@@ -574,6 +632,7 @@ class _FormulaOcrWorker(QThread):
             detector = Pix2TextMFDDetector()
             updated: list[DocumentBlock] = []
             done: list[dict[str, str]] = []
+            candidate_only = self._scan_round != FormulaScanRound.CACHED_RECOGNITION.value
             for block, image_hash, latex in zip(image_blocks, image_hashes, latex_results, strict=False):
                 cleaned = detector._normalize_latex(latex)
                 if not cleaned:
@@ -583,15 +642,16 @@ class _FormulaOcrWorker(QThread):
                         "scan_round": self._scan_round,
                     })
                     continue
-                block.content = wrap_math_text(cleaned, display=True)
-                block.block_type = BlockType.FORMULA
-                block.metadata.update({
-                    "formula_ocr": "pix2text-mfr",
-                    "mfr_recognized": True,
-                    "latex_source": "background_formula_index",
-                    "needs_ocr": False,
-                })
-                updated.append(block)
+                if not candidate_only:
+                    block.content = wrap_math_text(cleaned, display=True)
+                    block.block_type = BlockType.FORMULA
+                    block.metadata.update({
+                        "formula_ocr": "pix2text-mfr",
+                        "mfr_recognized": True,
+                        "latex_source": "background_formula_index",
+                        "needs_ocr": False,
+                    })
+                    updated.append(block)
                 done.append({
                     "block_id": block.id,
                     "latex": cleaned,
