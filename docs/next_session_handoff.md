@@ -95,6 +95,7 @@
 - 已有 `tools/e2e_pdf_workflow.py`，用于桌面闭环测试滚动、跳转、缩放、翻译、问答、截图和日志。
 - 已有 `tools/formula_latex_audit.py`，用于 Attention/Napkin 与 LaTeX 源码对照审计。
 - 已有 `tools/formula_ocr_benchmark.py`，用于 OCR/MFR 后端抽样性能测试。
+- 已有 `tools/formula_tool_comparison.py`，用于同一批公式图的外部工具候选对比，并把 r2 候选写入 `formula_recognition_results`。
 - 已有 `tools/formula_index_performance.py`，用于多轮公式索引任务入库性能检测。
 - 已有 `tools/test_log_audit.py`，用于清理和审计日志。
 - 最新相关测试基线：`tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py` 为 `66 passed`。
@@ -218,6 +219,7 @@
 - `tools/e2e_pdf_workflow.py`：桌面闭环测试。
 - `tools/formula_latex_audit.py`：公式与 LaTeX 源码对照审计。
 - `tools/formula_ocr_benchmark.py`：OCR/MFR 抽样性能测试。
+- `tools/formula_tool_comparison.py`：外部公式工具候选对比和 r2 落库审计。
 - `tools/formula_index_performance.py`：多轮公式索引任务入库性能测试。
 - `tools/external_formula_tools_smoke.py`：外部公式工具烟测入口。
 - `tools/test_log_audit.py`：日志清理和审计。

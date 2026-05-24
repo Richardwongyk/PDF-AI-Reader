@@ -437,8 +437,9 @@ PDF 打开/滚动/缩放
 - `src/app/formula_semantic_review.py`：r3 语义复核服务和后台 flow，按批读取已持久化任务，调用分析模型后只写候选结果。
 - `src/ui/main_window.py`：空闲调度已纳入 r3 pending 计数；后台顺序为 OCR/缓存任务优先、r3 小批量语义复核、页面级检测兜底。
 - `tools/formula_index_performance.py`：真实 Attention/Napkin 资料的轻量性能基准。
+- `tools/formula_tool_comparison.py`：同一批公式图的外部工具候选对比，计算源码相似度并把 r2 候选写入 `formula_recognition_results`。
 - `tests/test_formula_index_flow.py`、`tests/test_formula_index_scheduler.py`、`tests/test_formula_index_performance.py`：覆盖多轮不互相覆盖、导入轮次统计、性能报告字段。
-- `tests/test_external_formula_tools.py`：覆盖外部公式工具 JSON runner、失败候选和环境变量配置。
+- `tests/test_external_formula_tools.py`、`tests/test_formula_tool_comparison.py`：覆盖外部公式工具 JSON runner、失败候选、环境变量配置、多工具候选落库和无工具跳过路径。
 
 验证：
 
