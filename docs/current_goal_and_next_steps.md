@@ -8,6 +8,7 @@
 - **工具优先**：先找成熟库、成熟源码、官方文档和论文/工程实践，再决定是否自己写适配层；自写代码必须围绕已有工具补足工程粘合和质量审计。
 - **证据优先**：公式识别、RAG、GraphRAG、问答回答都必须能追溯到 PDF 页面、源码对照、检索证据或模型响应日志。
 - **性能优先**：任何“更准”的方案，如果让打开、滚动、缩放、翻译或基础问答明显变慢，都不能进默认路径；重任务只能后台化、缓存化、可取消。
+- **并行推进优先**：任何预计超过 1 分钟的训练集、编译、OCR/MFR、外部工具、Napkin 全量或 benchmark 脚本必须后台运行并写日志；前台继续写代码、更新设计、做审计或准备下一步，不能同步干等脚本结束。
 - **可替换优先**：后端可以大胆升级，但必须抽象稳定、配置隔离、缓存版本隔离、测试可证明、失败可降级。
 - **审计优先**：不能用主观感觉验收。Attention/Napkin 源 LaTeX 对照、长文档性能、真实云模型 smoke test 和日志检查是升级门槛。
 
@@ -41,6 +42,7 @@
 - **经常联网搜索**：遇到工具选择、模型名、API、性能边界、公式识别方案时必须查官方文档或权威源码，不凭记忆拍脑袋。
 - **加强测试**：不能只跑单元测试；公式必须用 Attention/Napkin PDF 与 LaTeX 源码对照，性能必须覆盖长文档打开、滚动、缩放、问答和后台任务。
 - **性能优先**：默认阅读路径不能加载重模型，不能等待全量 OCR、GraphRAG 或离线全文重建。后台任务必须限流、可暂停、可恢复、缓存优先。
+- **长任务不干等**：运行长脚本时必须使用后台进程或独立 worker，并记录 pid、输出目录和日志路径；等待期间继续推进代码/文档/测试设计。只有短轮询状态、收集结果和故障处理可以占用前台。
 - **born-digital PDF 不走 OCR**：有文本层、glyph、bbox、字体、矢量结构的非扫描 PDF，优先走 MuPDF/Poppler 等 PDF 结构解析。
 - **OCR 只做补救层**：图片公式、扫描页、乱码/缺失文本层、用户显式高精度精扫、问答证据低置信时才进入 OCR/MFR。
 - **公式输出必须有定界符**：行内数学用 `\(...\)`，行间公式用 `$$...$$`；数学字体符号和行内变量不能裸露进入翻译/RAG。
@@ -74,6 +76,7 @@
 
 2026-05-25 追加实跑结论：
 
+- 训练集构建第一阶段已改为源码插桩/重编译：`tools/tinybdmath_instrumented_latex_dataset.py` 对临时 LaTeX 副本中的每个公式染唯一颜色，重编译后从 PDF 结构层抽取精确 bbox；这比 PDF/源码粗匹配更适合做可复用训练集。Attention 全量已达到 138/138 精确框捕获，Napkin 全量用 `fast-no-asy` 后台运行中，已扫描 30652 个源码公式，最终正确性以 `summary.json` 的 `verified_exact_boxes == source_formulas` 为准。
 - 第一阶段 PDF 解析器研发已落地 r0/r0.5 最小闭环：`src/core/pdf_glyph_graph.py` 将现有 MuPDF rawdict facts 转成 `RawGlyphGraph`，包含 glyph/vector/image/font/line/span/reading edges/PDF health/input hash；`src/core/symbol_identity_repair.py` 将 raw graph enrich 成 `EnrichedGlyphGraph`，目前支持已知 PDF Unicode 保留、glyph name 静态映射、同 normalized_font+cid 锚点传播、冲突保守不修复和独立 hash。`BornDigitalFormulaStructureExtractor` 的 r0 evidence 已同时带局部 raw graph 与 enriched graph；`FormulaIndexFlow` 会把 enriched graph 持久化为 `r0_5_symbol_identity_repair` 独立 round record，同 input hash 二次运行跳过；`tools/formula_multiround_pipeline.py` 已显式显示 r0.5 轮次。后续 TinyBDMath 不再需要重新定义输入格式。上一轮验证：`tests/test_formula_multiround_pipeline.py tests/test_formula_knowledge_graph.py tests/test_formula_knowledge_update.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_formula_detector.py tests/test_born_digital_math.py tests/test_pdf_glyph_graph.py tests/test_symbol_identity_repair.py tests/test_smoke.py -q` 为 `188 passed`。
 - TinyBDMath 小模型研发第一阶段已从文档推进到可运行主干：`tools/born_digital_formula_dataset.py`、`tools/tinybdmath_training_data.py`、`tools/tinybdmath_realdata_pipeline.py` 负责 Attention/Napkin 真实 PDF + LaTeX 源码数据集；`src/core/tinybdmath_baseline.py` 是标准库一隐藏层 MLP，`src/core/tinybdmath_torch_backend.py` 是可选 PyTorch 后端，`tools/run_tinybdmath_torch_science.ps1` 可调用用户已有 `science` 环境；`src/app/tinybdmath_candidate_service.py` 已作为 r2a 非视觉结构候选服务接入 `tools/formula_multiround_pipeline.py --run-tinybdmath`。Attention 前 6 页 smoke：r2a 处理 7 条 r0 候选，写入 7 条 `tinybdmath_structural:tinybdmath` 和 7 条 `r2a_tinybdmath_structural:done`，fusion 可读取但 `ready_for_manual_accept=0`，不污染正文/RAG。
 - TinyBDMath 真实数据集工程继续推进：新增确定性 LaTeX 源码 math span 扫描器 `src/core/latex_math_source_parser.py`，用于训练/审计路径从 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 和数学环境中生成 offset-preserving source gold；新增 `src/core/latex_macro_expander.py` 将项目私有宏展开为标准 LaTeX 训练目标，保留 raw/canonical 两份证据；新增 `tools/tinybdmath_sharded_dataset.py`、`tools/tinybdmath_shard_consolidate.py`、`tools/tinybdmath_gold_audit.py` 和 `tools/run_tinybdmath_full_data_pipeline.ps1`，支持 Attention/Napkin 页级分片、断点续跑、原子写入、source/PDF label tier 审计、训练行合并和 baseline/PyTorch 训练。PDF 候选标签已加入 PDF TOC 页锚点窗口，优先同页/近页源码匹配，避免全书范围短公式误配；`preprocess_version=tinybdmath_pdf_source_page_anchor_macro_v3` 防止未宏展开的旧分片被误复用。源码仍只用于数据集和验收，不进入生产公式识别路径。

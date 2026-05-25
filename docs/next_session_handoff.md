@@ -16,6 +16,8 @@
 
 2026-05-25 训练集 100% 准确性补充：不要把 source/PDF 相似度高的候选直接当 gold。新增 `tools/tinybdmath_gold_policy.py` 统一 verified gold 闸门，要求同页窗口、源码页窗唯一、PDF 结构证据完整、无 unknown/warnings、严格 token 签名一致，且过短/单字符公式必须复核。`tools/tinybdmath_review_queue.py` 可把未自动通过的样本导出为 JSONL、PDF crop 图、源码上下文、PDF evidence 和视觉大模型审核 prompt；`tools/tinybdmath_apply_review.py` 只把自动 verified 行和高置信 `accept/revise` 复核结果合成独立 verified gold JSONL。阶段合并结果：Attention 15 页 + Napkin 1050 页分片、30790 条 source formulas、2493 条 PDF candidates；极严自动 gold 仅 12 条，其余进入复核，不得宣称两份 PDF 已全部一一对应完成。
 
+2026-05-25 插桩训练集补充：当前更可靠的训练集路线是源码插桩/重编译，而不是拿用户给的已编译 PDF 做坐标基准。新增 `tools/tinybdmath_instrumented_latex_dataset.py`，对临时 LaTeX 副本中的每个公式染唯一颜色，重编译后直接从 born-digital PDF 结构层读取彩色 glyph/vector bbox，输出可复用 JSONL 训练集。新增 `tools/run_instrumented_dataset_background.ps1`，所有 Napkin 全量、LaTeX 编译、训练集长任务必须后台运行并从启动即写日志。Attention 全量回归为 138/138 精确框、耗时约 14.639s；Napkin 全量 `fast-no-asy` 已后台启动，已扫描 30652 个源码公式，但最终正确性必须等 `summary.json`，不能提前宣称 100%。
+
 重要纠正：不要把项目自定义宏渲染后的视觉相似说成“就是同一个 LaTeX”。Napkin `tex/macros.tex` 中 `\pre` 定义为 `^{\text{pre}}`，所以 `f\pre(T)` 的 PDF 视觉上会像 `f^{pre}(T)`；这类样本仍然不能自动进 gold，必须通过宏定义审计或复核改写成 canonical LaTeX。
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
@@ -42,6 +44,7 @@
 5. **异步持久化优先**：导入后可以尽早全篇入队，但每轮结果必须落库，二次打开必须复用，不能反复重扫。
 6. **可替换优先**：MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR、DeepSeek 等必须通过统一接口或独立 worker 接入。
 7. **审计优先**：Attention 与 Napkin PDF + LaTeX 源码是公式验收基准；闭环 UI 操作、日志和性能报告是交互验收基准。
+8. **长任务并行推进**：预计超过 1 分钟的 LaTeX 编译、插桩训练集、Napkin 全量、OCR/MFR、外部工具 benchmark 必须后台运行并写日志；前台继续写代码、设计、文档或审计，不允许同步干等。启动后台任务时记录 pid、输出目录、日志路径，之后只做短轮询和故障处理。
 
 明确禁止：
 

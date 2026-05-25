@@ -10,6 +10,7 @@
 > 新会话接手时先读根目录 `AGENTS.md`，再读 `docs/next_session_handoff.md`。
 > 当前阶段的关键任务不是继续盲目安装工具，而是按已写入文档的设计边界推进：
 > born-digital PDF 公式先走 PDF 结构解析，扫描/图片公式才走 OCR/MFR；所有重任务异步分批、结果落库、可恢复；RAG/GraphRAG 必须基于全文证据；测试必须覆盖 Attention 与 Napkin 两份真实资料。
+> 预计超过 1 分钟的训练集、LaTeX 编译、Napkin 全量、OCR/MFR、外部工具 benchmark 必须后台运行并写日志；前台继续写代码、设计、文档或审计，禁止同步干等长脚本。
 
 当前真实状态：
 
@@ -41,6 +42,10 @@
 
 2026-05-25 最新实现检查点：
 
+- 训练集制作路线已从“PDF 与源码粗匹配”切到更可靠的 LaTeX 插桩/重编译路线：新增 `tools/tinybdmath_instrumented_latex_dataset.py`，在临时源码副本中给每个源码公式分配唯一 HTML 颜色，重编译后直接从 born-digital PDF 结构层读取彩色 glyph/vector bbox，输出 `source_formulas.jsonl`、`instrumented_formula_boxes.jsonl`、`instrumented_training_rows.jsonl` 和 `summary.json`。这条线只用于训练/审计，不进入真实用户生产解析路径；用户提供的原 PDF 只做可选指纹对照，不阻塞训练行生成。
+- 新增 `tools/run_instrumented_dataset_background.ps1`，长编译/全量训练集必须后台运行、从启动即写日志并报告 pid/output/log；前台继续写代码或审计。`fast-no-asy` 构建档只修改临时源码副本，用于跳过 Napkin 的 Asymptote 图形构建，避免全量公式训练集被图片生成拖慢。
+- Attention 插桩训练集全量回归已通过：138 个源码公式、5 个 display、133 个 inline，`boxes_found=138`、`verified_exact_boxes=138`、`training_rows=138`，耗时约 14.639s，原 PDF 与重编译 PDF 为 `same_page_geometry`。
+- Napkin 插桩训练集全量任务已后台启动到 `test_artifacts/instrumented_napkin_fast_full_v2`，日志 `logs/instrumented_dataset_napkin_20260525_214053.log`；当前已扫描出 30652 个源码公式，其中 display 2162、inline 28490。Napkin 全量是否达到 100% 插桩框捕获必须以最终 `summary.json` 为准，未产出前不能宣称已验证。
 - 第一阶段 PDF 解析器研发继续推进：`src/core/pdf_glyph_graph.py` 已把 PyMuPDF born-digital facts 标准化为 `RawGlyphGraph`，包含 glyph/font/bbox/origin/cid/glyph_name、vector/image 节点、line/span 读序边、PDF health、稳定 input hash；`src/core/symbol_identity_repair.py` 新增 r0.5 `EnrichedGlyphGraph`，对已知 PDF Unicode、标准 glyph name、同 normalized_font+cid 锚点做保守身份修复，输出 `resolved_identity`、候选、来源、置信度、warnings 和独立 input hash。`BornDigitalFormulaStructureExtractor` 的 r0 candidate evidence 现在同时携带局部 raw graph 和 enriched graph，`FormulaIndexFlow` 会把 enriched graph 作为 `r0_5_symbol_identity_repair` 独立 round record 落到 `formula_round_jobs`，同 input hash 二次打开复用已完成记录；`tools/formula_multiround_pipeline.py` 也会显式报告 r0.5 轮次。新增 `tests/test_symbol_identity_repair.py`，相关公式/图谱集合上一基线为 `188 passed`。
 - r0.5 映射资源层已开始落地：`GlyphNameMappingLoader` 支持加载 AGL/texglyphlist 风格的 `glyph;0041` 或空白分隔映射文件，保留 mapping source/warnings，支持资源覆盖内置表、缺失资源 warning、`uniXXXX/uXXXX` encoded glyph name 解码。后续可接 TeX Live/CTAN 的真实 glyphlist/texglyphlist/encoding map，而不必把映射继续硬塞进代码常量。
 - r0.5 资源自动发现已加入：可从 `resources/glyph_maps`、`data/glyph_maps`、`PDF_AI_READER_GLYPH_MAP_DIR`、`TEXMFROOT`、`TEXLIVE_ROOT`、`MIKTEX_ROOT` 和 Windows TeX Live/MiKTeX 常见路径发现 `texglyphlist.txt/glyphlist.txt/pdfglyphlist.txt`；找不到资源只记录 `mapping_auto_discovery_empty`，不联网、不安装、不影响内置 fallback。
