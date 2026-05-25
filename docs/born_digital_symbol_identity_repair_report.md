@@ -6,6 +6,8 @@
 
 追加实现：`GlyphNameMappingLoader` 已提供映射资源入口，支持加载 AGL/texglyphlist 风格文件，记录 `mapping_sources` 和 `mapping_warnings`，并支持 `uniXXXX/uXXXX` encoded glyph name。下一步应把 TeX Live/CTAN 中的真实 `glyphlist.txt`、`texglyphlist.txt` 和 TeX encoding maps 纳入可配置资源目录。
 
+资源发现：loader 可从项目资源目录、`PDF_AI_READER_GLYPH_MAP_DIR`、`TEXMFROOT`、`TEXLIVE_ROOT`、`MIKTEX_ROOT` 和 Windows TeX Live/MiKTeX 常见路径发现 glyph map 文件。发现失败只写 warning，不能触发联网下载或包安装。
+
 ## 1. 结论
 
 此前 TinyBDMath 方案中有一个关键缺口：r0 能发现 ToUnicode 缺失、乱码、未知 glyph，但处理策略偏粗，容易把仍可在结构层修复的 PDF 过早交给视觉 OCR。正确路线是在 r0 PDF 事实抽取和 r2a TinyBDMath 结构解析之间加入一个独立的 r0.5 符号身份修复层。

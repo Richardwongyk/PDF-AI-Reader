@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Iterable
@@ -64,6 +65,12 @@ class GlyphNameMappingTable:
 
 class GlyphNameMappingLoader:
     """Load standard glyph-name mapping resources without extra packages."""
+
+    DEFAULT_FILENAMES = (
+        "texglyphlist.txt",
+        "glyphlist.txt",
+        "pdfglyphlist.txt",
+    )
 
     @classmethod
     def built_in(cls) -> GlyphNameMappingTable:
@@ -124,6 +131,53 @@ class GlyphNameMappingLoader:
                 priority += 1
             warnings.extend(_mapping_resource_warnings(path.name, lines))
         return cls.from_entries(entries, sources=tuple(dict.fromkeys(sources)), warnings=tuple(warnings))
+
+    @classmethod
+    def discover_paths(
+        cls,
+        *,
+        extra_roots: Iterable[str | Path] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[Path, ...]:
+        env_values = env if env is not None else dict(os.environ)
+        roots: list[Path] = []
+        roots.extend(Path(root) for root in extra_roots or ())
+        for key in ("PDF_AI_READER_GLYPH_MAP_DIR", "TEXMFROOT", "TEXLIVE_ROOT", "MIKTEX_ROOT"):
+            value = env_values.get(key)
+            if value:
+                roots.append(Path(value))
+        roots.extend(_default_mapping_roots())
+
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            for candidate in _candidate_mapping_paths(root, cls.DEFAULT_FILENAMES):
+                key = str(candidate).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                if candidate.exists():
+                    paths.append(candidate)
+        return tuple(paths)
+
+    @classmethod
+    def auto(
+        cls,
+        *,
+        extra_roots: Iterable[str | Path] | None = None,
+        env: dict[str, str] | None = None,
+        include_builtin: bool = True,
+    ) -> GlyphNameMappingTable:
+        paths = cls.discover_paths(extra_roots=extra_roots, env=env)
+        table = cls.load(paths, include_builtin=include_builtin)
+        if not paths:
+            return GlyphNameMappingTable(
+                exact=table.exact,
+                normalized=table.normalized,
+                sources=table.sources,
+                warnings=table.warnings + ("mapping_auto_discovery_empty",),
+            )
+        return table
 
     @staticmethod
     def from_entries(
@@ -248,12 +302,16 @@ class SymbolIdentityRepairer:
         auto_resolve_threshold: float = 0.95,
         glyph_name_mapping: GlyphNameMappingTable | None = None,
         glyph_name_mapping_paths: Iterable[str | Path] | None = None,
+        auto_discover_glyph_maps: bool = False,
+        glyph_name_mapping_roots: Iterable[str | Path] | None = None,
     ) -> None:
         self._auto_resolve_threshold = float(auto_resolve_threshold)
         if glyph_name_mapping is not None:
             self._glyph_name_mapping = glyph_name_mapping
         elif glyph_name_mapping_paths is not None:
             self._glyph_name_mapping = GlyphNameMappingLoader.load(glyph_name_mapping_paths)
+        elif auto_discover_glyph_maps:
+            self._glyph_name_mapping = GlyphNameMappingLoader.auto(extra_roots=glyph_name_mapping_roots)
         else:
             self._glyph_name_mapping = GlyphNameMappingLoader.built_in()
 
@@ -573,6 +631,31 @@ def _mapping_resource_warnings(name: str, lines: list[str]) -> tuple[str, ...]:
     if parsed == 0:
         return (f"mapping_file_no_entries:{name}",)
     return ()
+
+
+def _candidate_mapping_paths(root: Path, filenames: tuple[str, ...]) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    if root.is_file():
+        return (root,)
+    for filename in filenames:
+        candidates.append(root / filename)
+        candidates.append(root / "glyphlist" / filename)
+        candidates.append(root / "texmf-dist" / "fonts" / "map" / "glyphlist" / filename)
+        candidates.append(root / "fonts" / "map" / "glyphlist" / filename)
+    return tuple(candidates)
+
+
+def _default_mapping_roots() -> tuple[Path, ...]:
+    module_root = Path(__file__).resolve().parents[2]
+    roots = [
+        module_root / "resources" / "glyph_maps",
+        module_root / "data" / "glyph_maps",
+        Path("C:/texlive"),
+        Path("C:/Program Files/MiKTeX"),
+    ]
+    for year in range(2026, 2018, -1):
+        roots.append(Path(f"C:/texlive/{year}"))
+    return tuple(roots)
 
 
 def _normalize_glyph_name(name: str) -> str:

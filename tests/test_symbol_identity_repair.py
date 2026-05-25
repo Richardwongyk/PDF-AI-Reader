@@ -178,6 +178,59 @@ def test_symbol_identity_mapping_loader_reports_missing_resource(tmp_path) -> No
     assert table.warnings == (f"mapping_file_missing:{missing}",)
 
 
+def test_symbol_identity_mapping_loader_auto_discovers_resource_root(tmp_path) -> None:
+    root = tmp_path / "glyph_maps"
+    root.mkdir()
+    (root / "texglyphlist.txt").write_text("customsum;2211\n", encoding="utf-8")
+
+    table = GlyphNameMappingLoader.auto(extra_roots=[root], env={})
+
+    entry = table.lookup("customsum")
+    assert entry is not None
+    assert entry.unicode == "∑"
+    assert entry.source == "glyph_name_resource:texglyphlist.txt"
+    assert "mapping_auto_discovery_empty" not in table.warnings
+
+
+def test_symbol_identity_mapping_loader_auto_discovers_texmf_layout(tmp_path) -> None:
+    glyph_root = tmp_path / "texmf-dist" / "fonts" / "map" / "glyphlist"
+    glyph_root.mkdir(parents=True)
+    (glyph_root / "glyphlist.txt").write_text("customint;222B\n", encoding="utf-8")
+
+    table = GlyphNameMappingLoader.auto(env={"TEXMFROOT": str(tmp_path)})
+
+    entry = table.lookup("customint")
+    assert entry is not None
+    assert entry.unicode == "∫"
+    assert entry.source == "glyph_name_resource:glyphlist.txt"
+
+
+def test_symbol_identity_mapping_loader_auto_falls_back_to_builtin_when_empty(tmp_path) -> None:
+    table = GlyphNameMappingLoader.auto(extra_roots=[tmp_path], env={})
+
+    assert table.lookup("summation") is not None
+    assert "mapping_auto_discovery_empty" in table.warnings
+
+
+def test_symbol_identity_repair_auto_discovery_uses_found_resource(tmp_path) -> None:
+    root = tmp_path / "glyph_maps"
+    root.mkdir()
+    (root / "texglyphlist.txt").write_text("customsum;2211\n", encoding="utf-8")
+    graph = _graph([
+        PdfGlyph("cid:1", "CustomMath", 10, (10, 10, 20, 20), cid=1, glyph_name="customsum"),
+    ])
+
+    enriched = SymbolIdentityRepairer(
+        auto_discover_glyph_maps=True,
+        glyph_name_mapping_roots=[root],
+    ).repair_graph(graph)
+
+    node = enriched.glyphs[0]
+    assert node.resolved_identity is not None
+    assert node.resolved_identity.unicode == "∑"
+    assert node.resolved_identity.source == "glyph_name_resource:texglyphlist.txt"
+
+
 def test_symbol_identity_repair_decodes_encoded_glyph_names() -> None:
     graph = _graph([
         PdfGlyph("cid:1", "CustomMath", 10, (10, 10, 20, 20), cid=1, glyph_name="uni2211"),
