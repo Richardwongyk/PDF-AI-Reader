@@ -544,6 +544,7 @@ class FormulaIndexFlow(QObject):
                     "block",
                     [candidate_block],
                 )
+                self._persist_symbol_identity_round(doc_hash, filepath, candidate_block, item)
             self._store.put_recognition_result(
                 doc_hash=doc_hash,
                 candidate_id=candidate_id,
@@ -596,6 +597,50 @@ class FormulaIndexFlow(QObject):
                 + self._store.page_pending_count(doc_hash),
             )
         self.scan_finished.emit(0, pending)
+
+    def _persist_symbol_identity_round(
+        self,
+        doc_hash: str,
+        filepath: str,
+        candidate_block: DocumentBlock,
+        item: dict[str, object],
+    ) -> None:
+        evidence = item.get("evidence", {})
+        if not isinstance(evidence, dict):
+            return
+        enriched = evidence.get("enriched_glyph_graph", {})
+        if not isinstance(enriched, dict):
+            return
+        input_hash = str(enriched.get("input_hash", "") or "")
+        if not input_hash:
+            return
+        summary = enriched.get("summary", {})
+        payload: dict[str, object] = {
+            "stage": FormulaScanRound.SYMBOL_IDENTITY_REPAIR.value,
+            "input_hash": input_hash,
+            "raw_input_hash": str(enriched.get("raw_input_hash", "") or ""),
+            "model": "symbol_identity_repair",
+            "model_version": str(enriched.get("repair_version", "symbol_identity_repair_v1") or "symbol_identity_repair_v1"),
+            "preprocess_version": str(enriched.get("schema_version", "enriched_glyph_graph_v1") or "enriched_glyph_graph_v1"),
+            "candidate_id": candidate_block.id,
+            "page_num": candidate_block.page_num,
+            "summary": summary if isinstance(summary, dict) else {},
+        }
+        self._store.enqueue_round_records(
+            doc_hash,
+            filepath,
+            FormulaScanRound.SYMBOL_IDENTITY_REPAIR,
+            "block",
+            [candidate_block],
+            result_json_by_target={candidate_block.id: payload},
+        )
+        self._store.mark_round_done(
+            doc_hash,
+            FormulaScanRound.SYMBOL_IDENTITY_REPAIR,
+            "block",
+            candidate_block.id,
+            payload,
+        )
     
     def _on_worker_thread_done(self, filepath: str, batch_budget: int) -> None:
         self._thread = None
@@ -632,6 +677,8 @@ class FormulaIndexFlow(QObject):
     def _stage_for_round(scan_round: str) -> str:
         if scan_round == FormulaScanRound.PDF_STRUCTURE.value:
             return "pdf_structure"
+        if scan_round == FormulaScanRound.SYMBOL_IDENTITY_REPAIR.value:
+            return "symbol_identity_repair"
         if scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value:
             return "local_precise"
         if scan_round == FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value:

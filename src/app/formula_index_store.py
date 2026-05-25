@@ -30,6 +30,7 @@ class FormulaScanRound(StrEnum):
     """Persisted stages for multi-pass formula parsing."""
 
     PDF_STRUCTURE = "r0_pdf_structure"
+    SYMBOL_IDENTITY_REPAIR = "r0_5_symbol_identity_repair"
     CACHED_RECOGNITION = "r1_cached_recognition"
     LOCAL_HIGH_PRECISION = "r2_local_high_precision"
     CLOUD_SEMANTIC_REVIEW = "r3_cloud_semantic_review"
