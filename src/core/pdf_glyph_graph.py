@@ -65,6 +65,7 @@ class RawGlyphNode:
     line_id: str
     span_id: str
     char_index: int
+    glyph_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -349,6 +350,7 @@ def _glyph_node(
         line_id=line_id,
         span_id=span_id,
         char_index=int(char_index),
+        glyph_name=str(getattr(glyph, "glyph_name", "") or ""),
     )
 
 

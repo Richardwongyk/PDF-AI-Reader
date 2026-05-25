@@ -65,12 +65,13 @@ TinyBDMath 小模型研发只负责：
 ## 5. 近期研发优先级
 
 1. 已完成第一阶段入口：`src/core/pdf_glyph_graph.py` 固化 r0 Raw Glyph Graph schema，r0 formula candidate evidence 已携带局部 graph schema/hash/health/glyph/vector/image。
-2. 下一步实现 r0.5 静态映射 MVP。
-3. 建立 Enriched Glyph Graph 落库和 input hash 跳过。
-4. 为 TinyBDMath 准备 synthetic LaTeX -> PDF -> graph 训练数据。
-5. 训练/实现 MLP edge scorer baseline。
-6. 建立 verifier 和 accepted gate。
-7. 再升级 GNN/Graph Transformer。
+2. 已完成 r0.5 静态修复 MVP：`src/core/symbol_identity_repair.py` 生成 Enriched Glyph Graph，保留已知 PDF Unicode，支持 glyph name 静态映射和同 normalized_font+cid 锚点传播，冲突时保守保留 unknown。
+3. 下一步建立 Enriched Glyph Graph 独立落库、任务轮次和 input hash 跳过，而不是只附着在 r0 candidate evidence。
+4. 扩展 r0.5：接入真实 AGL/texglyphlist/TeX encoding/fonttools cmap，再做 outline/path shape candidate。
+5. 为 TinyBDMath 准备 synthetic LaTeX -> PDF -> graph 训练数据。
+6. 训练/实现 MLP edge scorer baseline。
+7. 建立 verifier 和 accepted gate。
+8. 再升级 GNN/Graph Transformer。
 
 ## 6. 文档维护规则
 

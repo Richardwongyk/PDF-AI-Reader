@@ -455,6 +455,17 @@ def test_born_digital_formula_structure_extractor_emits_hashed_candidates() -> N
     assert raw_graph["health"]["vector_count"] == 1
     assert any(glyph["text"] == "Q" and glyph["normalized_font"] == "CMMI10" for glyph in raw_graph["glyphs"])
     assert raw_graph["vectors"][0]["kind"] == "vector"
+    enriched_graph = candidate.evidence["enriched_glyph_graph"]
+    assert enriched_graph["schema_version"] == "enriched_glyph_graph_v1"
+    assert enriched_graph["repair_version"] == "symbol_identity_repair_v1"
+    assert enriched_graph["raw_input_hash"] == raw_graph["input_hash"]
+    assert enriched_graph["summary"]["glyph_count"] >= 13
+    assert any(
+        glyph["resolved_identity"]["unicode"] == "Q"
+        and glyph["resolved_identity"]["source"] == "pdf_text"
+        for glyph in enriched_graph["glyphs"]
+        if glyph["resolved_identity"] is not None
+    )
 
 
 def test_region_diagnostics_marks_structured_formula_candidate() -> None:

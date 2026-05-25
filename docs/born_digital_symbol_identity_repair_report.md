@@ -2,6 +2,8 @@
 
 日期：2026-05-25
 
+实现状态：r0.5 MVP 已落地到 `src/core/symbol_identity_repair.py`。当前版本只做保守非视觉身份修复：已知 PDF Unicode 直接保留，`glyph_name` 走内置静态映射，同 `normalized_font+cid` 的已知锚点可传播；冲突或证据不足时保留 unknown 并写 warnings。真实 AGL/texglyphlist/TeX encoding/fonttools cmap、outline/path shape classifier 和独立 r0.5 落库仍是下一步。
+
 ## 1. 结论
 
 此前 TinyBDMath 方案中有一个关键缺口：r0 能发现 ToUnicode 缺失、乱码、未知 glyph，但处理策略偏粗，容易把仍可在结构层修复的 PDF 过早交给视觉 OCR。正确路线是在 r0 PDF 事实抽取和 r2a TinyBDMath 结构解析之间加入一个独立的 r0.5 符号身份修复层。

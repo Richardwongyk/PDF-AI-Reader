@@ -19,6 +19,7 @@ from src.core.born_digital_math import (
     MuPDFBornDigitalExtractor,
 )
 from src.core.pdf_glyph_graph import RawGlyphGraphExtractor
+from src.core.symbol_identity_repair import SymbolIdentityRepairer
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class BornDigitalFormulaStructureExtractor:
         self._extractor = MuPDFBornDigitalExtractor()
         self._auditor = BornDigitalMathAuditor()
         self._graph_extractor = RawGlyphGraphExtractor(self._extractor)
+        self._identity_repairer = SymbolIdentityRepairer()
 
     def extract_page(
         self,
@@ -63,6 +65,7 @@ class BornDigitalFormulaStructureExtractor:
         existing_ids: set[str] | None = None,
     ) -> list[BornDigitalFormulaCandidate]:
         raw_graph = self._graph_extractor.from_page_facts(page_facts)
+        enriched_graph = self._identity_repairer.repair_graph(raw_graph)
         regions = self._auditor.display_formula_regions(page_facts)
         try:
             diagnostics = {
@@ -109,6 +112,18 @@ class BornDigitalFormulaStructureExtractor:
                         image.__dict__
                         for image in raw_graph.images
                         if _bbox_intersects(image.bbox, region.bbox)
+                    ],
+                },
+                "enriched_glyph_graph": {
+                    "schema_version": enriched_graph.schema_version,
+                    "repair_version": enriched_graph.repair_version,
+                    "input_hash": enriched_graph.input_hash,
+                    "raw_input_hash": raw_graph.input_hash,
+                    "summary": enriched_graph.summary.__dict__,
+                    "glyphs": [
+                        glyph.to_json()
+                        for glyph in enriched_graph.glyphs
+                        if _bbox_intersects(glyph.raw.bbox, region.bbox)
                     ],
                 },
                 "diagnostics": diagnostics.get(region.bbox, {}),

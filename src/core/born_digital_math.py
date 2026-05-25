@@ -50,6 +50,7 @@ class PdfGlyph:
     origin: tuple[float, float] | None = None
     cid: int | None = None
     synthetic: bool = False
+    glyph_name: str = ""
 
     @property
     def is_unknown(self) -> bool:
@@ -1293,6 +1294,7 @@ def _extract_glyph(char: dict[str, Any], font: str, size: float, span: dict[str,
         bbox=_bbox_tuple(char.get("bbox", span.get("bbox", (0, 0, 0, 0)))),
         origin=_origin_tuple(char.get("origin")),
         synthetic=bool(char.get("synthetic", False)),
+        glyph_name=_glyph_name(char),
     )
 
 
@@ -1306,6 +1308,14 @@ def _glyph_cid(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _glyph_name(char: dict[str, Any]) -> str:
+    for key in ("glyph_name", "glyph", "name"):
+        value = char.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _bbox_tuple(value: Any) -> tuple[float, float, float, float]:
