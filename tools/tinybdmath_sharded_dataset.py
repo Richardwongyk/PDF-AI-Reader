@@ -37,6 +37,7 @@ from tools.born_digital_formula_dataset import (
     _edge_hint_counts,
     _select_cases,
     _source_index,
+    custom_case,
 )
 from tools.tinybdmath_dataset_audit import audit_dataset
 from tools.tinybdmath_gold_audit import audit_gold
@@ -44,7 +45,7 @@ from tools.tinybdmath_training_data import build_training_rows, _write_jsonl
 
 
 MANIFEST_VERSION = "tinybdmath_sharded_dataset_v1"
-SHARD_PREPROCESS_VERSION = "tinybdmath_pdf_source_page_anchor_v2"
+SHARD_PREPROCESS_VERSION = "tinybdmath_pdf_source_page_anchor_macro_v3"
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ def build_sharded_dataset(
     *,
     case_name: str,
     output_dir: Path,
+    custom_pdf: Path | None = None,
+    custom_latex_root: Path | None = None,
     start_page: int = 0,
     max_pages: int = 0,
     workers: int = 1,
@@ -80,7 +83,7 @@ def build_sharded_dataset(
 
     all_source_rows: list[dict[str, Any]] = []
     case_summaries: list[dict[str, Any]] = []
-    for case in _select_cases(case_name):
+    for case in _cases_for_build(case_name, custom_pdf=custom_pdf, custom_latex_root=custom_latex_root):
         case_started = time.perf_counter()
         source_index, display_count, inline_count = _source_index(
             case,
@@ -177,6 +180,16 @@ def build_sharded_dataset(
     return summary
 
 
+def _cases_for_build(case_name: str, *, custom_pdf: Path | None, custom_latex_root: Path | None) -> list[Any]:
+    if custom_pdf is None and custom_latex_root is None:
+        return _select_cases(case_name)
+    if custom_pdf is None or custom_latex_root is None:
+        raise ValueError("--pdf and --latex-root must be provided together")
+    if case_name == "all":
+        raise ValueError("--case must be a concrete name when --pdf/--latex-root are provided")
+    return [custom_case(case_name, custom_pdf, custom_latex_root)]
+
+
 def _run_page_workers(
     *,
     case_name: str,
@@ -225,6 +238,7 @@ def _build_page_shard(arg: dict[str, Any]) -> PageShardResult:
                 source_id=str(row.get("source_id", "")),
                 kind=str(row.get("kind", "")),
                 latex=str(row.get("latex", "")),
+                canonical_latex=str(row.get("canonical_latex", "") or row.get("latex", "")),
                 normalized=str(row.get("normalized", "")),
                 token_count=int(row.get("token_count", 0) or 0),
                 tex_path=str(row.get("tex_path", "")),
@@ -234,6 +248,9 @@ def _build_page_shard(arg: dict[str, Any]) -> PageShardResult:
                 env=str(row.get("env", "")),
                 delimiter=str(row.get("delimiter", "")),
                 parser_version=str(row.get("parser_version", "")),
+                macro_expansion_version=str(row.get("macro_expansion_version", "")),
+                macro_expansion_applied=tuple(str(item) for item in row.get("macro_expansion_applied", []) if item),
+                macro_expansion_warnings=tuple(str(item) for item in row.get("macro_expansion_warnings", []) if item),
                 context_before=str(row.get("context_before", "")),
                 context_after=str(row.get("context_after", "")),
                 pdf_page_hint=_optional_int(row.get("pdf_page_hint")),
@@ -299,11 +316,13 @@ def _build_page_shard(arg: dict[str, Any]) -> PageShardResult:
                             best_source_similarity=float(match["similarity"]),
                             best_source_id=str(match["source_id"]),
                             best_source_latex=str(match["latex"]),
+                            best_source_raw_latex=str(match.get("raw_latex", "")),
                             match_rank=int(match["rank"]),
                             page_match=str(match.get("page_match", "")),
                             source_pdf_page_hint=_optional_int(match.get("pdf_page_hint")),
                             source_pdf_page_window_start=_optional_int(match.get("pdf_page_window_start")),
                             source_pdf_page_window_end=_optional_int(match.get("pdf_page_window_end")),
+                            source_macro_expansion_warnings=list(match.get("macro_expansion_warnings", [])),
                             warnings=list(candidate.warnings),
                         )
                     ),
@@ -542,7 +561,9 @@ def _file_hash(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=["attention", "napkin", "all"], default="all")
+    parser.add_argument("--case", default="all", help="attention, napkin, all, or a custom case name with --pdf/--latex-root")
+    parser.add_argument("--pdf", type=Path, default=None, help="Custom PDF path for future PDF+LaTeX datasets")
+    parser.add_argument("--latex-root", type=Path, default=None, help="Custom LaTeX source root for future PDF+LaTeX datasets")
     parser.add_argument("--output-dir", type=Path, default=Path("test_artifacts/tinybdmath_sharded"))
     parser.add_argument("--start-page", type=int, default=0)
     parser.add_argument("--max-pages", type=int, default=0)
@@ -554,6 +575,8 @@ def main() -> int:
     payload = build_sharded_dataset(
         case_name=args.case,
         output_dir=args.output_dir,
+        custom_pdf=args.pdf,
+        custom_latex_root=args.latex_root,
         start_page=args.start_page,
         max_pages=args.max_pages,
         workers=max(1, args.workers),

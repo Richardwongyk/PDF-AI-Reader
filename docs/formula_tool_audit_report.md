@@ -268,6 +268,9 @@ Block 33: type=2, std=LI    → 列表项
 2. `tools/tinybdmath_sharded_dataset.py` 按页生成 Attention/Napkin PDF 候选分片，支持断点续跑、原子写入和 `preprocess_version`。
 3. `tools/tinybdmath_gold_audit.py` 按 exact/near/weak/unmatched 与 `same_page_window/near_page_window/outside_page_window` 审计 PDF 候选标签。
 4. PDF 候选匹配源码时优先使用 PDF 目录页锚点窗口；短公式和单字符公式也必须先受页窗口约束，避免全书范围误配。
+5. `tools/tinybdmath_gold_policy.py` 现在是唯一 verified gold 判定入口；自动 gold 不只看相似度，还要求同页窗口、源码页窗唯一、PDF glyph/edge 证据完整、无 unknown/warnings、严格 token 签名一致，且过短公式必须复核。
+6. `tools/tinybdmath_review_queue.py` 将未自动通过的真实 PDF/source 候选导出为复核 JSONL、PDF crop 图、源码上下文、PDF evidence 和视觉大模型审核 prompt；这是人工/大模型把高价值候选变成 gold 的入口。
+7. `tools/tinybdmath_apply_review.py` 将自动 verified 行与高置信 `accept/revise` 复核结果合成为独立 verified gold JSONL；空白、拒绝、低置信复核不会进入训练 gold。
 
 **边界：** LaTeX 源码只用于数据集、训练和验收。真实用户打开普通 PDF 时没有源码，生产路径只能使用 PDF 结构事实、工具候选、r3 语义复核和人工/门禁 accepted 结果。
 

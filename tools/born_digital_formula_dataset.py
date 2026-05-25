@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 from src.core.born_digital_formula_extractor import BornDigitalFormulaStructureExtractor
 from src.core.born_digital_math import MuPDFBornDigitalExtractor
+from src.core.latex_macro_expander import LatexMacroExpander, load_latex_macro_expander
 from src.core.latex_math_source_parser import extract_latex_math_spans
 from src.core.pdf_glyph_graph import RawGlyphGraphExtractor
 from src.core.symbol_identity_repair import SymbolIdentityRepairer
@@ -45,6 +46,7 @@ class SourceFormulaRecord:
     source_id: str
     kind: str
     latex: str
+    canonical_latex: str
     normalized: str
     token_count: int
     tex_path: str
@@ -56,6 +58,9 @@ class SourceFormulaRecord:
     context_after: str
     delimiter: str = ""
     parser_version: str = "latex_math_source_parser_v1"
+    macro_expansion_version: str = ""
+    macro_expansion_applied: tuple[str, ...] = ()
+    macro_expansion_warnings: tuple[str, ...] = ()
     pdf_page_hint: int | None = None
     pdf_page_window_start: int | None = None
     pdf_page_window_end: int | None = None
@@ -82,11 +87,13 @@ class FormulaDatasetCandidate:
     best_source_similarity: float
     best_source_id: str
     best_source_latex: str
+    best_source_raw_latex: str
     match_rank: int
     page_match: str
     source_pdf_page_hint: int | None
     source_pdf_page_window_start: int | None
     source_pdf_page_window_end: int | None
+    source_macro_expansion_warnings: list[str]
     warnings: list[str]
 
 
@@ -121,6 +128,17 @@ def _select_cases(case_name: str) -> list[Any]:
     return [case for case in cases if case.name == case_name]
 
 
+def custom_case(name: str, pdf: Path, latex_root: Path) -> Any:
+    class _Case:
+        pass
+
+    case = _Case()
+    case.name = name
+    case.pdf = pdf
+    case.latex_root = latex_root
+    return case
+
+
 def _source_index(
     case: Any,
     max_pages: int,
@@ -134,6 +152,7 @@ def _source_index(
         pdf=case.pdf,
         max_pages=source_page_limit,
     )
+    macro_expander = load_latex_macro_expander(case.latex_root)
     entries, _coverage = _select_source_entries_for_pdf_pages(
         _ordered_source_entries(case.latex_root),
         latex_root=case.latex_root,
@@ -147,6 +166,7 @@ def _source_index(
         for item in _source_formula_records_for_entry(
             case.latex_root,
             entry,
+            macro_expander=macro_expander,
             page_window_start=window_start,
             page_window_end=window_end,
         ):
@@ -158,6 +178,7 @@ def _source_index(
             source_id=f"src_{index:06d}",
             kind=record.kind,
             latex=record.latex,
+            canonical_latex=record.canonical_latex,
             normalized=record.normalized,
             token_count=record.token_count,
             tex_path=record.tex_path,
@@ -167,6 +188,9 @@ def _source_index(
             env=record.env,
             delimiter=record.delimiter,
             parser_version=record.parser_version,
+            macro_expansion_version=record.macro_expansion_version,
+            macro_expansion_applied=record.macro_expansion_applied,
+            macro_expansion_warnings=record.macro_expansion_warnings,
             pdf_page_hint=record.pdf_page_hint,
             pdf_page_window_start=record.pdf_page_window_start,
             pdf_page_window_end=record.pdf_page_window_end,
@@ -221,6 +245,7 @@ def _source_formula_records_for_entry(
     latex_root: Path,
     entry: Any,
     *,
+    macro_expander: LatexMacroExpander,
     page_window_start: int | None = None,
     page_window_end: int | None = None,
 ) -> list[SourceFormulaRecord]:
@@ -236,6 +261,7 @@ def _source_formula_records_for_entry(
                 span.env,
                 span.body_start,
                 span.body_end,
+                macro_expander=macro_expander,
                 delimiter=span.delimiter,
                 page_window_start=page_window_start,
                 page_window_end=page_window_end,
@@ -252,16 +278,20 @@ def _source_record(
     env: str,
     start: int,
     end: int,
+    macro_expander: LatexMacroExpander,
     delimiter: str = "",
     page_window_start: int | None = None,
     page_window_end: int | None = None,
 ) -> SourceFormulaRecord:
-    normalized = _normalize_formula_for_match(latex)
+    expansion = macro_expander.expand(latex)
+    canonical_latex = expansion.latex or latex.strip()
+    normalized = _normalize_formula_for_match(canonical_latex)
     text = str(entry.text or "")
     return SourceFormulaRecord(
         source_id="",
         kind=kind,
         latex=latex.strip(),
+        canonical_latex=canonical_latex,
         normalized=normalized,
         token_count=len(_match_tokens(normalized)),
         tex_path=_relative_source_path(entry.path, latex_root),
@@ -270,6 +300,9 @@ def _source_record(
         char_end=int(end),
         env=env,
         delimiter=delimiter,
+        macro_expansion_version=expansion.version,
+        macro_expansion_applied=expansion.applied_macros,
+        macro_expansion_warnings=expansion.warnings,
         pdf_page_hint=page_window_start,
         pdf_page_window_start=page_window_start,
         pdf_page_window_end=page_window_end,
@@ -356,11 +389,13 @@ def build_case_dataset(
                         best_source_similarity=match["similarity"],
                         best_source_id=str(match["source_id"]),
                         best_source_latex=str(match["latex"]),
+                        best_source_raw_latex=str(match.get("raw_latex", "")),
                         match_rank=int(match["rank"]),
                         page_match=str(match.get("page_match", "")),
                         source_pdf_page_hint=_optional_int(match.get("pdf_page_hint")),
                         source_pdf_page_window_start=_optional_int(match.get("pdf_page_window_start")),
                         source_pdf_page_window_end=_optional_int(match.get("pdf_page_window_end")),
+                        source_macro_expansion_warnings=list(match.get("macro_expansion_warnings", [])),
                         warnings=list(candidate.warnings),
                     )
                 )
@@ -431,13 +466,16 @@ class _SourceMatchIndex:
         record = self.records[best_index]
         return {
             "source_id": record.source_id,
-            "latex": " ".join(record.latex.split())[:240],
+            "raw_latex": " ".join(record.latex.split())[:240],
+            "canonical_latex": " ".join((record.canonical_latex or record.latex).split())[:240],
+            "latex": " ".join((record.canonical_latex or record.latex).split())[:240],
             "similarity": round(best_score, 3),
             "rank": rank,
             "page_match": self._page_match_label(record, page_num),
             "pdf_page_hint": record.pdf_page_hint,
             "pdf_page_window_start": record.pdf_page_window_start,
             "pdf_page_window_end": record.pdf_page_window_end,
+            "macro_expansion_warnings": list(record.macro_expansion_warnings),
         }
 
     def _candidate_ids(self, normalized: str, page_num: int | None, max_candidates: int) -> list[int]:

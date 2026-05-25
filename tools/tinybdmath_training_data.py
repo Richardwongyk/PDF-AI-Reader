@@ -10,10 +10,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.tinybdmath_gold_policy import source_maps, verified_gold_blockers
 
 
 @dataclass
@@ -23,6 +30,8 @@ class TinyBDTrainingRow:
     candidate_id: str
     page_num: int
     quality_label: str
+    verified_gold: bool
+    verified_gold_blockers: list[str]
     source_similarity: float
     best_source_id: str
     page_match: str
@@ -37,6 +46,8 @@ class TinyBDTrainingRow:
     r0_input_hash: str
     enriched_graph_hash: str
     latex_target: str
+    raw_source_latex: str
+    source_macro_expansion_warnings: list[str]
     pdf_text: str
 
 
@@ -50,11 +61,15 @@ class TinyBDTrainingReport:
     average_glyphs: float
     average_edges: float
     edge_hint_totals: dict[str, int]
+    verified_gold_rows: int
+    verified_gold_blockers: dict[str, int]
     low_quality_samples: list[dict[str, Any]]
 
 
 def build_training_rows(dataset_dir: Path) -> tuple[list[TinyBDTrainingRow], TinyBDTrainingReport]:
+    sources = _read_jsonl(dataset_dir / "source_formulas.jsonl")
     candidates = _read_jsonl(dataset_dir / "pdf_candidates.jsonl")
+    source_by_key, source_scope_counts = source_maps(sources)
     rows: list[TinyBDTrainingRow] = []
     for index, candidate in enumerate(candidates):
         similarity = _float(candidate.get("best_source_similarity"))
@@ -67,6 +82,11 @@ def build_training_rows(dataset_dir: Path) -> tuple[list[TinyBDTrainingRow], Tin
         unknown_after = _int(summary.get("unknown_after"))
         repaired_count = _int(summary.get("repaired_count"))
         unknown_rate = unknown_after / glyph_count if glyph_count else 0.0
+        blockers = verified_gold_blockers(
+            candidate,
+            source_by_key,
+            source_scope_counts,
+        )
         rows.append(
             TinyBDTrainingRow(
                 row_id=f"tinybd_{index:08d}",
@@ -74,6 +94,8 @@ def build_training_rows(dataset_dir: Path) -> tuple[list[TinyBDTrainingRow], Tin
                 candidate_id=str(candidate.get("candidate_id", "")),
                 page_num=_int(candidate.get("page_num")),
                 quality_label=_quality_label(similarity, glyph_count, edge_count, unknown_before, unknown_after),
+                verified_gold=not blockers,
+                verified_gold_blockers=blockers,
                 source_similarity=similarity,
                 best_source_id=str(candidate.get("best_source_id", "")),
                 page_match=str(candidate.get("page_match", "")),
@@ -88,6 +110,10 @@ def build_training_rows(dataset_dir: Path) -> tuple[list[TinyBDTrainingRow], Tin
                 r0_input_hash=str(candidate.get("r0_input_hash", "")),
                 enriched_graph_hash=str(candidate.get("enriched_graph_hash", "")),
                 latex_target=str(candidate.get("best_source_latex", "")),
+                raw_source_latex=str(candidate.get("best_source_raw_latex", "")),
+                source_macro_expansion_warnings=[
+                    str(item) for item in candidate.get("source_macro_expansion_warnings", []) if item
+                ],
                 pdf_text=str(candidate.get("pdf_text", "")),
             )
         )
@@ -120,9 +146,11 @@ def _quality_label(
 def _report(dataset_dir: Path, rows: list[TinyBDTrainingRow]) -> TinyBDTrainingReport:
     cases = Counter(row.case for row in rows)
     quality = Counter(row.quality_label for row in rows)
+    verified_blockers: Counter[str] = Counter()
     hint_totals: Counter[str] = Counter()
     for row in rows:
         hint_totals.update(row.edge_hint_counts)
+        verified_blockers.update(row.verified_gold_blockers)
     similarities = [row.source_similarity for row in rows]
     low_samples = [
         {
@@ -130,12 +158,16 @@ def _report(dataset_dir: Path, rows: list[TinyBDTrainingRow]) -> TinyBDTrainingR
             "candidate_id": row.candidate_id,
             "page_num": row.page_num,
             "quality_label": row.quality_label,
+            "verified_gold": row.verified_gold,
+            "verified_gold_blockers": row.verified_gold_blockers,
             "source_similarity": row.source_similarity,
             "page_match": row.page_match,
             "glyph_count": row.glyph_count,
             "edge_count": row.edge_count,
             "pdf_text": row.pdf_text[:160],
             "latex_target": row.latex_target[:160],
+            "raw_source_latex": row.raw_source_latex[:160],
+            "source_macro_expansion_warnings": row.source_macro_expansion_warnings,
         }
         for row in rows
         if row.quality_label in {"low_alignment", "weak_with_unknown_source", "unusable_empty_features"}
@@ -149,6 +181,8 @@ def _report(dataset_dir: Path, rows: list[TinyBDTrainingRow]) -> TinyBDTrainingR
         average_glyphs=round(sum(row.glyph_count for row in rows) / len(rows), 3) if rows else 0.0,
         average_edges=round(sum(row.edge_count for row in rows) / len(rows), 3) if rows else 0.0,
         edge_hint_totals=dict(sorted(hint_totals.items())),
+        verified_gold_rows=sum(1 for row in rows if row.verified_gold),
+        verified_gold_blockers=dict(sorted(verified_blockers.items())),
         low_quality_samples=low_samples,
     )
 

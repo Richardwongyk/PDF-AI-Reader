@@ -4,30 +4,51 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.tinybdmath_gold_policy import (
+    label_tier,
+    policy_description,
+    source_maps,
+    verified_gold_blockers,
+)
 
 
 def audit_gold(dataset_dir: Path) -> dict[str, Any]:
     sources = _read_jsonl(dataset_dir / "source_formulas.jsonl")
     candidates = _read_jsonl(dataset_dir / "pdf_candidates.jsonl")
+    source_by_key, source_scope_counts = source_maps(sources)
     source_empty = [row for row in sources if not str(row.get("latex", "")).strip()]
     source_duplicates = _duplicates(sources, key="normalized")
     env_counts = Counter(str(row.get("env", "")) for row in sources)
     parser_counts = Counter(str(row.get("parser_version", "")) for row in sources)
-    candidate_label_counts = Counter(_label_tier(row) for row in candidates)
+    candidate_label_counts = Counter(label_tier(row) for row in candidates)
     page_match_counts = Counter(str(row.get("page_match", "")) or "missing" for row in candidates)
     tier_by_page_match: dict[str, dict[str, int]] = {}
     for row in candidates:
         page_match = str(row.get("page_match", "")) or "missing"
         tier_by_page_match.setdefault(page_match, {})
-        tier = _label_tier(row)
+        tier = label_tier(row)
         tier_by_page_match[page_match][tier] = tier_by_page_match[page_match].get(tier, 0) + 1
     risky = [
         row for row in candidates
-        if _label_tier(row) in {"weak_label", "unmatched_label"}
+        if label_tier(row) in {"weak_label", "unmatched_label"}
     ]
+    verified_rows: list[dict[str, Any]] = []
+    blocked_reasons: Counter[str] = Counter()
+    for row in candidates:
+        reasons = verified_gold_blockers(row, source_by_key, source_scope_counts)
+        if reasons:
+            blocked_reasons.update(reasons)
+        else:
+            verified_rows.append(row)
     return {
         "schema_version": "tinybdmath_gold_audit_v1",
         "dataset_dir": str(dataset_dir),
@@ -53,20 +74,15 @@ def audit_gold(dataset_dir: Path) -> dict[str, Any]:
             "risky_label_samples": _candidate_samples(risky),
             "note": "Only exact/verified labels should be used as gold targets. Near/weak/unmatched rows are useful for recall/error mining, not unquestioned supervised labels.",
         },
+        "verified_gold": {
+            "rows": len(verified_rows),
+            "policy": policy_description(),
+            "blocked_reasons": dict(sorted(blocked_reasons.items())),
+            "samples": _candidate_samples(verified_rows),
+            "note": "This is the only automatically generated subset intended to behave like gold labels. Everything else is audit/error-mining data until manually verified.",
+        },
         "status": _status(source_empty, candidates),
     }
-
-
-def _label_tier(row: dict[str, Any]) -> str:
-    sim = _float(row.get("best_source_similarity"))
-    if sim >= 0.999:
-        return "exact_label"
-    if sim >= 0.92:
-        return "near_label"
-    if sim >= 0.55:
-        return "weak_label"
-    return "unmatched_label"
-
 
 def _duplicates(rows: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
     counts: Counter[str] = Counter(str(row.get(key, "")) for row in rows if str(row.get(key, "")))
@@ -88,7 +104,6 @@ def _duplicates(rows: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]
             )
     return result
 
-
 def _samples(rows: list[dict[str, Any]], limit: int = 30) -> list[dict[str, Any]]:
     return rows[:limit]
 
@@ -100,7 +115,7 @@ def _candidate_samples(rows: list[dict[str, Any]], limit: int = 40) -> list[dict
             "candidate_id": row.get("candidate_id", ""),
             "page_num": row.get("page_num", 0),
             "similarity": row.get("best_source_similarity", 0.0),
-            "tier": _label_tier(row),
+            "tier": label_tier(row),
             "page_match": row.get("page_match", ""),
             "pdf_text": str(row.get("pdf_text", ""))[:160],
             "best_source_latex": str(row.get("best_source_latex", ""))[:160],
@@ -130,13 +145,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(value, dict):
                 rows.append(value)
     return rows
-
-
-def _float(value: object) -> float:
-    try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def main() -> int:
