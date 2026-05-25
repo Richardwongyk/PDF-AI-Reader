@@ -2,7 +2,7 @@
 
 日期：2026-05-25
 
-实现状态：r0.5 MVP 已落地到 `src/core/symbol_identity_repair.py`。当前版本只做保守非视觉身份修复：已知 PDF Unicode 直接保留，`glyph_name` 走内置静态映射，同 `normalized_font+cid` 的已知锚点可传播；冲突或证据不足时保留 unknown 并写 warnings。真实 AGL/texglyphlist/TeX encoding/fonttools cmap、outline/path shape classifier 和独立 r0.5 落库仍是下一步。
+实现状态：r0.5 MVP 已落地到 `src/core/symbol_identity_repair.py`，并通过 `FormulaScanRound.SYMBOL_IDENTITY_REPAIR` 写入 `formula_round_jobs`。当前版本只做保守非视觉身份修复：已知 PDF Unicode 直接保留，`glyph_name` 走内置静态映射，同 `normalized_font+cid` 的已知锚点可传播；冲突或证据不足时保留 unknown 并写 warnings。同 input hash 二次运行跳过已完成记录。真实 AGL/texglyphlist/TeX encoding/fonttools cmap、outline/path shape classifier 仍是下一步。
 
 ## 1. 结论
 

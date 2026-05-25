@@ -182,7 +182,9 @@ def run_pipeline_case(
 
     flow = FormulaIndexFlow(store=formula_store)
 
-    rounds.append(_run_r0(flow, formula_store, filepath, doc_hash, blocks, start_page, pages_scanned))
+    r0_report, r05_report = _run_r0(flow, formula_store, filepath, doc_hash, blocks, start_page, pages_scanned)
+    rounds.append(r0_report)
+    rounds.append(r05_report)
     rounds.append(_run_r1(formula_store, filepath, doc_hash, blocks, limit=r1_limit))
     rounds.append(
         _run_r2(
@@ -339,9 +341,10 @@ def _run_r0(
     blocks: list[DocumentBlock],
     start_page: int,
     pages_scanned: int,
-) -> RoundReport:
+) -> tuple[RoundReport, RoundReport]:
     started = time.perf_counter()
     pages = list(range(start_page, start_page + pages_scanned))
+    r05_before = store.round_counts(doc_hash, FormulaScanRound.SYMBOL_IDENTITY_REPAIR)
     queued = store.enqueue_pages(
         doc_hash,
         filepath,
@@ -380,19 +383,37 @@ def _run_r0(
         failed += len(payload.get("failed", []) or [])
         flow._on_page_scan_finished(payload, filepath, 1)
     counts = store.round_counts(doc_hash, FormulaScanRound.PDF_STRUCTURE)
+    r05_counts = store.round_counts(doc_hash, FormulaScanRound.SYMBOL_IDENTITY_REPAIR)
+    r05_done_before = r05_before.get(f"{FormulaScanRound.SYMBOL_IDENTITY_REPAIR.value}:done", 0)
+    r05_done_after = r05_counts.get(f"{FormulaScanRound.SYMBOL_IDENTITY_REPAIR.value}:done", 0)
     status = "done" if failed == 0 else "partial"
-    return RoundReport(
-        round=FormulaScanRound.PDF_STRUCTURE.value,
-        status=status,
-        elapsed_sec=round(time.perf_counter() - started, 3),
-        counts=counts,
-        details={
-            "queued_pages": queued,
-            "processed_pages": len(pending_tasks),
-            "done_pages": done_pages,
-            "failed_pages": failed,
-            "skipped_completed_pages": max(0, len(pages) - len(pending_tasks)),
-        },
+    elapsed = round(time.perf_counter() - started, 3)
+    return (
+        RoundReport(
+            round=FormulaScanRound.PDF_STRUCTURE.value,
+            status=status,
+            elapsed_sec=elapsed,
+            counts=counts,
+            details={
+                "queued_pages": queued,
+                "processed_pages": len(pending_tasks),
+                "done_pages": done_pages,
+                "failed_pages": failed,
+                "skipped_completed_pages": max(0, len(pages) - len(pending_tasks)),
+            },
+        ),
+        RoundReport(
+            round=FormulaScanRound.SYMBOL_IDENTITY_REPAIR.value,
+            status="done" if r05_counts else "skipped",
+            elapsed_sec=0.0,
+            counts=r05_counts,
+            details={
+                "source_round": FormulaScanRound.PDF_STRUCTURE.value,
+                "new_or_updated_records": max(0, r05_done_after - r05_done_before),
+                "skipped_same_input": r05_done_before if not pending_tasks else 0,
+                "persisted_records": r05_done_after,
+            },
+        ),
     )
 
 

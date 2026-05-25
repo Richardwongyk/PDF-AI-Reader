@@ -251,7 +251,8 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 
 - Raw Glyph Graph schema 已由 `src/core/pdf_glyph_graph.py` 落地，r0 evidence 已携带局部 graph hash/health/glyph/vector/image。
 - Enriched Glyph Graph schema MVP 已由 `src/core/symbol_identity_repair.py` 落地，当前支持 PDF text/glyph name/same font+CID 三类保守身份证据。
-- 下一步把 Enriched Glyph Graph 作为独立 r0.5 轮次落库，并扩展真实 AGL/texglyphlist/font cmap/outline 候选。
+- Enriched Glyph Graph 已作为 `r0_5_symbol_identity_repair` 独立轮次写入 `formula_round_jobs`，按 input hash 跳过。
+- 下一步扩展真实 AGL/texglyphlist/font cmap/outline 候选。
 - edge candidate generator。
 - 可视化工具。
 
@@ -289,8 +290,9 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 
 1. 已完成 Raw Glyph Graph schema。
 2. 已完成 r0.5 静态映射 MVP，生成 Enriched Glyph Graph。
-3. 下一步补 r0.5 独立落库、真实映射资源和更强符号身份修复。
-4. 生成 100-1000 条 synthetic 公式 PDF graph。
-5. 写 MLP edge scorer baseline。
-6. 接入 r2a candidate-only。
-7. 用 Attention/Napkin 验证不污染正文和 RAG。
+3. 已完成 r0.5 独立落库最小闭环。
+4. 下一步补真实映射资源和更强符号身份修复。
+5. 生成 100-1000 条 synthetic 公式 PDF graph。
+6. 写 MLP edge scorer baseline。
+7. 接入 r2a candidate-only。
+8. 用 Attention/Napkin 验证不污染正文和 RAG。

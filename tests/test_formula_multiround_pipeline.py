@@ -139,6 +139,7 @@ def test_multiround_pipeline_reports_r0_to_r4(monkeypatch, tmp_path) -> None:
     rounds = {item.round: item for item in report.rounds}
     assert set(rounds) == {
         FormulaScanRound.PDF_STRUCTURE.value,
+        FormulaScanRound.SYMBOL_IDENTITY_REPAIR.value,
         FormulaScanRound.CACHED_RECOGNITION.value,
         FormulaScanRound.LOCAL_HIGH_PRECISION.value,
         FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value,

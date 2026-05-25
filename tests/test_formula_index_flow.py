@@ -365,7 +365,21 @@ def test_formula_index_flow_persists_born_digital_structure_candidates(tmp_path)
                     "model_version": "pymupdf_rawdict_layout_v1",
                     "preprocess_version": "glyph-vector-json-v1",
                     "warnings": ["review_only"],
-                    "evidence": {"source": "pdf_structure_display_region"},
+                    "evidence": {
+                        "source": "pdf_structure_display_region",
+                        "enriched_glyph_graph": {
+                            "schema_version": "enriched_glyph_graph_v1",
+                            "repair_version": "symbol_identity_repair_v1",
+                            "input_hash": "repair-hash-1",
+                            "raw_input_hash": "raw-hash-1",
+                            "summary": {
+                                "glyph_count": 3,
+                                "unknown_before": 1,
+                                "unknown_after": 0,
+                                "repaired_count": 1,
+                            },
+                        },
+                    },
                 }
             ],
         },
@@ -397,6 +411,15 @@ def test_formula_index_flow_persists_born_digital_structure_candidates(tmp_path)
         and record.result_json["input_hash"] == "glyph-hash-1"
         for record in records
     )
+    repair_records = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.SYMBOL_IDENTITY_REPAIR,
+    )
+    assert len(repair_records) == 1
+    assert repair_records[0].status == "done"
+    assert repair_records[0].result_json["input_hash"] == "repair-hash-1"
+    assert repair_records[0].result_json["raw_input_hash"] == "raw-hash-1"
+    assert repair_records[0].result_json["summary"]["repaired_count"] == 1
     assert store.round_pending_count(
         "doc-1",
         scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
@@ -441,6 +464,50 @@ def test_formula_index_flow_keeps_high_confidence_structure_candidates_out_of_r2
         "doc-1",
         scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
     ) == 0
+
+
+def test_formula_index_flow_reuses_done_symbol_identity_same_input(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages("doc-1", "paper.pdf", [0])
+    flow = FormulaIndexFlow(store=store)
+    payload = {
+        "doc_hash": "doc-1",
+        "scan_round": FormulaScanRound.PDF_STRUCTURE.value,
+        "done_pages": [0],
+        "failed": [],
+        "detected": [],
+        "structure_candidates": [
+            {
+                "candidate_id": "p0_r0_0",
+                "page_num": 0,
+                "bbox": (10, 20, 110, 40),
+                "text": "x+y",
+                "latex": r"x+y",
+                "score": 0.92,
+                "input_hash": "glyph-hash-1",
+                "warnings": [],
+                "evidence": {
+                    "enriched_glyph_graph": {
+                        "schema_version": "enriched_glyph_graph_v1",
+                        "repair_version": "symbol_identity_repair_v1",
+                        "input_hash": "repair-hash-1",
+                        "raw_input_hash": "raw-hash-1",
+                        "summary": {"repaired_count": 0},
+                    },
+                },
+            }
+        ],
+    }
+
+    flow._on_page_scan_finished(payload, "paper.pdf", 1)
+    first = store.list_round_records("doc-1", scan_round=FormulaScanRound.SYMBOL_IDENTITY_REPAIR)[0]
+    flow._on_page_scan_finished(payload, "paper.pdf", 1)
+    records = store.list_round_records("doc-1", scan_round=FormulaScanRound.SYMBOL_IDENTITY_REPAIR)
+
+    assert len(records) == 1
+    assert records[0].status == "done"
+    assert records[0].attempts == first.attempts
+    assert records[0].result_json["input_hash"] == "repair-hash-1"
 
 
 def test_formula_index_flow_does_not_auto_retry_failed_page_scans(tmp_path) -> None:
