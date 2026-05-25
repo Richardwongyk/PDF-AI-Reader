@@ -194,10 +194,20 @@ def _find_unescaped(text: str, needle: str, start: int) -> int:
 
 
 def _find_inline_dollar_close(text: str, start: int) -> int:
+    brace_depth = 0
     pos = text.find("$", start)
+    cursor = start
     while pos >= 0:
+        while cursor < pos:
+            if not _is_escaped(text, cursor):
+                if text[cursor] == "{":
+                    brace_depth += 1
+                elif text[cursor] == "}" and brace_depth > 0:
+                    brace_depth -= 1
+            cursor += 1
         if not _is_escaped(text, pos) and not text.startswith("$$", pos):
-            return pos
+            if brace_depth == 0:
+                return pos
         pos = text.find("$", pos + 1)
     return -1
 
