@@ -35,8 +35,11 @@ def train_from_rows_file(
     learning_rate: float = 0.015,
     validation_fraction: float = 0.20,
     seed: int = 20260525,
+    min_similarity: float = 0.0,
+    include_quality: set[str] | None = None,
 ) -> dict[str, Any]:
-    rows = _read_jsonl(rows_path)
+    all_rows = _read_jsonl(rows_path)
+    rows = _filter_rows(all_rows, min_similarity=min_similarity, include_quality=include_quality)
     train_rows, validation_rows = train_validation_split(
         rows,
         validation_fraction=validation_fraction,
@@ -62,7 +65,8 @@ def train_from_rows_file(
         "model_path": str(model_path),
         "config": asdict(config),
         "row_counts": {
-            "all": len(rows),
+            "all_input": len(all_rows),
+            "used": len(rows),
             "train": len(train_rows),
             "validation": len(validation_rows),
         },
@@ -95,6 +99,40 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _filter_rows(
+    rows: list[dict[str, Any]],
+    *,
+    min_similarity: float,
+    include_quality: set[str] | None,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if include_quality is not None and str(row.get("quality_label", "")) not in include_quality:
+            continue
+        try:
+            similarity = float(row.get("source_similarity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            similarity = 0.0
+        if similarity < min_similarity:
+            continue
+        result.append(row)
+    return result
+
+
+def parse_quality_filter(value: str | list[str] | tuple[str, ...] | None) -> set[str] | None:
+    if value is None:
+        return None
+    raw_items: list[str] = []
+    if isinstance(value, str):
+        raw_items = [value]
+    else:
+        raw_items = [str(item) for item in value]
+    labels: set[str] = set()
+    for raw in raw_items:
+        labels.update(item.strip() for item in raw.split(",") if item.strip())
+    return labels or None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=Path, required=True)
@@ -104,6 +142,13 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=0.015)
     parser.add_argument("--validation-fraction", type=float, default=0.20)
     parser.add_argument("--seed", type=int, default=20260525)
+    parser.add_argument("--min-similarity", type=float, default=0.0)
+    parser.add_argument(
+        "--include-quality",
+        action="append",
+        default=[],
+        help="Quality labels to keep. Can be comma-separated or repeated.",
+    )
     args = parser.parse_args()
 
     payload = train_from_rows_file(
@@ -114,6 +159,8 @@ def main() -> int:
         learning_rate=args.learning_rate,
         validation_fraction=args.validation_fraction,
         seed=args.seed,
+        min_similarity=args.min_similarity,
+        include_quality=parse_quality_filter(args.include_quality),
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0

@@ -1944,6 +1944,16 @@ def _json_hash(value: object) -> str:
     return hashlib.sha256(data.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _json_ready(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
+
+
 def _fusion_coverage(candidates: list[dict[str, object]]) -> float:
     stages = {str(item.get("stage", "")) for item in candidates if str(item.get("stage", ""))}
     expected = {"parsed_blocks", "pdf_structure", "local_precise", "cloud_semantic"}
@@ -2296,7 +2306,7 @@ def main() -> int:
     ]
     payload = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "args": vars(args),
+        "args": _json_ready(vars(args)),
         "reports": [asdict(report) for report in reports],
     }
     output = ROOT / args.output

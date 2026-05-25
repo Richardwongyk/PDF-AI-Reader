@@ -25,6 +25,7 @@ class TinyBDTrainingRow:
     quality_label: str
     source_similarity: float
     best_source_id: str
+    page_match: str
     glyph_count: int
     edge_count: int
     edge_hint_counts: dict[str, int]
@@ -75,6 +76,7 @@ def build_training_rows(dataset_dir: Path) -> tuple[list[TinyBDTrainingRow], Tin
                 quality_label=_quality_label(similarity, glyph_count, edge_count, unknown_before, unknown_after),
                 source_similarity=similarity,
                 best_source_id=str(candidate.get("best_source_id", "")),
+                page_match=str(candidate.get("page_match", "")),
                 glyph_count=glyph_count,
                 edge_count=edge_count,
                 edge_hint_counts=_dict_int(candidate.get("edge_hint_counts")),
@@ -129,6 +131,7 @@ def _report(dataset_dir: Path, rows: list[TinyBDTrainingRow]) -> TinyBDTrainingR
             "page_num": row.page_num,
             "quality_label": row.quality_label,
             "source_similarity": row.source_similarity,
+            "page_match": row.page_match,
             "glyph_count": row.glyph_count,
             "edge_count": row.edge_count,
             "pdf_text": row.pdf_text[:160],

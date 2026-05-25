@@ -18,8 +18,8 @@ from src.core.born_digital_math import (
     BornDigitalPage,
     MuPDFBornDigitalExtractor,
 )
-from src.core.pdf_glyph_graph import RawGlyphGraphExtractor
-from src.core.symbol_identity_repair import SymbolIdentityRepairer
+from src.core.pdf_glyph_graph import RawGlyphGraph, RawGlyphGraphExtractor
+from src.core.symbol_identity_repair import EnrichedGlyphGraph, SymbolIdentityRepairer
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,22 @@ class BornDigitalFormulaStructureExtractor:
     ) -> list[BornDigitalFormulaCandidate]:
         raw_graph = self._graph_extractor.from_page_facts(page_facts)
         enriched_graph = self._identity_repairer.repair_graph(raw_graph)
+        return self.extract_candidates_from_page_graphs(
+            page_facts,
+            raw_graph,
+            enriched_graph,
+            existing_ids=existing_ids,
+        )
+
+    def extract_candidates_from_page_graphs(
+        self,
+        page_facts: BornDigitalPage,
+        raw_graph: RawGlyphGraph,
+        enriched_graph: EnrichedGlyphGraph,
+        existing_ids: set[str] | None = None,
+    ) -> list[BornDigitalFormulaCandidate]:
+        """Extract candidates from already-built page facts and glyph graphs."""
+
         regions = self._auditor.display_formula_regions(page_facts)
         try:
             diagnostics = {

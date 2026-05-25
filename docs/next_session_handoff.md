@@ -10,6 +10,8 @@
 
 2026-05-25 最新补充：r3/r4 已不只是设计文档。`FormulaSemanticReviewService` 可以从 fusion payload 合成 inline/formula 候选块，真实 DeepSeek smoke 已跑通小批量候选，只写 JSON；r3 prompt 现在给云端的是压缩证据包而不是整段数据库 JSON，并保留 inline 来源段落 `source_context`，要求只输出 JSON 对象。若云端返回非 JSON，失败会落库并记录 raw response 摘要，便于审计和重试。r3 入队现在带 `semantic_review_priority` 和可读的 `review_priority_reason`，按证据价值、冲突/风险、相似度缺口和 LaTeX 复杂度优先消费；低价值单字符 inline 会延后但不会丢弃。r3 完成后仍保留 `review_candidate`、`queued_input_hash`、`review_input_hash` 和优先级原因，方便审计“云端到底审了哪个候选”。行内公式候选现在会把 PDF 字体、字号、bbox、math font span 和脚本字号证据写入 `inline_pdf_evidence`，传到 fusion/r3；例如 Attention 前 2 页 `ht−1` 已带 CMMI10/CMMI7/CMSY7/CMR7、6.974/9.963pt 和 `has_script_size=true`。这只是证据通道，不是手写 LaTeX 解析器，也不自动接受。`FormulaKnowledgeGraphService` 已消费 `r4_knowledge_graph` 队列，把普通公式和 fusion candidate-only 公式写入 `GraphIndexStore` artifact。`tools/formula_multiround_pipeline.py` 现在支持 `--drain-r2/--drain-r3/--drain-r4/--drain-r5`，报告 `formula_fusion_snapshots` 展示每次 fusion 的写入、缓存命中和派生 r2/r3/r5 入队数量。新增质量门禁：如果 r2 本地 MFR 候选比 born-digital 结构候选更差，会记录 `local_precise_degraded_against_born_digital`，不能进入 `ready_for_manual_accept`，不能写正文/RAG/GraphRAG accepted。
 
+2026-05-25 TinyBDMath 数据集补充：新增 `src/core/latex_math_source_parser.py` 作为训练/审计专用 LaTeX math span 扫描器，保留源码 offset、delimiter、env、上下文；`tools/born_digital_formula_dataset.py` 和 `tools/formula_latex_audit.py` 已统一走该扫描器，不再用多套正则提取 source gold。新增 `tools/tinybdmath_sharded_dataset.py`、`tools/tinybdmath_shard_consolidate.py`、`tools/tinybdmath_gold_audit.py` 和 `tools/run_tinybdmath_full_data_pipeline.ps1`，用于 Attention/Napkin 页级分片、断点续跑、原子写入、合并、gold/label tier 审计、baseline/PyTorch 训练。PDF 候选标签引入 TOC 页锚点窗口，优先同页/近页源码匹配，短公式也先受页窗口约束，避免全书范围误配。当前分片版本为 `tinybdmath_pdf_source_page_anchor_v2`；旧版本分片不会被合并器当成新数据。Attention 15 页和 Napkin 第 9-16 页 smoke 已通过，v2 全量构建正在后台写入 `test_artifacts/tinybdmath_sharded_full_page_anchor_v2`，该目录不得提交。
+
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
 ## 当前真实状态
@@ -23,6 +25,7 @@
 - 当前代码在 `6cb0860 Add formula multiround pipeline runner`、`a83986d Add formula fusion quality gates` 之后继续推进了 fusion 持久化、r4 公式图谱、r5 增量知识库接线、多工具 worker 扩展、行内公式候选审计和反硬编码 guard：r0 不走 OCR，不默认调用自写 LaTeX 重建器，只写 born-digital PDF facts 候选；r2 通过低置信结构候选或显式精扫调用 Paddle/Pix2Text/MinerU/PEK 等隔离 worker 写未接受候选；r3 可用 mock 或真实 DeepSeek，并读取候选/fusion 证据；r4 写结构图谱任务和 artifact；r5 只消费 accepted 变化，按 input hash 增量 upsert。
 - 防休眠脚本仍应检查，不要假设一定有效。脚本在 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`。
 - 当前工作树必须以 `git status --short` 为准。不要随手回退，也不要把 `测试资料/`、日志、缓存、临时 benchmark 输出提交。
+- 若看到 `tools/tinybdmath_sharded_dataset.py --case all --workers 3 --output-dir test_artifacts\tinybdmath_sharded_full_page_anchor_v2` 进程，说明 v2 全量真实数据集仍在跑；可以用 `tools/tinybdmath_shard_consolidate.py --output-dir test_artifacts\tinybdmath_sharded_full_page_anchor_v2 --min-age-sec 10` 合并已完成分片做阶段审计，但不要提交 `test_artifacts/`。
 
 ## 必须遵守的设计哲学
 

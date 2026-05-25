@@ -14,7 +14,7 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import fitz
 
@@ -24,13 +24,12 @@ if str(ROOT) not in sys.path:
 
 from src.core.born_digital_formula_extractor import BornDigitalFormulaStructureExtractor
 from src.core.born_digital_math import MuPDFBornDigitalExtractor
+from src.core.latex_math_source_parser import extract_latex_math_spans
 from src.core.pdf_glyph_graph import RawGlyphGraphExtractor
 from src.core.symbol_identity_repair import SymbolIdentityRepairer
 from src.core.tinybdmath_features import TinyBDFeatureExtractor, TinyBDFeatureGraph
 from src.infra.file_hash import compute_sha256
 from tools.formula_latex_audit import (
-    DISPLAY_ENVS,
-    SOURCE_FORMULA_PATTERNS,
     _cases,
     _extract_source_formulas_detailed,
     _formula_similarity,
@@ -55,6 +54,12 @@ class SourceFormulaRecord:
     env: str
     context_before: str
     context_after: str
+    delimiter: str = ""
+    parser_version: str = "latex_math_source_parser_v1"
+    pdf_page_hint: int | None = None
+    pdf_page_window_start: int | None = None
+    pdf_page_window_end: int | None = None
+    page_alignment_source: str = ""
 
 
 @dataclass
@@ -78,6 +83,10 @@ class FormulaDatasetCandidate:
     best_source_id: str
     best_source_latex: str
     match_rank: int
+    page_match: str
+    source_pdf_page_hint: int | None
+    source_pdf_page_window_start: int | None
+    source_pdf_page_window_end: int | None
     warnings: list[str]
 
 
@@ -112,21 +121,35 @@ def _select_cases(case_name: str) -> list[Any]:
     return [case for case in cases if case.name == case_name]
 
 
-def _source_index(case: Any, max_pages: int, match_scope: str) -> tuple[list[SourceFormulaRecord], int, int]:
+def _source_index(
+    case: Any,
+    max_pages: int,
+    match_scope: str,
+    *,
+    start_page: int = 0,
+) -> tuple[list[SourceFormulaRecord], int, int]:
+    source_page_limit = max(0, int(start_page)) + max(0, int(max_pages)) if max_pages > 0 else 0
     extraction = _extract_source_formulas_detailed(
         case.latex_root,
         pdf=case.pdf,
-        max_pages=max_pages,
+        max_pages=source_page_limit,
     )
     entries, _coverage = _select_source_entries_for_pdf_pages(
         _ordered_source_entries(case.latex_root),
         latex_root=case.latex_root,
         pdf=case.pdf,
-        max_pages=max_pages,
+        max_pages=source_page_limit,
     )
     records: list[SourceFormulaRecord] = []
+    page_windows = _entry_page_windows(entries, max_pages=source_page_limit)
     for entry in entries:
-        for item in _source_formula_records_for_entry(case.latex_root, entry):
+        window_start, window_end = page_windows.get(int(entry.order), (None, None))
+        for item in _source_formula_records_for_entry(
+            case.latex_root,
+            entry,
+            page_window_start=window_start,
+            page_window_end=window_end,
+        ):
             if match_scope != "all" and item.kind != match_scope:
                 continue
             records.append(item)
@@ -142,30 +165,82 @@ def _source_index(case: Any, max_pages: int, match_scope: str) -> tuple[list[Sou
             char_start=record.char_start,
             char_end=record.char_end,
             env=record.env,
+            delimiter=record.delimiter,
+            parser_version=record.parser_version,
+            pdf_page_hint=record.pdf_page_hint,
+            pdf_page_window_start=record.pdf_page_window_start,
+            pdf_page_window_end=record.pdf_page_window_end,
+            page_alignment_source=record.page_alignment_source,
             context_before=record.context_before,
             context_after=record.context_after,
         )
     return records, len(extraction.display), len(extraction.inline)
 
 
-def _source_formula_records_for_entry(latex_root: Path, entry: Any) -> list[SourceFormulaRecord]:
+def _entry_page_windows(entries: list[Any], *, max_pages: int) -> dict[int, tuple[int | None, int | None]]:
+    mapped: list[tuple[int, int]] = []
+    for entry in entries:
+        page = getattr(entry, "effective_page", None)
+        if page is None:
+            continue
+        try:
+            mapped.append((int(entry.order), int(page)))
+        except (TypeError, ValueError):
+            continue
+    next_by_order: dict[int, int | None] = {}
+    for index, (order, page) in enumerate(mapped):
+        next_page: int | None = None
+        for _next_order, candidate_page in mapped[index + 1 :]:
+            if candidate_page > page:
+                next_page = candidate_page
+                break
+        next_by_order[order] = next_page
+
+    current_page: int | None = None
+    current_next: int | None = None
+    result: dict[int, tuple[int | None, int | None]] = {}
+    for entry in entries:
+        page = getattr(entry, "effective_page", None)
+        if page is not None:
+            try:
+                current_page = int(page)
+                current_next = next_by_order.get(int(entry.order))
+            except (TypeError, ValueError):
+                current_page = None
+                current_next = None
+        end_page = current_next - 1 if current_next is not None and current_page is not None else None
+        if max_pages > 0 and current_page is not None:
+            end_page = min(end_page if end_page is not None else max_pages, max_pages)
+        if current_page is not None and end_page is not None and end_page < current_page:
+            end_page = current_page
+        result[int(entry.order)] = (current_page, end_page)
+    return result
+
+
+def _source_formula_records_for_entry(
+    latex_root: Path,
+    entry: Any,
+    *,
+    page_window_start: int | None = None,
+    page_window_end: int | None = None,
+) -> list[SourceFormulaRecord]:
     records: list[SourceFormulaRecord] = []
     text = str(entry.text or "")
-    for env in DISPLAY_ENVS:
-        escaped_env = env.replace("*", r"\*")
-        import re
-
-        pattern = re.compile(
-            rf"\\begin\{{{escaped_env}\}}(.+?)\\end\{{{escaped_env}\}}",
-            re.DOTALL,
+    for span in extract_latex_math_spans(text):
+        records.append(
+            _source_record(
+                latex_root,
+                entry,
+                span.body,
+                span.kind,
+                span.env,
+                span.body_start,
+                span.body_end,
+                delimiter=span.delimiter,
+                page_window_start=page_window_start,
+                page_window_end=page_window_end,
+            )
         )
-        for match in pattern.finditer(text):
-            records.append(_source_record(latex_root, entry, match.group(1), "display", env, match.start(1), match.end(1)))
-    for index, pattern in enumerate(SOURCE_FORMULA_PATTERNS):
-        kind = "display" if index in (0, 1) else "inline"
-        env = ("bracket_math", "dollar_display", "paren_inline", "dollar_inline")[index]
-        for match in pattern.finditer(text):
-            records.append(_source_record(latex_root, entry, match.group(1), kind, env, match.start(1), match.end(1)))
     return sorted(records, key=lambda item: (item.tex_order, item.char_start, item.char_end))
 
 
@@ -177,6 +252,9 @@ def _source_record(
     env: str,
     start: int,
     end: int,
+    delimiter: str = "",
+    page_window_start: int | None = None,
+    page_window_end: int | None = None,
 ) -> SourceFormulaRecord:
     normalized = _normalize_formula_for_match(latex)
     text = str(entry.text or "")
@@ -191,6 +269,11 @@ def _source_record(
         char_start=int(start),
         char_end=int(end),
         env=env,
+        delimiter=delimiter,
+        pdf_page_hint=page_window_start,
+        pdf_page_window_start=page_window_start,
+        pdf_page_window_end=page_window_end,
+        page_alignment_source="pdf_toc_effective_page" if page_window_start is not None else "",
         context_before=" ".join(text[max(0, start - 180) : start].split())[-180:],
         context_after=" ".join(text[end : end + 180].split())[:180],
     )
@@ -204,7 +287,12 @@ def build_case_dataset(
     match_scope: str = "all",
 ) -> FormulaDatasetReport:
     started = time.perf_counter()
-    source_index, display_count, inline_count = _source_index(case, max_pages, match_scope)
+    source_index, display_count, inline_count = _source_index(
+        case,
+        max_pages,
+        match_scope,
+        start_page=start_page,
+    )
     source_match_index = _SourceMatchIndex(source_index)
     doc_hash = compute_sha256(str(case.pdf))[:16]
     page_extractor = MuPDFBornDigitalExtractor()
@@ -229,13 +317,17 @@ def build_case_dataset(
             enriched_graph = repairer.repair_graph(raw_graph)
             raw_unknown_glyphs += raw_graph.health.unknown_glyph_count
             repaired_glyphs += enriched_graph.summary.repaired_count
-            candidates = structure_extractor.extract_candidates_from_page_facts(page_facts)
+            candidates = structure_extractor.extract_candidates_from_page_graphs(
+                page_facts,
+                raw_graph,
+                enriched_graph,
+            )
             for candidate in candidates:
                 feature_graph = feature_extractor.extract_region(enriched_graph, candidate.bbox)
                 feature_edges += len(feature_graph.edges)
                 hint_counts = _edge_hint_counts(feature_graph)
                 edge_hint_totals.update(hint_counts)
-                match = source_match_index.best_match(candidate.latex)
+                match = source_match_index.best_match(candidate.latex, page_num=page_num)
                 feature_graph_row = {
                     "case": case.name,
                     "candidate_id": candidate.candidate_id,
@@ -265,6 +357,10 @@ def build_case_dataset(
                         best_source_id=str(match["source_id"]),
                         best_source_latex=str(match["latex"]),
                         match_rank=int(match["rank"]),
+                        page_match=str(match.get("page_match", "")),
+                        source_pdf_page_hint=_optional_int(match.get("pdf_page_hint")),
+                        source_pdf_page_window_start=_optional_int(match.get("pdf_page_window_start")),
+                        source_pdf_page_window_end=_optional_int(match.get("pdf_page_window_end")),
                         warnings=list(candidate.warnings),
                     )
                 )
@@ -300,15 +396,26 @@ class _SourceMatchIndex:
     def __init__(self, source_index: list[SourceFormulaRecord]) -> None:
         self.records = source_index
         self.token_index: dict[str, list[int]] = {}
+        self.page_index: dict[int, list[int]] = {}
+        self.open_page_indexes: list[int] = []
         for index, record in enumerate(source_index):
             for token in _match_tokens(record.normalized):
                 self.token_index.setdefault(token, []).append(index)
+            pages = list(self._record_pages(record))
+            if not pages and record.pdf_page_window_start is not None:
+                self.open_page_indexes.append(index)
+            for page in pages:
+                self.page_index.setdefault(page, []).append(index)
 
-    def best_match(self, latex: str, max_candidates: int = 80) -> dict[str, object]:
+    def best_match(self, latex: str, page_num: int | None = None, max_candidates: int = 80) -> dict[str, object]:
         normalized = _normalize_formula_for_match(latex)
         if not normalized or not self.records:
             return {"source_id": "", "latex": "", "similarity": 0.0, "rank": -1}
-        candidate_ids = self._candidate_ids(normalized, max_candidates=max_candidates)
+        candidate_ids = self._candidate_ids(
+            normalized,
+            page_num=page_num,
+            max_candidates=max_candidates,
+        )
         best_score = 0.0
         best_index = -1
         rank = -1
@@ -327,22 +434,116 @@ class _SourceMatchIndex:
             "latex": " ".join(record.latex.split())[:240],
             "similarity": round(best_score, 3),
             "rank": rank,
+            "page_match": self._page_match_label(record, page_num),
+            "pdf_page_hint": record.pdf_page_hint,
+            "pdf_page_window_start": record.pdf_page_window_start,
+            "pdf_page_window_end": record.pdf_page_window_end,
         }
 
-    def _candidate_ids(self, normalized: str, max_candidates: int) -> list[int]:
+    def _candidate_ids(self, normalized: str, page_num: int | None, max_candidates: int) -> list[int]:
         counts: Counter[int] = Counter()
         for token in _match_tokens(normalized):
             counts.update(self.token_index.get(token, []))
+        scoped_indexes = self._scoped_page_indexes(page_num)
+        scoped_set = set(scoped_indexes)
         if not counts:
-            return list(range(min(len(self.records), max_candidates)))
-        return sorted(
-            counts,
-            key=lambda index: (
-                -counts[index],
-                abs(len(self.records[index].normalized) - len(normalized)),
-                index,
-            ),
-        )[:max_candidates]
+            base = scoped_indexes[:max_candidates] if scoped_indexes else list(range(min(len(self.records), max_candidates)))
+        else:
+            base = sorted(
+                counts,
+                key=lambda index: (
+                    0 if index in scoped_set else 1,
+                    -counts[index],
+                    abs(len(self.records[index].normalized) - len(normalized)),
+                    index,
+                ),
+            )[: max(max_candidates * 6, max_candidates)]
+        if page_num is None:
+            return base[:max_candidates]
+        pdf_page = int(page_num) + 1
+        same_window = [index for index in base if self._record_covers_page(self.records[index], pdf_page)]
+        if len(same_window) >= max_candidates:
+            return same_window[:max_candidates]
+        nearby = [
+            index for index in base
+            if index not in set(same_window)
+            and self._record_near_page(self.records[index], pdf_page, radius=2)
+        ]
+        selected = same_window + nearby
+        if len(selected) >= max_candidates:
+            return selected[:max_candidates]
+        selected_set = set(selected)
+        selected.extend(index for index in base if index not in selected_set)
+        return selected[:max_candidates]
+
+    def _scoped_page_indexes(self, page_num: int | None) -> list[int]:
+        if page_num is None:
+            return []
+        pdf_page = int(page_num) + 1
+        exact = self._unique_indexes(
+            list(self.page_index.get(pdf_page, []))
+            + [
+                index for index in self.open_page_indexes
+                if self._record_covers_page(self.records[index], pdf_page)
+            ]
+        )
+        if exact:
+            return exact
+        nearby_pages: list[int] = []
+        for page in range(max(1, pdf_page - 2), pdf_page + 3):
+            nearby_pages.extend(self.page_index.get(page, []))
+        nearby_pages.extend(
+            index for index in self.open_page_indexes
+            if self._record_near_page(self.records[index], pdf_page, radius=2)
+        )
+        return self._unique_indexes(nearby_pages)
+
+    def _unique_indexes(self, indexes: Iterable[int]) -> list[int]:
+        seen: set[int] = set()
+        result: list[int] = []
+        for index in indexes:
+            if index in seen:
+                continue
+            seen.add(index)
+            result.append(index)
+        return result
+
+    def _record_pages(self, record: SourceFormulaRecord) -> list[int]:
+        start = record.pdf_page_window_start or record.pdf_page_hint
+        if start is None:
+            return []
+        if record.pdf_page_window_end is None:
+            return []
+        end = record.pdf_page_window_end or start
+        return list(range(max(1, int(start)), max(1, int(end)) + 1))
+
+    def _record_covers_page(self, record: SourceFormulaRecord, pdf_page: int) -> bool:
+        start = record.pdf_page_window_start or record.pdf_page_hint
+        if start is None:
+            return False
+        if record.pdf_page_window_end is None:
+            return pdf_page >= int(start)
+        return int(start) <= pdf_page <= int(record.pdf_page_window_end)
+
+    def _record_near_page(self, record: SourceFormulaRecord, pdf_page: int, *, radius: int) -> bool:
+        start = record.pdf_page_window_start or record.pdf_page_hint
+        if start is None:
+            return False
+        if record.pdf_page_window_end is None:
+            return pdf_page >= int(start) - radius
+        return int(start) - radius <= pdf_page <= int(record.pdf_page_window_end) + radius
+
+    def _page_match_label(self, record: SourceFormulaRecord, page_num: int | None) -> str:
+        if page_num is None:
+            return "unscoped"
+        pdf_page = int(page_num) + 1
+        if self._record_covers_page(record, pdf_page):
+            return "same_page_window"
+        if self._record_near_page(record, pdf_page, radius=2):
+            return "near_page_window"
+        if record.pdf_page_hint is not None:
+            return "outside_page_window"
+        return "no_source_page_hint"
 
 
 def _match_tokens(normalized_formula: str) -> set[str]:
@@ -356,6 +557,15 @@ def _match_tokens(normalized_formula: str) -> set[str]:
         if len(compact) >= length:
             tokens.add(compact[:length])
     return tokens
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _edge_hint_counts(feature_graph: TinyBDFeatureGraph) -> dict[str, int]:

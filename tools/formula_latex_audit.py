@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.core.formula_detector import Pix2TextMFDDetector
+from src.core.latex_math_source_parser import extract_latex_math_spans
 from src.core.models import BlockType
 from src.core.pdf_engine import DocumentChunker
 
@@ -185,18 +186,11 @@ def _extract_source_formulas_detailed(
     display: list[str] = []
     inline: list[str] = []
     for entry in selected_entries:
-        text = entry.text
-        for env in DISPLAY_ENVS:
-            escaped_env = re.escape(env)
-            pattern = re.compile(
-                rf"\\begin\{{{escaped_env}\}}(.+?)\\end\{{{escaped_env}\}}",
-                re.DOTALL,
-            )
-            display.extend(m.group(1).strip() for m in pattern.finditer(text))
-        display.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[0].finditer(text))
-        display.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[1].finditer(text))
-        inline.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[2].finditer(text))
-        inline.extend(m.group(1).strip() for m in SOURCE_FORMULA_PATTERNS[3].finditer(text))
+        for span in extract_latex_math_spans(entry.text):
+            if span.kind == "display":
+                display.append(span.normalized_body)
+            else:
+                inline.append(span.normalized_body)
 
     return SourceFormulaExtraction(
         display=display,
@@ -337,7 +331,7 @@ def _select_source_entries_for_pdf_pages(
     pdf: Path | None,
     max_pages: int,
 ) -> tuple[list[SourceTexEntry], dict[str, Any]]:
-    if max_pages <= 0 or pdf is None:
+    if pdf is None:
         return entries, _source_coverage_payload(
             entries,
             entries,
@@ -359,16 +353,21 @@ def _select_source_entries_for_pdf_pages(
         )
 
     annotated = _entries_with_toc_pages(entries, toc_pages)
-    selected = [
-        entry
-        for entry in annotated
-        if entry.effective_page is None or entry.effective_page <= max_pages
-    ]
+    if max_pages <= 0:
+        selected = annotated
+        method = "ordered_main_tex_pdf_toc_full_coverage"
+    else:
+        selected = [
+            entry
+            for entry in annotated
+            if entry.effective_page is None or entry.effective_page <= max_pages
+        ]
+        method = "ordered_main_tex_pdf_toc_file_coverage"
     return selected, _source_coverage_payload(
         annotated,
         selected,
         latex_root,
-        method="ordered_main_tex_pdf_toc_file_coverage",
+        method=method,
         max_pages=max_pages,
         toc_available=True,
     )

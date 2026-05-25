@@ -17,6 +17,7 @@ from src.core.tinybdmath_torch_backend import (
     TorchBackendUnavailable,
     train_torch_quality_model,
 )
+from tools.tinybdmath_train_baseline import _filter_rows, parse_quality_filter
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -41,9 +42,15 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--min-similarity", type=float, default=0.0)
+    parser.add_argument("--include-quality", action="append", default=[])
     args = parser.parse_args()
 
-    rows = _read_jsonl(args.rows)
+    rows = _filter_rows(
+        _read_jsonl(args.rows),
+        min_similarity=args.min_similarity,
+        include_quality=parse_quality_filter(args.include_quality),
+    )
     config = TinyBDTorchConfig(
         epochs=args.epochs,
         hidden_units=args.hidden_units,

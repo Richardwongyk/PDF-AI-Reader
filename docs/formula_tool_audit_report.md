@@ -259,6 +259,18 @@ Block 33: type=2, std=LI    → 列表项
 2. 与 MuPDF 的提取结果比对，差异处标记为 `poppler_disagree` 警告
 3. 两方一致的 glyph 文本可提升置信度
 
+### 优先级 5：真实数据集与小模型研发分层
+
+**目标：** 让 TinyBDMath 训练集可复用、可审计、可扩展，同时不把 LaTeX 源码带入生产解析路径。
+
+**当前实现：**
+1. `src/core/latex_math_source_parser.py` 只在训练/审计路径扫描 LaTeX source gold，保留 delimiter、env、源码 offset 和上下文。
+2. `tools/tinybdmath_sharded_dataset.py` 按页生成 Attention/Napkin PDF 候选分片，支持断点续跑、原子写入和 `preprocess_version`。
+3. `tools/tinybdmath_gold_audit.py` 按 exact/near/weak/unmatched 与 `same_page_window/near_page_window/outside_page_window` 审计 PDF 候选标签。
+4. PDF 候选匹配源码时优先使用 PDF 目录页锚点窗口；短公式和单字符公式也必须先受页窗口约束，避免全书范围误配。
+
+**边界：** LaTeX 源码只用于数据集、训练和验收。真实用户打开普通 PDF 时没有源码，生产路径只能使用 PDF 结构事实、工具候选、r3 语义复核和人工/门禁 accepted 结果。
+
 ---
 
 ## 六、总结
