@@ -37,6 +37,8 @@ DEFAULT_DISPLAY_ENVS = (
 )
 DEFAULT_INLINE_ENVS = ("math",)
 DEFAULT_SKIP_ENVS = (
+    "asy",
+    "asydef",
     "verbatim",
     "Verbatim",
     "lstlisting",
@@ -78,7 +80,7 @@ def extract_latex_math_spans(
     skip_set = set(skip_envs)
     spans: list[LatexMathSpan] = []
     i = 0
-    n = len(text)
+    n = _effective_tex_length(text)
     while i < n:
         if _starts_comment(text, i):
             i = _line_end(text, i)
@@ -171,6 +173,39 @@ def _span(
 
 def _starts_comment(text: str, index: int) -> bool:
     return text[index] == "%" and not _is_escaped(text, index)
+
+
+def _effective_tex_length(text: str) -> int:
+    endinput = _find_control_word(text, "endinput", 0)
+    return len(text) if endinput < 0 else endinput
+
+
+def _find_control_word(text: str, word: str, start: int) -> int:
+    pattern = "\\" + word
+    pos = text.find(pattern, start)
+    while pos >= 0:
+        next_index = pos + len(pattern)
+        if (
+            not _is_escaped(text, pos)
+            and not _is_in_line_comment(text, pos)
+            and (next_index >= len(text) or not text[next_index].isalpha())
+        ):
+            return pos
+        pos = text.find(pattern, pos + 1)
+    return -1
+
+
+def _is_in_line_comment(text: str, index: int) -> bool:
+    line_start = text.rfind("\n", 0, index) + 1
+    cursor = line_start
+    while cursor < index:
+        comment = text.find("%", cursor, index)
+        if comment < 0:
+            return False
+        if not _is_escaped(text, comment):
+            return True
+        cursor = comment + 1
+    return False
 
 
 def _line_end(text: str, index: int) -> int:

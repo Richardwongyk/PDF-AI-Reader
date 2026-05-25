@@ -596,13 +596,44 @@ def _color_each_display_row(body: str, color_hex: str) -> str:
     parts = body.split(r"\\")
     colored = []
     for part in parts:
-        stripped = part.lstrip()
-        prefix_len = len(part) - len(stripped)
-        if stripped:
-            colored.append(part[:prefix_len] + color + " " + stripped)
-        else:
-            colored.append(part)
+        colored.append(_color_alignment_cells(part, color))
     return r"\\".join(colored)
+
+
+def _color_alignment_cells(row: str, color_command: str) -> str:
+    cells = _split_unescaped_alignment_cells(row)
+    colored: list[str] = []
+    for cell, separator in cells:
+        stripped = cell.lstrip()
+        prefix_len = len(cell) - len(stripped)
+        if stripped:
+            colored.append(cell[:prefix_len] + color_command + " " + stripped)
+        else:
+            colored.append(cell)
+        colored.append(separator)
+    return "".join(colored)
+
+
+def _split_unescaped_alignment_cells(row: str) -> list[tuple[str, str]]:
+    cells: list[tuple[str, str]] = []
+    start = 0
+    index = 0
+    while index < len(row):
+        if row[index] == "&" and not _is_escaped_latex_char(row, index):
+            cells.append((row[start:index], "&"))
+            start = index + 1
+        index += 1
+    cells.append((row[start:], ""))
+    return cells
+
+
+def _is_escaped_latex_char(text: str, index: int) -> bool:
+    count = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        count += 1
+        cursor -= 1
+    return count % 2 == 1
 
 
 def _ensure_marker_preamble(main_tex: Path) -> None:
