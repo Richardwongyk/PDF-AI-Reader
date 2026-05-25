@@ -5,6 +5,7 @@ param(
   [string]$Pdf = "",
   [string]$LatexRoot = "",
   [ValidateSet("full", "fast-no-asy")][string]$BuildProfile = "full",
+  [ValidateSet("latexmk", "pdflatex-once")][string]$CompileMode = "latexmk",
   [switch]$KeepWorkDir
 )
 
@@ -20,6 +21,7 @@ $logPath = Join-Path $LogDir "instrumented_dataset_${safeCase}_${stamp}.log"
 
 $toolArgs = @("tools\tinybdmath_instrumented_latex_dataset.py", "--case", $Case, "--output-dir", $OutputDir)
 $toolArgs += @("--build-profile", $BuildProfile)
+$toolArgs += @("--compile-mode", $CompileMode)
 if ($Limit -gt 0) {
   $toolArgs += @("--limit", [string]$Limit)
 }
@@ -38,6 +40,7 @@ $launch = [pscustomobject]@{
   case = $Case
   output_dir = $OutputDir
   build_profile = $BuildProfile
+  compile_mode = $CompileMode
   limit = $Limit
   tool_args = $toolArgs
 }
@@ -64,5 +67,6 @@ $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "
   case = $Case
   output_dir = $OutputDir
   build_profile = $BuildProfile
+  compile_mode = $CompileMode
   log = $logPath
 } | ConvertTo-Json -Depth 3

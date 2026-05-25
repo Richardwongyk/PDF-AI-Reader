@@ -100,6 +100,7 @@ def build_instrumented_dataset(
     limit: int = 0,
     main_tex: Path | None = None,
     build_profile: str = "full",
+    compile_mode: str = "latexmk",
     keep_work_dir: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
@@ -141,8 +142,8 @@ def build_instrumented_dataset(
         _log(f"[{case.name}] instrument formula spans")
         markers = _instrument_source_tree(case.latex_root, work_root, source_records)
         _ensure_marker_preamble(main)
-        _log(f"[{case.name}] compile instrumented PDF")
-        compiled_pdf, compile_info = _compile_instrumented_pdf(work_root, build_dir, main)
+        _log(f"[{case.name}] compile instrumented PDF mode={compile_mode}")
+        compiled_pdf, compile_info = _compile_instrumented_pdf(work_root, build_dir, main, compile_mode=compile_mode)
         _log(
             f"[{case.name}] compiled pdf={compiled_pdf} "
             f"exit_code={compile_info['exit_code']}"
@@ -183,6 +184,7 @@ def build_instrumented_dataset(
                 "compile_exit_code": compile_info["exit_code"],
                 "compile_forced_pdf": compile_info["exit_code"] != 0,
                 "build_profile": build_profile,
+                "compile_mode": compile_mode,
                 "source_formulas": len(source_records),
                 "source_display_formulas": display_count,
                 "source_inline_formulas": inline_count,
@@ -207,6 +209,7 @@ def build_instrumented_dataset(
         "match_scope": match_scope,
         "limit": limit,
         "build_profile": build_profile,
+        "compile_mode": compile_mode,
         "cases": case_summaries,
         "totals": {
             "source_formulas": len(all_source_rows),
@@ -621,7 +624,18 @@ def _loads_color_package(text: str) -> bool:
     return r"\usepackage{xcolor}" in compact or r"\usepackage{color}" in compact
 
 
-def _compile_instrumented_pdf(work_root: Path, build_dir: Path, main_tex: Path) -> tuple[Path, dict[str, Any]]:
+def _compile_instrumented_pdf(
+    work_root: Path,
+    build_dir: Path,
+    main_tex: Path,
+    *,
+    compile_mode: str,
+) -> tuple[Path, dict[str, Any]]:
+    mode = (compile_mode or "latexmk").strip().lower()
+    if mode == "pdflatex-once":
+        return _compile_with_pdflatex_once(work_root, build_dir, main_tex)
+    if mode != "latexmk":
+        raise ValueError(f"unknown compile mode: {compile_mode}")
     latexmk = shutil.which("latexmk")
     if not latexmk:
         raise RuntimeError("latexmk not found on PATH")
@@ -664,6 +678,46 @@ def _compile_instrumented_pdf(work_root: Path, build_dir: Path, main_tex: Path) 
         if not pdfs:
             raise RuntimeError(f"latexmk succeeded but no PDF found in {build_dir}")
         pdf = pdfs[0]
+    return pdf, info
+
+
+def _compile_with_pdflatex_once(work_root: Path, build_dir: Path, main_tex: Path) -> tuple[Path, dict[str, Any]]:
+    pdflatex = shutil.which("pdflatex")
+    if not pdflatex:
+        raise RuntimeError("pdflatex not found on PATH")
+    build_dir.mkdir(parents=True, exist_ok=True)
+    _mirror_source_dirs(work_root, build_dir)
+    main_arg = main_tex.resolve().relative_to(work_root.resolve()).as_posix()
+    out_arg = build_dir.resolve().as_posix()
+    args = [
+        pdflatex,
+        "-synctex=1",
+        "-interaction=nonstopmode",
+        "-recorder",
+        f"-output-directory={out_arg}",
+        main_arg,
+    ]
+    compile_log = build_dir / f"{main_tex.stem}.pdflatex-once.stdout.log"
+    _log(f"pdflatex output log={compile_log}")
+    with compile_log.open("wb") as handle:
+        result = subprocess.run(
+            args,
+            cwd=str(work_root),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    tail = _tail_text(compile_log, max_lines=80)
+    pdf = build_dir / f"{main_tex.stem}.pdf"
+    info = {
+        "exit_code": result.returncode,
+        "stdout_log": str(compile_log),
+        "tail": tail,
+    }
+    if not pdf.exists() or pdf.stat().st_size == 0:
+        raise RuntimeError(
+            f"instrumented pdflatex-once failed with exit code {result.returncode}; "
+            f"see {compile_log}\n{tail}"
+        )
     return pdf, info
 
 
@@ -937,6 +991,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--main-tex", type=Path, default=None)
     parser.add_argument("--build-profile", choices=["full", "fast-no-asy"], default="full")
+    parser.add_argument("--compile-mode", choices=["latexmk", "pdflatex-once"], default="latexmk")
     parser.add_argument("--keep-work-dir", action="store_true")
     args = parser.parse_args()
     build_instrumented_dataset(
@@ -950,6 +1005,7 @@ def main() -> int:
         limit=args.limit,
         main_tex=args.main_tex,
         build_profile=args.build_profile,
+        compile_mode=args.compile_mode,
         keep_work_dir=args.keep_work_dir,
     )
     return 0
