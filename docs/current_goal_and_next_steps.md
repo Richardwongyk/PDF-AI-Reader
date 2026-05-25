@@ -94,6 +94,77 @@
 
 多工具配合的下一步必须按 `docs/formula_multitool_fusion_design.md` 推进：不手写硬编码公式解析规则，不靠样本正则修公式；自写部分只做 evidence/candidate/fusion schema、工具编排、源码准确率复核、候选排序、accepted 门禁和增量写回。
 
+## 下一阶段清晰计划
+
+当前最该做的事不是继续“多跑几个 OCR 工具”，而是把已经 100% 精确定位的源码插桩训练集，变成可训练、可评测、可接入 r2a 的 born-digital 结构模型闭环。
+
+### 阶段 A：把插桩训练集资产化
+
+目标：把 Attention 138 条和 Napkin 29743 条 `instrumented_training_rows.jsonl` 变成 TinyBDMath 的标准训练/评测输入。
+
+要做：
+
+- 新增或扩展转换脚本，把 `instrumented_training_rows.jsonl` 中的 `label_latex/page_num/bbox/glyphs/vectors/fonts` 转为 TinyBDMath graph training rows。
+- 每条样本保留 raw LaTeX、canonical LaTeX、bbox、glyph 序列、字体、字号、vector、source id、input hash、编译 profile 和 schema version。
+- 按 case、章节、页码和公式类型切分 train/validation/test，不能随机把同一页或相邻公式混到训练和测试里。
+- 单独统计 inline/display、单字符、上下标、分数、根号、align、矩阵、数学字体、矢量线段参与的公式。
+
+验收：
+
+- Attention 和 Napkin 转换后行数必须等于插桩 verified 行数：Attention 138、Napkin 29743。
+- 转换报告必须显示 0 个缺 bbox、0 个缺 label、0 个 schema 错误。
+- 产物继续放 `test_artifacts/`，不提交数据本体。
+
+### 阶段 B：先做非 OCR 结构模型的可评测 baseline
+
+目标：先不追求一次达到最终 99.9%，而是建立“训练、预测、解码、评测、失败样例”全链路。
+
+要做：
+
+- 用插桩样本生成 glyph graph 和候选边。
+- 先训练 MLP edge/quality baseline，输出关系置信度和候选 LaTeX。
+- 建立解码器和 verifier：检查符号覆盖、上下标、分数线/根号横线/overline、large operator 上下限、alignment 行列、数学字体。
+- 每次训练输出模型版本、特征版本、训练集 hash、指标和低置信样例。
+
+验收：
+
+- 必须输出 relation-level 指标、formula-level exact/near/weak 指标、inline/display 分项指标。
+- 必须证明模型结果比当前 r0/fusion baseline 提升；若不提升，不能接入 accepted，只能保留为候选实验。
+- 不允许把源码 LaTeX 带进生产推理输入；源码只用于训练和评测。
+
+### 阶段 C：接入 r2a 并跑真实多轮闭环
+
+目标：让 TinyBDMath 成为 born-digital PDF 的非 OCR r2a 结构候选，而不是离线玩具模型。
+
+要做：
+
+- `TinyBDMathCandidateService` 使用新模型 artifact 读取 r0/r0.5 evidence，输出 candidate-only LaTeX、关系证据、置信度和 verifier warnings。
+- `tools/formula_multiround_pipeline.py --run-tinybdmath` 增加模型评测摘要，和 r0/r2b/r3/fusion 同台比较。
+- Attention 前 6 页、Attention 全量、Napkin 抽样页、Napkin 长文档页段分别跑 r0 -> r0.5 -> r2a -> fusion -> r3/r4。
+
+验收：
+
+- 每轮都有 input hash、model_version、preprocess_version、result JSON 和跳过机制。
+- r2a 低置信不覆盖正文，不进入 RAG accepted。
+- 与当前 Pix2Text/Paddle/MinerU 候选比较时，必须记录准确率和耗时，不能只看主观样例。
+
+### 阶段 D：accepted/revision/RAG 闭环
+
+目标：把“候选很多”推进到“少量高置信可安全进入知识库”。
+
+要做：
+
+- 建立 accepted/rejected/revision 审核表和 UI/命令行入口。
+- accepted 变化触发 r5 增量 upsert，同时同步 GraphRAG artifact。
+- 对 accepted precision 做单独统计，和候选 recall 分开报告。
+- E2E 覆盖二次打开跳过、缩放、双击翻译、隐藏/再显示、问答证据、日志审计。
+
+验收：
+
+- accepted 结果必须可追溯到 PDF bbox、glyph evidence、模型版本、verifier 和人工/自动门禁。
+- 无证据或低置信候选不能污染正文、FTS、向量库或 GraphRAG。
+- Napkin 长文档不能因后台任务拖慢阅读热路径。
+
 ## 到大作业完成的路线
 
 1. **公式质量闭环**

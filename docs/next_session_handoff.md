@@ -16,7 +16,9 @@
 
 2026-05-25 训练集 100% 准确性补充：不要把 source/PDF 相似度高的候选直接当 gold。新增 `tools/tinybdmath_gold_policy.py` 统一 verified gold 闸门，要求同页窗口、源码页窗唯一、PDF 结构证据完整、无 unknown/warnings、严格 token 签名一致，且过短/单字符公式必须复核。`tools/tinybdmath_review_queue.py` 可把未自动通过的样本导出为 JSONL、PDF crop 图、源码上下文、PDF evidence 和视觉大模型审核 prompt；`tools/tinybdmath_apply_review.py` 只把自动 verified 行和高置信 `accept/revise` 复核结果合成独立 verified gold JSONL。阶段合并结果：Attention 15 页 + Napkin 1050 页分片、30790 条 source formulas、2493 条 PDF candidates；极严自动 gold 仅 12 条，其余进入复核，不得宣称两份 PDF 已全部一一对应完成。
 
-2026-05-25 插桩训练集补充：当前更可靠的训练集路线是源码插桩/重编译，而不是拿用户给的已编译 PDF 做坐标基准。新增 `tools/tinybdmath_instrumented_latex_dataset.py`，对临时 LaTeX 副本中的每个公式染唯一颜色，重编译后直接从 born-digital PDF 结构层读取彩色 glyph/vector bbox，输出可复用 JSONL 训练集。新增 `tools/run_instrumented_dataset_background.ps1`，所有 Napkin 全量、LaTeX 编译、训练集长任务必须后台运行并从启动即写日志。Attention 全量回归为 138/138 精确框、耗时约 14.639s；Napkin 全量 `fast-no-asy` 已后台启动，已扫描 30652 个源码公式，但最终正确性必须等 `summary.json`，不能提前宣称 100%。
+2026-05-25 插桩训练集补充：当前更可靠的训练集路线是源码插桩/重编译，而不是拿用户给的已编译 PDF 做坐标基准。新增 `tools/tinybdmath_instrumented_latex_dataset.py`，对临时 LaTeX 副本中的每个公式染唯一颜色，重编译后直接从 born-digital PDF 结构层读取彩色 glyph/vector bbox，输出可复用 JSONL 训练集。新增 `tools/run_instrumented_dataset_background.ps1`，所有 Napkin 全量、LaTeX 编译、训练集长任务必须后台运行并从启动即写日志。Attention 全量回归为 138/138 精确框、`pdflatex-once` 约 6.423s；Napkin v3 已在 `test_artifacts/instrumented_napkin_fast_delivery_v3` 全量跑通，`pdflatex-once + fast-no-asy` 约 192.92s，源码公式 29743 条，`boxes_found=29743`、`verified_exact_boxes=29743`、`training_rows=29743`、`blockers={}`。这份插桩数据集是当前最可靠的 TinyBDMath 训练/评测起点，但仍只用于训练和验收，不进入真实用户生产路径。
+
+2026-05-25 插桩训练集修复原因：上一版 Napkin 833 个缺失 marker 不是公式识别失败，而是训练集制备工具把不可渲染或被 TeX 忽略的源码也算进了分母，并且 alignment 环境染色不够细。已通用修复三类问题：跳过 `asy/asydef` 外部绘图语言块；遇到未注释 `\endinput` 后停止扫描；对 `align*` 等带 `&` 的 display 环境逐对齐单元染色。不要回退到“按样本删 833 行”或“硬编码 Napkin 文件名”的方案。
 
 重要纠正：不要把项目自定义宏渲染后的视觉相似说成“就是同一个 LaTeX”。Napkin `tex/macros.tex` 中 `\pre` 定义为 `^{\text{pre}}`，所以 `f\pre(T)` 的 PDF 视觉上会像 `f^{pre}(T)`；这类样本仍然不能自动进 gold，必须通过宏定义审计或复核改写成 canonical LaTeX。
 

@@ -67,11 +67,12 @@ TinyBDMath 小模型研发只负责：
 1. 已完成第一阶段入口：`src/core/pdf_glyph_graph.py` 固化 r0 Raw Glyph Graph schema，r0 formula candidate evidence 已携带局部 graph schema/hash/health/glyph/vector/image。
 2. 已完成 r0.5 静态修复 MVP：`src/core/symbol_identity_repair.py` 生成 Enriched Glyph Graph，保留已知 PDF Unicode，支持 glyph name 静态映射和同 normalized_font+cid 锚点传播，冲突时保守保留 unknown。
 3. 已完成 r0.5 最小持久化：`FormulaScanRound.SYMBOL_IDENTITY_REPAIR` 写入 `formula_round_jobs`，记录 `input_hash/raw_input_hash/model_version/preprocess_version/summary`，同 input hash 跳过。
-4. 下一步扩展 r0.5：接入真实 AGL/texglyphlist/TeX encoding/fonttools cmap，再做 outline/path shape candidate。
-5. 为 TinyBDMath 准备 synthetic LaTeX -> PDF -> graph 训练数据。
-6. 训练/实现 MLP edge scorer baseline。
-7. 建立 verifier 和 accepted gate。
-8. 再升级 GNN/Graph Transformer。
+4. 已完成源码插桩/重编译训练集第一阶段：Attention 138/138、Napkin v3 29743/29743 verified exact rows，作为 TinyBDMath 训练/评测主资产。
+5. 下一步优先把插桩训练集转换成 TinyBDMath graph rows、manifest 和 split，而不是继续做不可靠的 PDF/source 粗匹配。
+6. 下一步训练/实现 MLP edge/quality scorer baseline，并建立按 inline/display、上下标、分数线、根号、align、数学字体分项的评测。
+7. 下一步扩展 r0.5：接入真实 AGL/texglyphlist/TeX encoding/fonttools cmap，再做 outline/path shape candidate。
+8. 建立 verifier 和 accepted gate。
+9. 再升级 GNN/Graph Transformer。
 
 ## 6. 文档维护规则
 

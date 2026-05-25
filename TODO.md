@@ -36,9 +36,11 @@
 
 1. 读 `docs/next_session_handoff.md`，确认问题清单、失败教训、文件地图和交接提示词。
 2. 用主环境跑轻量测试确认代码基线，再跑 Attention/Napkin 公式与性能审计。
-3. 继续完成多轮公式解析真实质量闭环：r0 born-digital 结构候选、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱已能按批落库；下一步重点是 Napkin 大样本、r5 知识库增量写回、accepted 门禁和性能优化。
-4. 继续验证外部工具：MinerU 新模型、Paddle Formula、Pix2Text 已有 smoke；PEK/UniMERNet 和旧 magic-pdf 仍要补齐或明确淘汰。
-5. 继续推进全文 RAG/GraphRAG：默认秒级 FTS/RAG 可用，DeepSeek 分析回答和图谱抽取异步增强。
+3. 先把插桩训练集资产化：Attention 138 条、Napkin v3 29743 条 verified exact rows 转为 TinyBDMath graph training/eval rows，输出 schema、hash、split、类型统计和错误报告。
+4. 训练并评测 TinyBDMath 非 OCR baseline：先 MLP edge/quality scorer + 解码/verifier，指标必须按 inline/display、上下标、分数线/根号/overline、align、数学字体分项统计；只有证明比 r0/fusion baseline 提升，才接入更高门禁。
+5. 将新模型以 candidate-only 方式接入 r2a/fusion：所有结果带 input hash、model/version、preprocess_version、result JSON 和跳过机制；低置信继续只写候选，不覆盖正文/RAG。
+6. 再推进 accepted/rejected/revision 门禁、r5 知识库增量写回和 GraphRAG 同步；最终用 Attention/Napkin/E2E 证明准确率、性能和二次打开跳过。
+7. 外部工具继续作为 r2b/兜底路线验证：MinerU 新模型、Paddle Formula、Pix2Text 已有 smoke；PEK/UniMERNet 和旧 magic-pdf 仍要补齐或明确淘汰，但不能替代 born-digital 非 OCR 主线。
 
 2026-05-25 最新实现检查点：
 

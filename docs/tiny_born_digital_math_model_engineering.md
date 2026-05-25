@@ -263,6 +263,7 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 
 - Attention/Napkin 真实 PDF + LaTeX 源码数据流已开始落地：`tools/born_digital_formula_dataset.py`
   生成 source formula index、PDF candidate index 和 TinyBD feature graph JSONL。
+- 源码插桩/重编译训练集已成为更可靠的第一训练资产：Attention 全量 138/138 verified exact rows；Napkin v3 全量 29743/29743 verified exact rows，blockers 为空。该数据集提供真实 PDF glyph/vector bbox 和 canonical LaTeX label，是下一阶段 TinyBDMath 训练/评测的主入口。
 - `tools/tinybdmath_training_data.py` 已把真实数据产物转成训练/验收行，包含 quality label、
   unknown glyph rate、edge hint counts、feature density、structural signal count 和源码目标。
 - `src/core/tinybdmath_baseline.py` 已提供标准库一隐藏层 MLP，用 PDF graph 特征预测候选质量；
@@ -271,7 +272,29 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
   用户本机 `science` conda 环境可用于训练，主程序环境不安装 torch。
 - 仍缺真正 relation label/SLT decoder；当前 MLP 是质量门控基线，不负责从 graph 直接生成 LaTeX。
 
-### M2：项目接入
+### M2：插桩数据资产化
+
+目标：把插桩训练集转换成结构模型真正能学习的 graph/relation 数据，而不是只把公式 bbox 和 LaTeX label 存起来。
+
+必须产出：
+
+- `instrumented_training_rows.jsonl -> tinybdmath_graph_rows.jsonl` 转换器。
+- 每条样本包含 glyph nodes、vector nodes、font/size/bbox、reading/order edges、candidate structural edges、label_latex、raw_source_latex、case/page/source id、compiled PDF hash、schema/model preprocessing version。
+- dataset manifest：输入文件 hash、行数、case split、公式类型统计、inline/display 统计、数学字体统计、vector-line 参与统计、失败样本。
+- train/validation/test split：按 case、章节/页段和公式类型分层，禁止同页近邻泄漏。
+
+第一版 relation label 可以分两层：
+
+- 弱监督 formula-level：模型先学候选质量和局部结构风险，用于 r2a candidate scoring。
+- 结构监督 relation-level：用可审计的 LaTeX/MathML/SLT 转换器生成父子/上下标/分数/根号/alignment 关系，再对齐 glyph graph。该层必须保留对齐置信度，不能把低置信关系当 hard label。
+
+验收：
+
+- Attention 转换行数 138，Napkin 转换行数 29743。
+- 0 个缺 label、0 个缺 bbox、0 个 JSON schema error。
+- 低置信 relation label 可以存在，但必须标记为 weak/ignored，不参与 hard supervision。
+
+### M3：项目接入
 
 - r2a structural candidate worker 已有第一版：`src/app/tinybdmath_candidate_service.py` 从 r0/r0.5
   persisted evidence 生成 TinyBD feature graph，写入 `formula_recognition_results`
@@ -280,19 +303,25 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 - FormulaIndexStore 落库。
 - pipeline 报告 TinyBDMath 候选，并进入 fusion/r3/r4 后续链路；结果固定 candidate-only，不覆盖正文/RAG。
 
-### M3：GNN
+下一步接入要求：
+
+- r2a 输出必须包含 candidate LaTeX、relation evidence、confidence、verifier warnings、model_version、feature_schema_version、input_hash。
+- Attention/Napkin 验收报告必须能比较 r0、r2a、r2b 视觉工具、r3 review 和 fusion 最终候选。
+- 没有通过 verifier/accepted gate 时，r2a 永远不能覆盖正文和 RAG。
+
+### M4：GNN
 
 - GNN edge classifier。
 - 分数/根号/上下标专项评估。
 - inline 初步支持。
 
-### M4：复杂结构
+### M5：复杂结构
 
 - matrix/cases/aligned。
 - math alphabet。
 - Office/PPT 可复制公式域。
 
-### M5：质量证明
+### M6：质量证明
 
 - 大规模独立测试。
 - accepted gate 校准。
@@ -311,6 +340,35 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 9. 已接入 r2a candidate-only 服务和 `--run-tinybdmath` pipeline 开关。
 10. Attention 前 6 页 smoke：`r2a_tinybdmath_structural` 处理 7 条 r0 候选，写入
     `tinybdmath_structural:tinybdmath` 7 条候选和 7 条 round done；fusion 能读取，`ready_for_manual_accept=0`。
-11. 下一步跑 Attention/Napkin 全量 realdata pipeline，训练 MLP/PyTorch baseline，修正数据集质量和性能瓶颈。
-12. 下一步接入真实 TeX Live/CTAN 资源目录、font cmap 和 outline/shape identity candidate。
-13. 下一步生成 100-1000 条 synthetic 公式 PDF graph，并开始 relation labels/decoder MVP。
+11. 已完成插桩训练集第一阶段：Attention 138/138、Napkin v3 29743/29743 verified exact rows。
+12. 下一步第一优先级：写插桩训练集到 TinyBDMath graph rows 的转换器和 manifest，先把 29881 条 verified exact rows 资产化。
+13. 下一步第二优先级：用 graph rows 训练 MLP/PyTorch baseline，输出按 inline/display、上下标、分数线、根号、align、数学字体分项的评测报告。
+14. 下一步第三优先级：把新模型 artifact 接入 r2a candidate service 和 formula multiround pipeline，证明相对 r0/fusion baseline 有提升。
+15. 下一步继续接入真实 TeX Live/CTAN 资源目录、font cmap 和 outline/shape identity candidate。
+16. 下一步生成 100-1000 条 synthetic 公式 PDF graph，并开始 relation labels/decoder MVP。
+
+## 12. 近期 48 小时执行计划
+
+1. **数据转换器**
+   - 输入：`test_artifacts/instrumented_attention_fast_delivery/instrumented_training_rows.jsonl` 和 `test_artifacts/instrumented_napkin_fast_delivery_v3/instrumented_training_rows.jsonl`。
+   - 输出：`tinybdmath_graph_rows.jsonl`、`tinybdmath_graph_manifest.json`、`tinybdmath_graph_split.json`。
+   - 要求：0 缺失、0 schema error、保留所有 hash/version/source/bbox/glyph/font/vector 证据。
+
+2. **评测基线**
+   - 先训练质量/结构风险 MLP，不急着宣称完整 LaTeX 生成。
+   - 输出：train/val/test 指标、confusion、低置信样例、按公式类型分桶指标。
+   - 目标：证明它能识别当前 r0/r2a 哪些候选可靠、哪些需要 r3/r2b/人工复核。
+
+3. **结构解码 MVP**
+   - 先覆盖高价值结构：horizontal、sup、sub、subsup、fraction bar、sqrt/radical body、large operator limits、alignment rows。
+   - 横线歧义处理原则：横线节点不先验指定为分数线/根号线/overline/limit bar，而是由上下文候选关系和 verifier 判断；低置信时输出多候选，不 accepted。
+
+4. **r2a 集成**
+   - 新模型输出进入 `formula_recognition_results`，stage/model 写清 `tinybdmath_structural` 和模型版本。
+   - fusion 使用 r2a 置信度和 verifier warnings 排序。
+   - `--reuse-db` 必须跳过同 input hash 的已完成 r2a。
+
+5. **门禁与 E2E**
+   - accepted/rejected/revision 表和最小命令行审核先行，UI 可后接。
+   - Napkin 长文档默认打开路径不得加载训练/模型冷启动。
+   - E2E 再覆盖滚动、跳转、缩放、翻译、问答和日志审计。

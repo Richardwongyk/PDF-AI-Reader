@@ -79,6 +79,13 @@ Napkin：
 - 多页跳转和二次打开。
 - 大量真实公式统计。
 
+当前训练/评测资产：
+
+- Attention 插桩训练集：138 条 verified exact rows，bbox 和源码公式全部一一对应。
+- Napkin v3 插桩训练集：29743 条 verified exact rows，`boxes_found=29743`、`verified_exact_boxes=29743`、`blockers={}`。
+- 这些数据可用于模型训练、评测、回归和错误分析；真实用户生产推理仍不能依赖 LaTeX 源码。
+- 质量报告必须区分“训练集制备 100% 精确”与“生产 PDF 公式识别准确率”。前者已经达成于这两份插桩构建；后者仍未达成 99.9%/99.999%。
+
 每次验收必须检查：
 
 - 是否误用 OCR 作为 born-digital 默认路线。
