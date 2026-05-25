@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -638,36 +638,41 @@ def _compile_instrumented_pdf(work_root: Path, build_dir: Path, main_tex: Path) 
         f"-outdir={out_arg}",
         main_arg,
     ]
-    process = subprocess.Popen(
-        args,
-        cwd=str(work_root),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
-    tail: deque[str] = deque(maxlen=80)
-    assert process.stdout is not None
-    for line in process.stdout:
-        clean = line.rstrip("\r\n")
-        tail.append(clean)
-        print(f"[latexmk] {clean}", flush=True)
-    returncode = process.wait()
+    compile_log = build_dir / f"{main_tex.stem}.latexmk.stdout.log"
+    _log(f"latexmk output log={compile_log}")
+    with compile_log.open("wb") as handle:
+        result = subprocess.run(
+            args,
+            cwd=str(work_root),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    tail = _tail_text(compile_log, max_lines=80)
     info = {
-        "exit_code": returncode,
-        "tail": "\n".join(tail),
+        "exit_code": result.returncode,
+        "stdout_log": str(compile_log),
+        "tail": tail,
     }
     pdf = build_dir / f"{main_tex.stem}.pdf"
     if not pdf.exists():
         pdfs = sorted(build_dir.glob("*.pdf"))
-        if not pdfs and returncode != 0:
-            raise RuntimeError(f"instrumented latexmk failed with exit code {returncode}\n{info['tail']}")
+        if not pdfs and result.returncode != 0:
+            raise RuntimeError(
+                f"instrumented latexmk failed with exit code {result.returncode}; "
+                f"see {compile_log}\n{info['tail']}"
+            )
         if not pdfs:
             raise RuntimeError(f"latexmk succeeded but no PDF found in {build_dir}")
         pdf = pdfs[0]
     return pdf, info
+
+
+def _tail_text(path: Path, *, max_lines: int) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"<failed to read {path}: {exc}>"
+    return "\n".join(lines[-max_lines:])
 
 
 def _mirror_source_dirs(work_root: Path, build_dir: Path) -> None:
