@@ -254,6 +254,7 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 - Enriched Glyph Graph 已作为 `r0_5_symbol_identity_repair` 独立轮次写入 `formula_round_jobs`，按 input hash 跳过。
 - `GlyphNameMappingLoader` 已提供 AGL/texglyphlist 风格资源加载入口，并把 mapping source/warnings 写入 r0.5 summary。
 - `GlyphNameMappingLoader` 已支持项目资源目录、环境变量和 TeX Live/MiKTeX 常见路径自动发现；发现失败仅记录 warning。
+- `tools/born_digital_formula_dataset.py` 已开始把 Attention/Napkin 全量 PDF + LaTeX 源码整理为真实训练/验收数据：source formula index、PDF candidate index、TinyBD feature graph JSONL。
 - 下一步扩展真实 TeX Live/CTAN 资源打包策略、font cmap 和 outline 候选。
 - edge candidate generator。
 - 可视化工具。
@@ -295,8 +296,10 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 3. 已完成 r0.5 独立落库最小闭环。
 4. 已完成 AGL/texglyphlist 风格映射资源 loader。
 5. 已完成 glyph map 自动发现入口。
-6. 下一步接入真实 TeX Live/CTAN 资源目录和 font cmap。
-7. 生成 100-1000 条 synthetic 公式 PDF graph。
-8. 写 MLP edge scorer baseline。
-9. 接入 r2a candidate-only。
-10. 用 Attention/Napkin 验证不污染正文和 RAG。
+6. 已开始 Attention/Napkin 真实数据集生成器。
+7. 下一步跑 Attention/Napkin 全量，修正数据集质量和性能瓶颈。
+8. 接入真实 TeX Live/CTAN 资源目录和 font cmap。
+9. 生成 100-1000 条 synthetic 公式 PDF graph。
+10. 写 MLP edge scorer baseline。
+11. 接入 r2a candidate-only。
+12. 用 Attention/Napkin 验证不污染正文和 RAG。
