@@ -249,7 +249,8 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 
 ### M0：数据 schema
 
-- Enriched Glyph Graph schema。
+- Raw Glyph Graph schema 已由 `src/core/pdf_glyph_graph.py` 落地，r0 evidence 已携带局部 graph hash/health/glyph/vector/image。
+- 下一步补 Enriched Glyph Graph schema。
 - edge candidate generator。
 - 可视化工具。
 
@@ -285,8 +286,9 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 
 ## 11. 当前最小可执行任务
 
-1. 先实现 graph schema 和可视化。
-2. 生成 100-1000 条 synthetic 公式 PDF graph。
-3. 写 MLP edge scorer baseline。
-4. 接入 r2a candidate-only。
-5. 用 Attention/Napkin 验证不污染正文和 RAG。
+1. 已完成 Raw Glyph Graph schema。
+2. 下一步实现 r0.5 静态映射，生成 Enriched Glyph Graph。
+3. 生成 100-1000 条 synthetic 公式 PDF graph。
+4. 写 MLP edge scorer baseline。
+5. 接入 r2a candidate-only。
+6. 用 Attention/Napkin 验证不污染正文和 RAG。

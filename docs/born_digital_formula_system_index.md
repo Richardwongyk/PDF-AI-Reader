@@ -64,8 +64,8 @@ TinyBDMath 小模型研发只负责：
 
 ## 5. 近期研发优先级
 
-1. 固化 r0 Raw Glyph Graph schema。
-2. 实现 r0.5 静态映射 MVP。
+1. 已完成第一阶段入口：`src/core/pdf_glyph_graph.py` 固化 r0 Raw Glyph Graph schema，r0 formula candidate evidence 已携带局部 graph schema/hash/health/glyph/vector/image。
+2. 下一步实现 r0.5 静态映射 MVP。
 3. 建立 Enriched Glyph Graph 落库和 input hash 跳过。
 4. 为 TinyBDMath 准备 synthetic LaTeX -> PDF -> graph 训练数据。
 5. 训练/实现 MLP edge scorer baseline。

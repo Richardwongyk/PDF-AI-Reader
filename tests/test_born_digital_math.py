@@ -448,6 +448,13 @@ def test_born_digital_formula_structure_extractor_emits_hashed_candidates() -> N
     assert candidate.model == "pymupdf_born_digital_structure"
     assert candidate.preprocess_version == "glyph-vector-json-v1"
     assert candidate.evidence["source"] == "pdf_structure_display_region"
+    raw_graph = candidate.evidence["raw_glyph_graph"]
+    assert raw_graph["schema_version"] == "raw_glyph_graph_v1"
+    assert raw_graph["input_hash"]
+    assert raw_graph["health"]["glyph_count"] >= 13
+    assert raw_graph["health"]["vector_count"] == 1
+    assert any(glyph["text"] == "Q" and glyph["normalized_font"] == "CMMI10" for glyph in raw_graph["glyphs"])
+    assert raw_graph["vectors"][0]["kind"] == "vector"
 
 
 def test_region_diagnostics_marks_structured_formula_candidate() -> None:
