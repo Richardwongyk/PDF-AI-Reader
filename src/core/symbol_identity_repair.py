@@ -11,8 +11,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from src.core.pdf_glyph_graph import RawGlyphGraph, RawGlyphNode
 
@@ -30,6 +31,130 @@ class SymbolIdentityCandidate:
     source: str
     confidence: float
     evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GlyphNameMappingEntry:
+    """One glyph-name mapping with source provenance."""
+
+    glyph_name: str
+    unicode: str
+    source: str
+    priority: int = 0
+
+
+@dataclass(frozen=True)
+class GlyphNameMappingTable:
+    """Lookup table for AGL/TeX-style glyph name resources."""
+
+    exact: dict[str, GlyphNameMappingEntry]
+    normalized: dict[str, GlyphNameMappingEntry]
+    sources: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+
+    def lookup(self, name: str) -> GlyphNameMappingEntry | None:
+        base = str(name or "").strip().lstrip("/").split(".", 1)[0]
+        if not base:
+            return None
+        entry = self.exact.get(base)
+        if entry is not None:
+            return entry
+        return self.normalized.get(_normalize_glyph_name(base))
+
+
+class GlyphNameMappingLoader:
+    """Load standard glyph-name mapping resources without extra packages."""
+
+    @classmethod
+    def built_in(cls) -> GlyphNameMappingTable:
+        return cls.from_entries(
+            (
+                GlyphNameMappingEntry(
+                    glyph_name=name,
+                    unicode=value,
+                    source="static_glyph_name_map",
+                    priority=0,
+                )
+                for name, value in _GLYPH_NAME_TO_UNICODE.items()
+            ),
+            sources=("static_glyph_name_map",),
+        )
+
+    @classmethod
+    def load(
+        cls,
+        paths: Iterable[str | Path],
+        *,
+        include_builtin: bool = True,
+    ) -> GlyphNameMappingTable:
+        entries: list[GlyphNameMappingEntry] = []
+        sources: list[str] = []
+        warnings: list[str] = []
+        if include_builtin:
+            built_in = cls.built_in()
+            entries.extend(built_in.exact.values())
+            sources.extend(built_in.sources)
+            warnings.extend(built_in.warnings)
+        for priority, path_value in enumerate(paths, start=10):
+            path = Path(path_value)
+            source = str(path)
+            if not path.exists():
+                warnings.append(f"mapping_file_missing:{source}")
+                continue
+            source_name = f"glyph_name_resource:{path.name}"
+            sources.append(source_name)
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError as exc:
+                warnings.append(f"mapping_file_unreadable:{source}:{exc}")
+                continue
+            for line_number, line in enumerate(lines, start=1):
+                parsed = _parse_glyph_mapping_line(line)
+                if parsed is None:
+                    continue
+                glyph_name, unicode_value = parsed
+                entries.append(
+                    GlyphNameMappingEntry(
+                        glyph_name=glyph_name,
+                        unicode=unicode_value,
+                        source=source_name,
+                        priority=priority,
+                    )
+                )
+                priority += 1
+            warnings.extend(_mapping_resource_warnings(path.name, lines))
+        return cls.from_entries(entries, sources=tuple(dict.fromkeys(sources)), warnings=tuple(warnings))
+
+    @staticmethod
+    def from_entries(
+        entries: Iterable[GlyphNameMappingEntry],
+        *,
+        sources: tuple[str, ...],
+        warnings: tuple[str, ...] = (),
+    ) -> GlyphNameMappingTable:
+        exact: dict[str, GlyphNameMappingEntry] = {}
+        normalized: dict[str, GlyphNameMappingEntry] = {}
+        result_warnings: list[str] = list(warnings)
+        for entry in entries:
+            if not entry.glyph_name or not entry.unicode:
+                continue
+            previous = exact.get(entry.glyph_name)
+            if previous is None or entry.priority >= previous.priority:
+                if previous is not None and previous.unicode != entry.unicode:
+                    result_warnings.append(
+                        f"mapping_conflict:{entry.glyph_name}:{previous.source}->{entry.source}"
+                    )
+                exact[entry.glyph_name] = entry
+            key = _normalize_glyph_name(entry.glyph_name)
+            previous_norm = normalized.get(key)
+            if previous_norm is None or entry.priority >= previous_norm.priority:
+                normalized[key] = entry
+        return GlyphNameMappingTable(
+            exact=exact,
+            normalized=normalized,
+            sources=tuple(dict.fromkeys(sources)),
+            warnings=tuple(result_warnings),
+        )
 
 
 @dataclass(frozen=True)
@@ -70,6 +195,8 @@ class SymbolIdentityRepairSummary:
     conflict_count: int
     sources: tuple[str, ...]
     warnings: tuple[str, ...]
+    mapping_sources: tuple[str, ...] = ()
+    mapping_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,8 +243,19 @@ class EnrichedGlyphGraph:
 class SymbolIdentityRepairer:
     """Build an Enriched Glyph Graph without image-based recognition."""
 
-    def __init__(self, auto_resolve_threshold: float = 0.95) -> None:
+    def __init__(
+        self,
+        auto_resolve_threshold: float = 0.95,
+        glyph_name_mapping: GlyphNameMappingTable | None = None,
+        glyph_name_mapping_paths: Iterable[str | Path] | None = None,
+    ) -> None:
         self._auto_resolve_threshold = float(auto_resolve_threshold)
+        if glyph_name_mapping is not None:
+            self._glyph_name_mapping = glyph_name_mapping
+        elif glyph_name_mapping_paths is not None:
+            self._glyph_name_mapping = GlyphNameMappingLoader.load(glyph_name_mapping_paths)
+        else:
+            self._glyph_name_mapping = GlyphNameMappingLoader.built_in()
 
     def repair_graph(self, graph: RawGlyphGraph) -> EnrichedGlyphGraph:
         anchors, font_cid_conflicts = _font_cid_anchors(graph.glyphs)
@@ -163,6 +301,8 @@ class SymbolIdentityRepairer:
             conflict_count=len(font_cid_conflicts) + candidate_conflicts,
             sources=tuple(sources),
             warnings=tuple(warnings),
+            mapping_sources=self._glyph_name_mapping.sources,
+            mapping_warnings=self._glyph_name_mapping.warnings,
         )
         return EnrichedGlyphGraph(
             schema_version=ENRICHED_GLYPH_GRAPH_SCHEMA_VERSION,
@@ -203,7 +343,7 @@ class SymbolIdentityRepairer:
                 False,
             )
 
-        static_candidate = _candidate_from_glyph_name(glyph)
+        static_candidate = _candidate_from_glyph_name(glyph, self._glyph_name_mapping)
         if static_candidate is not None:
             trace.append("glyph_name_lookup")
             candidates.append(static_candidate)
@@ -318,34 +458,49 @@ def _candidate_from_pdf_text(glyph: RawGlyphNode) -> SymbolIdentityCandidate:
     )
 
 
-def _candidate_from_glyph_name(glyph: RawGlyphNode) -> SymbolIdentityCandidate | None:
+def _candidate_from_glyph_name(
+    glyph: RawGlyphNode,
+    mapping: GlyphNameMappingTable,
+) -> SymbolIdentityCandidate | None:
     name = str(getattr(glyph, "glyph_name", "") or "").strip().lstrip("/")
     if not name:
         return None
-    unicode_value = _unicode_from_glyph_name(name)
+    entry = _entry_from_glyph_name(name, mapping)
+    if entry is None:
+        return None
+    unicode_value = entry.unicode
     if not unicode_value:
         return None
     return SymbolIdentityCandidate(
         unicode=unicode_value,
         latex=_latex_for_unicode(unicode_value),
-        source="static_glyph_name_map",
+        source=entry.source,
         confidence=0.99,
         evidence=(
             f"glyph_name={name}",
             f"font={glyph.normalized_font or glyph.font}",
+            f"mapping_source={entry.source}",
         ),
     )
 
 
-def _unicode_from_glyph_name(name: str) -> str:
+def _entry_from_glyph_name(
+    name: str,
+    mapping: GlyphNameMappingTable,
+) -> GlyphNameMappingEntry | None:
     base = name.split(".", 1)[0]
-    if base in _GLYPH_NAME_TO_UNICODE:
-        return _GLYPH_NAME_TO_UNICODE[base]
+    entry = mapping.lookup(base)
+    if entry is not None:
+        return entry
     encoded = _unicode_from_encoded_glyph_name(base)
     if encoded:
-        return encoded
-    normalized = _normalize_glyph_name(base)
-    return _NORMALIZED_GLYPH_NAME_TO_UNICODE.get(normalized, "")
+        return GlyphNameMappingEntry(
+            glyph_name=base,
+            unicode=encoded,
+            source="encoded_glyph_name",
+            priority=1000,
+        )
+    return None
 
 
 def _unicode_from_encoded_glyph_name(name: str) -> str:
@@ -363,6 +518,61 @@ def _unicode_from_encoded_glyph_name(name: str) -> str:
         except (OverflowError, ValueError):
             return ""
     return ""
+
+
+def _parse_glyph_mapping_line(line: str) -> tuple[str, str] | None:
+    text = line.strip()
+    if not text or text.startswith("#") or text.startswith("%"):
+        return None
+    if "#" in text:
+        text = text.split("#", 1)[0].strip()
+    glyph_name = ""
+    codepoints = ""
+    if ";" in text:
+        parts = [part.strip() for part in text.split(";")]
+        if len(parts) >= 2:
+            glyph_name = parts[0]
+            codepoints = parts[1]
+    else:
+        parts = text.split()
+        if len(parts) >= 2:
+            glyph_name = parts[0]
+            codepoints = parts[1]
+    if not glyph_name or not codepoints:
+        return None
+    unicode_value = _unicode_from_codepoint_sequence(codepoints)
+    if not unicode_value:
+        return None
+    return glyph_name, unicode_value
+
+
+def _unicode_from_codepoint_sequence(value: str) -> str:
+    tokens = re.split(r"[\s,]+", value.strip())
+    result: list[str] = []
+    for token in tokens:
+        clean = token.strip()
+        if not clean:
+            continue
+        if clean.startswith("U+"):
+            clean = clean[2:]
+        if clean.startswith("0x"):
+            clean = clean[2:]
+        if not re.fullmatch(r"[0-9A-Fa-f]{4,6}", clean):
+            return ""
+        try:
+            result.append(chr(int(clean, 16)))
+        except (OverflowError, ValueError):
+            return ""
+    return "".join(result)
+
+
+def _mapping_resource_warnings(name: str, lines: list[str]) -> tuple[str, ...]:
+    if not lines:
+        return (f"mapping_file_empty:{name}",)
+    parsed = sum(1 for line in lines if _parse_glyph_mapping_line(line) is not None)
+    if parsed == 0:
+        return (f"mapping_file_no_entries:{name}",)
+    return ()
 
 
 def _normalize_glyph_name(name: str) -> str:

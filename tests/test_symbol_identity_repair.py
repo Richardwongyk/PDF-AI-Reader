@@ -11,6 +11,7 @@ from src.core.born_digital_math import (
 from src.core.pdf_glyph_graph import RawGlyphGraphExtractor
 from src.core.symbol_identity_repair import (
     ENRICHED_GLYPH_GRAPH_SCHEMA_VERSION,
+    GlyphNameMappingLoader,
     SYMBOL_IDENTITY_REPAIR_VERSION,
     SymbolIdentityRepairer,
 )
@@ -127,6 +128,69 @@ def test_symbol_identity_repair_has_no_visual_ocr_dependency() -> None:
     assert "mineru" not in source
     assert "ocr" not in source
     assert "fitz.open" not in source
+
+
+def test_symbol_identity_repair_loads_agl_style_mapping_resource(tmp_path) -> None:
+    mapping_file = tmp_path / "texglyphlist.txt"
+    mapping_file.write_text(
+        "\n".join([
+            "# name;Unicode",
+            "fancyintegral;222B",
+            "twocode;0061 0302",
+        ]),
+        encoding="utf-8",
+    )
+    graph = _graph([
+        PdfGlyph("cid:1", "CustomMath", 10, (10, 10, 20, 20), cid=1, glyph_name="fancyintegral"),
+    ])
+
+    enriched = SymbolIdentityRepairer(glyph_name_mapping_paths=[mapping_file]).repair_graph(graph)
+
+    node = enriched.glyphs[0]
+    assert node.resolved_identity is not None
+    assert node.resolved_identity.unicode == "∫"
+    assert node.resolved_identity.source == "glyph_name_resource:texglyphlist.txt"
+    assert "glyph_name_resource:texglyphlist.txt" in enriched.summary.mapping_sources
+    assert "static_glyph_name_map" in enriched.summary.mapping_sources
+
+
+def test_symbol_identity_mapping_resource_can_override_builtin_name(tmp_path) -> None:
+    mapping_file = tmp_path / "override.txt"
+    mapping_file.write_text("summation;222B\n", encoding="utf-8")
+    graph = _graph([
+        PdfGlyph("cid:80", "CMSY10", 10, (10, 10, 20, 20), cid=80, glyph_name="summation"),
+    ])
+
+    enriched = SymbolIdentityRepairer(glyph_name_mapping_paths=[mapping_file]).repair_graph(graph)
+
+    node = enriched.glyphs[0]
+    assert node.resolved_identity is not None
+    assert node.resolved_identity.unicode == "∫"
+    assert node.resolved_identity.source == "glyph_name_resource:override.txt"
+    assert any("mapping_conflict:summation" in warning for warning in enriched.summary.mapping_warnings)
+
+
+def test_symbol_identity_mapping_loader_reports_missing_resource(tmp_path) -> None:
+    missing = tmp_path / "missing.txt"
+    table = GlyphNameMappingLoader.load([missing])
+
+    assert "static_glyph_name_map" in table.sources
+    assert table.warnings == (f"mapping_file_missing:{missing}",)
+
+
+def test_symbol_identity_repair_decodes_encoded_glyph_names() -> None:
+    graph = _graph([
+        PdfGlyph("cid:1", "CustomMath", 10, (10, 10, 20, 20), cid=1, glyph_name="uni2211"),
+        PdfGlyph("cid:2", "CustomMath", 10, (24, 10, 34, 20), cid=2, glyph_name="u222B"),
+    ])
+
+    enriched = SymbolIdentityRepairer().repair_graph(graph)
+
+    assert enriched.glyphs[0].resolved_identity is not None
+    assert enriched.glyphs[0].resolved_identity.unicode == "∑"
+    assert enriched.glyphs[0].resolved_identity.source == "encoded_glyph_name"
+    assert enriched.glyphs[1].resolved_identity is not None
+    assert enriched.glyphs[1].resolved_identity.unicode == "∫"
 
 
 def test_raw_glyph_graph_carries_optional_glyph_name() -> None:
