@@ -28,6 +28,7 @@ from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.app.formula_knowledge_graph import FormulaKnowledgeGraphService
 from src.app.formula_knowledge_update import FormulaKnowledgeUpdateService
 from src.app.formula_semantic_review import FormulaSemanticReviewService
+from src.app.tinybdmath_candidate_service import TinyBDMathCandidateService
 from src.app.graph_index_store import GraphIndexStore
 from src.core.ai_engine import BaseLLMClient, LiteLLMClient
 from src.core.external_formula_tools import ExternalFormulaToolRunner, ExternalFormulaToolSpec
@@ -169,6 +170,8 @@ def run_pipeline_case(
     drain_r3: bool = False,
     drain_r4: bool = False,
     drain_r5: bool = False,
+    run_tinybdmath: bool = False,
+    tinybdmath_model: Path | None = None,
 ) -> MultiRoundPipelineReport:
     started_total = time.perf_counter()
     pages_scanned, blocks = _parse_blocks(case.pdf, max_pages=max_pages, start_page=start_page)
@@ -185,6 +188,16 @@ def run_pipeline_case(
     r0_report, r05_report = _run_r0(flow, formula_store, filepath, doc_hash, blocks, start_page, pages_scanned)
     rounds.append(r0_report)
     rounds.append(r05_report)
+    if run_tinybdmath:
+        rounds.append(
+            _run_tinybdmath_r2a(
+                formula_store,
+                doc_hash,
+                filepath=filepath,
+                tinybdmath_model=tinybdmath_model,
+                limit=max(1, r2_limit),
+            )
+        )
     rounds.append(_run_r1(formula_store, filepath, doc_hash, blocks, limit=r1_limit))
     rounds.append(
         _run_r2(
@@ -477,6 +490,29 @@ def _run_r1(
             "processed_cache_only": len(selected),
             "skipped_completed_blocks": completed if not queued and not selected else 0,
         },
+    )
+
+
+def _run_tinybdmath_r2a(
+    store: FormulaIndexStore,
+    doc_hash: str,
+    *,
+    filepath: str,
+    tinybdmath_model: Path | None,
+    limit: int,
+) -> RoundReport:
+    started = time.perf_counter()
+    service = TinyBDMathCandidateService(store, model_path=tinybdmath_model)
+    details = service.process_doc(doc_hash, filepath=filepath, limit=max(1, int(limit)))
+    status = "done" if int(details.get("failed", 0) or 0) == 0 else "partial"
+    if int(details.get("processed", 0) or 0) == 0 and int(details.get("skipped_cached", 0) or 0) == 0:
+        status = "skipped"
+    return RoundReport(
+        round="r2a_tinybdmath_structural",
+        status=status,
+        elapsed_sec=round(time.perf_counter() - started, 3),
+        counts={"tinybdmath_structural": int(details.get("processed", 0) or 0)},
+        details=details,
     )
 
 
@@ -2196,6 +2232,17 @@ def main() -> int:
     parser.add_argument("--r5-limit", type=int, default=8)
     parser.add_argument("--auto-local-tools", action="store_true")
     parser.add_argument("--run-cloud-review", action="store_true")
+    parser.add_argument(
+        "--run-tinybdmath",
+        action="store_true",
+        help="Run non-visual TinyBDMath r2a structural candidate scoring after r0/r0.5.",
+    )
+    parser.add_argument(
+        "--tinybdmath-model",
+        type=Path,
+        default=None,
+        help="Optional JSON model from tools/tinybdmath_train_baseline.py.",
+    )
     parser.add_argument("--drain-r2", action="store_true", help="Run r2 in bounded batches until no queued r2 jobs remain.")
     parser.add_argument("--drain-r3", action="store_true", help="Run r3 in bounded batches until no queued r3 jobs remain.")
     parser.add_argument("--drain-r4", action="store_true", help="Run r4 in bounded batches until no queued r4 jobs remain.")
@@ -2237,6 +2284,8 @@ def main() -> int:
             r2_sample_formulas=max(0, args.r2_sample_formulas),
             auto_local_tools=bool(args.auto_local_tools),
             run_cloud_review=bool(args.run_cloud_review),
+            run_tinybdmath=bool(args.run_tinybdmath),
+            tinybdmath_model=args.tinybdmath_model,
             run_targeted_r2_after_fusion=bool(args.run_targeted_r2_after_fusion),
             drain_r2=bool(args.drain_r2),
             drain_r3=bool(args.drain_r3),

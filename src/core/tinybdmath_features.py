@@ -131,6 +131,20 @@ class TinyBDFeatureExtractor:
         })
         return self._from_glyph_features(region_hash, glyphs)
 
+    def extract_from_enriched_json(
+        self,
+        *,
+        enriched_input_hash: str,
+        glyphs_json: list[dict[str, Any]],
+    ) -> TinyBDFeatureGraph:
+        """Build candidate features from persisted Enriched Glyph Graph JSON."""
+        glyphs = tuple(
+            feature
+            for item in glyphs_json
+            if (feature := _glyph_feature_from_json(item)) is not None
+        )
+        return self._from_glyph_features(enriched_input_hash, glyphs)
+
     def _from_glyph_features(
         self,
         enriched_input_hash: str,
@@ -193,6 +207,39 @@ def _glyph_feature(node: EnrichedGlyphNode) -> TinyBDGlyphFeature:
         width=round(width, 6),
         height=round(height, 6),
         page_num=node.raw.page_num,
+    )
+
+
+def _glyph_feature_from_json(item: dict[str, Any]) -> TinyBDGlyphFeature | None:
+    raw = item.get("raw", {})
+    if not isinstance(raw, dict):
+        return None
+    bbox_value = raw.get("bbox", ())
+    if not isinstance(bbox_value, (list, tuple)) or len(bbox_value) != 4:
+        return None
+    try:
+        bbox = tuple(float(value) for value in bbox_value)
+    except (TypeError, ValueError):
+        return None
+    identity = item.get("resolved_identity", {})
+    if not isinstance(identity, dict):
+        identity = {}
+    width = max(0.0, bbox[2] - bbox[0])
+    height = max(0.0, bbox[3] - bbox[1])
+    return TinyBDGlyphFeature(
+        node_id=str(item.get("node_id", "") or raw.get("node_id", "")),
+        unicode=str(identity.get("unicode", "") or ""),
+        latex=str(identity.get("latex", "") or ""),
+        identity_source=str(identity.get("source", "unknown") or "unknown"),
+        identity_confidence=round(_json_float(identity.get("confidence")), 6),
+        is_unknown=bool(raw.get("is_unknown")) and not identity,
+        font=str(raw.get("normalized_font", "") or raw.get("font", "") or ""),
+        size=round(_json_float(raw.get("size")), 6),
+        bbox=bbox,  # type: ignore[arg-type]
+        center=(round((bbox[0] + bbox[2]) / 2.0, 6), round((bbox[1] + bbox[3]) / 2.0, 6)),
+        width=round(width, 6),
+        height=round(height, 6),
+        page_num=_json_int(raw.get("page_num")),
     )
 
 
@@ -312,3 +359,17 @@ def _stable_hash(payload: dict[str, Any]) -> str:
         separators=(",", ":"),
     ).encode("utf-8", errors="ignore")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _json_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

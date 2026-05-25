@@ -261,15 +261,24 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 
 ### M1：MLP baseline
 
-- 1k-10k synthetic formula。
-- relation F1 baseline。
-- decoder MVP。
+- Attention/Napkin 真实 PDF + LaTeX 源码数据流已开始落地：`tools/born_digital_formula_dataset.py`
+  生成 source formula index、PDF candidate index 和 TinyBD feature graph JSONL。
+- `tools/tinybdmath_training_data.py` 已把真实数据产物转成训练/验收行，包含 quality label、
+  unknown glyph rate、edge hint counts、feature density、structural signal count 和源码目标。
+- `src/core/tinybdmath_baseline.py` 已提供标准库一隐藏层 MLP，用 PDF graph 特征预测候选质量；
+  源 LaTeX 只用于标签和评估，不作为推理特征。
+- `src/core/tinybdmath_torch_backend.py` 和 `tools/tinybdmath_train_torch.py` 已提供可选 PyTorch 后端；
+  用户本机 `science` conda 环境可用于训练，主程序环境不安装 torch。
+- 仍缺真正 relation label/SLT decoder；当前 MLP 是质量门控基线，不负责从 graph 直接生成 LaTeX。
 
 ### M2：项目接入
 
-- r2a structural candidate worker。
+- r2a structural candidate worker 已有第一版：`src/app/tinybdmath_candidate_service.py` 从 r0/r0.5
+  persisted evidence 生成 TinyBD feature graph，写入 `formula_recognition_results`
+  的 `tinybdmath_structural:tinybdmath` 候选，并写 `r2a_tinybdmath_structural` round record。
+- `tools/formula_multiround_pipeline.py --run-tinybdmath` 已接入 r0/r0.5 后、fusion 前的非视觉 r2a。
 - FormulaIndexStore 落库。
-- pipeline 报告 TinyBDMath 候选。
+- pipeline 报告 TinyBDMath 候选，并进入 fusion/r3/r4 后续链路；结果固定 candidate-only，不覆盖正文/RAG。
 
 ### M3：GNN
 
@@ -297,9 +306,11 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 4. 已完成 AGL/texglyphlist 风格映射资源 loader。
 5. 已完成 glyph map 自动发现入口。
 6. 已开始 Attention/Napkin 真实数据集生成器。
-7. 下一步跑 Attention/Napkin 全量，修正数据集质量和性能瓶颈。
-8. 接入真实 TeX Live/CTAN 资源目录和 font cmap。
-9. 生成 100-1000 条 synthetic 公式 PDF graph。
-10. 写 MLP edge scorer baseline。
-11. 接入 r2a candidate-only。
-12. 用 Attention/Napkin 验证不污染正文和 RAG。
+7. 已完成真实训练行生成器、标准库 MLP 训练器、候选打分器、数据审计器、realdata pipeline。
+8. 已完成可选 PyTorch 训练后端和 `tools/run_tinybdmath_torch_science.ps1`，可调用 `science` 环境训练。
+9. 已接入 r2a candidate-only 服务和 `--run-tinybdmath` pipeline 开关。
+10. Attention 前 6 页 smoke：`r2a_tinybdmath_structural` 处理 7 条 r0 候选，写入
+    `tinybdmath_structural:tinybdmath` 7 条候选和 7 条 round done；fusion 能读取，`ready_for_manual_accept=0`。
+11. 下一步跑 Attention/Napkin 全量 realdata pipeline，训练 MLP/PyTorch baseline，修正数据集质量和性能瓶颈。
+12. 下一步接入真实 TeX Live/CTAN 资源目录、font cmap 和 outline/shape identity candidate。
+13. 下一步生成 100-1000 条 synthetic 公式 PDF graph，并开始 relation labels/decoder MVP。
