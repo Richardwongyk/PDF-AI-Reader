@@ -28,7 +28,7 @@ from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.app.formula_knowledge_graph import FormulaKnowledgeGraphService
 from src.app.formula_knowledge_update import FormulaKnowledgeUpdateService
 from src.app.formula_semantic_review import FormulaSemanticReviewService
-from src.app.tinybdmath_candidate_service import TinyBDMathCandidateService
+from src.app.tinybdmath_candidate_service import TINYBDMATH_PREPROCESS_VERSION, TinyBDMathCandidateService
 from src.app.graph_index_store import GraphIndexStore
 from src.core.ai_engine import BaseLLMClient, LiteLLMClient
 from src.core.external_formula_tools import ExternalFormulaToolRunner, ExternalFormulaToolSpec
@@ -172,6 +172,7 @@ def run_pipeline_case(
     drain_r5: bool = False,
     run_tinybdmath: bool = False,
     tinybdmath_model: Path | None = None,
+    tinybdmath_edge_model: Path | None = None,
 ) -> MultiRoundPipelineReport:
     started_total = time.perf_counter()
     pages_scanned, blocks = _parse_blocks(case.pdf, max_pages=max_pages, start_page=start_page)
@@ -194,8 +195,10 @@ def run_pipeline_case(
                 formula_store,
                 doc_hash,
                 filepath=filepath,
+                blocks=blocks,
                 tinybdmath_model=tinybdmath_model,
-                limit=max(1, r2_limit),
+                tinybdmath_edge_model=tinybdmath_edge_model,
+                limit=r2_limit,
             )
         )
     rounds.append(_run_r1(formula_store, filepath, doc_hash, blocks, limit=r1_limit))
@@ -498,20 +501,54 @@ def _run_tinybdmath_r2a(
     doc_hash: str,
     *,
     filepath: str,
+    blocks: list[DocumentBlock],
     tinybdmath_model: Path | None,
+    tinybdmath_edge_model: Path | None,
     limit: int,
 ) -> RoundReport:
     started = time.perf_counter()
-    service = TinyBDMathCandidateService(store, model_path=tinybdmath_model)
-    details = service.process_doc(doc_hash, filepath=filepath, limit=max(1, int(limit)))
-    status = "done" if int(details.get("failed", 0) or 0) == 0 else "partial"
-    if int(details.get("processed", 0) or 0) == 0 and int(details.get("skipped_cached", 0) or 0) == 0:
+    service = TinyBDMathCandidateService(store, model_path=tinybdmath_model, edge_model_path=tinybdmath_edge_model)
+    inline_items = _inline_formula_candidate_items(blocks)
+    if int(limit) > 0:
+        structure_limit = max(1, int(limit))
+        inline_limit = max(1, int(limit) * 8)
+    else:
+        structure_limit = 100000
+        inline_limit = len(inline_items)
+    structure_details = service.process_doc(doc_hash, filepath=filepath, limit=structure_limit)
+    inline_details = service.process_inline_candidates(
+        doc_hash,
+        inline_items,
+        filepath=filepath,
+        limit=inline_limit,
+    )
+    failed = int(structure_details.get("failed", 0) or 0) + int(inline_details.get("failed", 0) or 0)
+    processed = int(structure_details.get("processed", 0) or 0) + int(inline_details.get("processed", 0) or 0)
+    skipped_cached = int(structure_details.get("skipped_cached", 0) or 0) + int(inline_details.get("skipped_cached", 0) or 0)
+    status = "done" if failed == 0 else "partial"
+    if processed == 0 and skipped_cached == 0:
         status = "skipped"
+    details = {
+        "stage": "tinybdmath_structural",
+        "model": "tinybdmath",
+        "model_version": service.model_version,
+        "relation_model_version": service.relation_model_version,
+        "preprocess_version": TINYBDMATH_PREPROCESS_VERSION,
+        "structure": structure_details,
+        "inline": inline_details,
+        "records_seen": int(structure_details.get("records_seen", 0) or 0) + int(inline_details.get("records_seen", 0) or 0),
+        "processed": processed,
+        "skipped_cached": skipped_cached,
+        "skipped_no_evidence": int(structure_details.get("skipped_no_evidence", 0) or 0)
+        + int(inline_details.get("skipped_no_evidence", 0) or 0),
+        "failed": failed,
+        "elapsed_ms": int(structure_details.get("elapsed_ms", 0) or 0) + int(inline_details.get("elapsed_ms", 0) or 0),
+    }
     return RoundReport(
         round="r2a_tinybdmath_structural",
         status=status,
         elapsed_sec=round(time.perf_counter() - started, 3),
-        counts={"tinybdmath_structural": int(details.get("processed", 0) or 0)},
+        counts={"tinybdmath_structural": processed},
         details=details,
     )
 
@@ -1080,6 +1117,38 @@ def _formula_fusion_report(
                 evidence=record.evidence,
             )
         )
+        decoded = record.evidence.get("decoded_latex", {}) if isinstance(record.evidence, dict) else {}
+        decoded_latex = str(decoded.get("latex", "") or "").strip() if isinstance(decoded, dict) else ""
+        if decoded_latex and decoded_latex != str(record.latex or "").strip():
+            _add_fusion_candidate(
+                candidates_by_id,
+                _fusion_candidate(
+                    candidate_id=record.candidate_id,
+                    result_id=_synthetic_result_id(
+                        doc_hash,
+                        record.candidate_id,
+                        "tinybdmath_decoded",
+                        "decoded_latex",
+                        record.input_hash,
+                    ),
+                    stage="tinybdmath_decoded",
+                    model=record.model,
+                    model_version=record.model_version,
+                    preprocess_version=f"{record.preprocess_version}+decoded",
+                    input_hash=record.input_hash,
+                    latex=decoded_latex,
+                    source_formulas=source_formulas,
+                    score=_optional_float(decoded.get("confidence")) if isinstance(decoded, dict) else None,
+                    warnings=[str(item) for item in decoded.get("warnings", []) if str(item)] if isinstance(decoded, dict) else [],
+                    accepted=False,
+                    evidence={
+                        "source": "tinybdmath_decoded_latex",
+                        "source_result_id": record.result_id,
+                        "decoder_version": decoded.get("decoder_version", "") if isinstance(decoded, dict) else "",
+                        "candidate_only": True,
+                    },
+                )
+            )
 
     for record in store.list_round_records(
         doc_hash,
@@ -1403,7 +1472,7 @@ def _fusion_stage_quality(candidates: list[dict[str, object]]) -> dict[str, dict
 
 
 def _best_born_digital_stage_quality(stage_quality: dict[str, dict[str, object]]) -> dict[str, object] | None:
-    born_digital_stages = ("pdf_structure", "parsed_blocks", "inline_spans")
+    born_digital_stages = ("pdf_structure", "parsed_blocks", "inline_spans", "tinybdmath_structural")
     candidates = [
         stage_quality[stage]
         for stage in born_digital_stages
@@ -2253,6 +2322,12 @@ def main() -> int:
         default=None,
         help="Optional JSON model from tools/tinybdmath_train_baseline.py.",
     )
+    parser.add_argument(
+        "--tinybdmath-edge-model",
+        type=Path,
+        default=None,
+        help="Optional edge relation JSON model from tools/tinybdmath_train_edge_baseline.py.",
+    )
     parser.add_argument("--drain-r2", action="store_true", help="Run r2 in bounded batches until no queued r2 jobs remain.")
     parser.add_argument("--drain-r3", action="store_true", help="Run r3 in bounded batches until no queued r3 jobs remain.")
     parser.add_argument("--drain-r4", action="store_true", help="Run r4 in bounded batches until no queued r4 jobs remain.")
@@ -2296,6 +2371,7 @@ def main() -> int:
             run_cloud_review=bool(args.run_cloud_review),
             run_tinybdmath=bool(args.run_tinybdmath),
             tinybdmath_model=args.tinybdmath_model,
+            tinybdmath_edge_model=args.tinybdmath_edge_model,
             run_targeted_r2_after_fusion=bool(args.run_targeted_r2_after_fusion),
             drain_r2=bool(args.drain_r2),
             drain_r3=bool(args.drain_r3),

@@ -139,6 +139,16 @@ python src\main.py
 
 ## 常用测试与审计命令
 
+全软件总验收：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\full_software_validation.py --profile quick --case all --max-pages 2
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\full_software_validation.py --profile standard --case all
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\run_full_software_validation.ps1 -Profile standard -Case all
+```
+
+`quick` 用于短时间 smoke，`standard` 覆盖 core/RAG/GraphRAG、公式、TinyBDMath、Attention/Napkin 页段、多轮流水线、二次打开跳过和日志审计。默认不会启用云端或 OCR/MFR 工具；需要桌面交互闭环时显式加 `--include-desktop-e2e`，需要云端/本地工具候选时显式加 `--include-cloud` 或 `--include-local-tools`。
+
 轻量测试：
 
 ```powershell

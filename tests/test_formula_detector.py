@@ -533,8 +533,8 @@ def test_formula_audit_treats_all_latex_math_delimiters_as_formulas(tmp_path) ->
 
     display, inline, _count = _extract_source_formulas(latex_root)
 
-    assert display == ["c=d", "a=b"]
-    assert inline == ["y_j", "x_i"]
+    assert display == ["a=b", "c=d"]
+    assert inline == ["x_i", "y_j"]
 
 
 def test_formula_latex_audit_can_match_display_scope(monkeypatch, tmp_path) -> None:

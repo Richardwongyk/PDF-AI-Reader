@@ -12,6 +12,37 @@
 
 2026-05-25 TinyBDMath 数据集补充：新增 `src/core/latex_math_source_parser.py` 作为训练/审计专用 LaTeX math span 扫描器，保留源码 offset、delimiter、env、上下文；新增 `src/core/latex_macro_expander.py`，训练目标改为标准 LaTeX canonical target，项目私有宏如 Napkin `\pre` 会展开为 `^{\text{pre}}`，原始源码保留为 raw evidence。`tools/born_digital_formula_dataset.py` 和 `tools/formula_latex_audit.py` 已统一走该扫描器，不再用多套正则提取 source gold。新增 `tools/tinybdmath_sharded_dataset.py`、`tools/tinybdmath_shard_consolidate.py`、`tools/tinybdmath_gold_audit.py` 和 `tools/run_tinybdmath_full_data_pipeline.ps1`，用于 Attention/Napkin 页级分片、断点续跑、原子写入、合并、gold/label tier 审计、baseline/PyTorch 训练。PDF 候选标签引入 TOC 页锚点窗口，优先同页/近页源码匹配，短公式也先受页窗口约束，避免全书范围误配。当前分片版本为 `tinybdmath_pdf_source_page_anchor_macro_v3`；旧版本分片不会被合并器当成新数据。
 
+2026-05-26 标准/计划补充：重要公开标准和参考资料已下载到本地 `.local_references/standards/`，包括 PDF 1.7、PDF Association ISO 32000-2 访问页、W3C MathML Core/3/4、XML entities、Unicode UTR #25/UAX #44/UCD/MathClass、Adobe AGL/AGLFN/zapfdingbats、texglyphlist、OpenType MATH/cmap/font file、LaTeX2e/amsmath/unicode-math。该目录已写入 `.git/info/exclude`，不能提交外部标准全文；索引见 `docs/local_standards_cache_index.md`。下一轮实现必须先强化 r0.5 补丁层，不能让 TinyBDMath 或 OCR 替代符号身份修复；覆盖所有公式规则的正确方式是 MathML/SLT 结构目标、coverage audit、模型置信、verifier 和 candidate-only 兜底，而不是手写固定规则表。
+
+2026-05-26 TinyBDMath graph/relation 补充：插桩 exact rows 已资产化为 graph rows（Attention 138 + Napkin 29743，rows=29881，blockers={}，dataset hash `f49359d58f2b34b006028cfd106d6678e7999f116934fbbaebbf6b250c886ba0`）。新增 graph baseline、weak relation labels、edge baseline、relation scorer、structural candidate、SLT skeleton/verifier、structural eval 和 KaTeX MathML audit extractor；relation labels 现在带 `mathml_relation_hints`。`TinyBDMathCandidateService` 支持 `edge_model_path`，`tools/formula_multiround_pipeline.py --tinybdmath-edge-model` 可把 relation scores 和 structural candidate 写入 r2a evidence。全链条 smoke 已跑通并做了性能修正：MathML extraction 改为分块批量调用，relation label 构建可复用预计算 MathML rows；2000 行训练/审计链完成 MathML -> labels -> train -> score -> structural -> eval，总耗时约 48.758s，micro precision=0.978121、recall=0.124314、F1=0.220591。生产 r2a 限流错误已修正：`r2_limit=0` 只跳过视觉/本地高精度 r2，不再截断非视觉 TinyBDMath r2a；Attention 前 6 页 born-digital 非 OCR 链路 r2a processed=115、Napkin 8-16 页 r2a processed=78，并已验证二次打开 r0/r2a 均按 input hash 跳过。当前仍复用原候选 LaTeX，质量门禁仍失败，不能宣称公式质量已提升。下一步必须做 SLT/MathML hard label 对齐和 decoder/verifier。
+
+2026-05-26 最新后台任务：已启动 `tools/run_tinybdmath_relation_pipeline.ps1 -OutputDir test_artifacts\tinybdmath_relation_pipeline_full_all_fast -Limit 0` 全量 29881 行 relation pipeline。当前日志显示已完成全量 MathML + relation labels 阶段，coverage 包括 inline=27725、display=2156、math_alphabet=5772、subscript=7188、superscript=4331、fraction=765、radical=564、script_size_pdf_evidence=11247，blockers={}；仍在训练/后续阶段时不要重复启动同一全量任务，先检查进程和日志。
+
+2026-05-26 PyTorch 训练补充：新增 `tools/tinybdmath_train_edge_torch.py`，用隔离 `science` 环境训练 edge relation model，并导出主程序可读的 `tinybdmath_edge_baseline_model.json`；`tools/run_tinybdmath_relation_pipeline.ps1 -UseTorchEdge` 可启用。PyTorch 2.5.1 在 `science` 中可用（CPU）。2000 行/121174 条边 smoke 验证 accuracy=0.999424；500 行端到端 v2 structural eval precision=0.910751、recall=0.022944、F1=0.044761，低于保守 baseline，不能默认替换。后续要做 class-weighted loss、两层 MLP/GNN、阈值校准和 decoder 优化。
+
+2026-05-26 最新 TinyBDMath 全线跑通补充：
+
+- 准确训练集没有丢。当前可靠入口仍是 `test_artifacts/instrumented_attention_full/instrumented_training_rows.jsonl` 和 `test_artifacts/instrumented_napkin_fast_delivery_v3/instrumented_training_rows.jsonl`。真实 verified exact 行数是 Attention 135、Napkin 29743，合计 29878；Attention 另有 3 个 marker 未在编译 PDF 中找到，不能作为 verified 训练行。每行保留 raw source 和 macro-expanded canonical LaTeX，源码只用于训练/验收。
+- “KaTeX warning 很多”不是插桩训练集失败，而是下一层“把 canonical LaTeX 解析成 MathML/关系监督”时，KaTeX 对 Napkin 中的 alignment `&`、xy-pic/量子电路、部分宏展开形态覆盖不足。后续应补 LaTeXML/更强 TeX AST/MathML parser，而不是质疑已验证的 PDF 彩色框训练行。
+- 已删除 decoder 替模型判断的硬编码：`tinybdmath_latex_decoder` 不再在根号缺 `RADICAL_BODY` 时拿右邻 `HORIZONTAL` 关系补主体；decoder 只消费模型/结构候选已经选中的关系并渲染 candidate-only LaTeX。训练标签层也从直接检查 `\sqrt/\frac` 字符串，改为使用 KaTeX/MathML `relation_hints` 加 PDF 几何证据监督关系模型。
+- 全量 relation pipeline 已完成：graph rows 29878，relation labels 2037744，PyTorch edge model 有效样本 1965743，导出 `tinybdmath_edge_softmax_v2_geometry_vector_rule_radical` JSON 模型；relation scores 29878 行/1570380 条；structural candidates 29878 行/219617 条 selected relations；structural eval micro precision=0.963245、recall=0.189623、F1=0.316868。该指标是弱监督关系层，不是最终公式准确率。
+- 产物位置：`test_artifacts/tinybdmath_relation_pipeline_v4_full_train_all/edge_model/tinybdmath_edge_baseline_model.json`、`relation_scores/`、`structural_candidates/`、`structural_eval_report.json`。这些都是测试/训练产物，不提交。
+- 主线 r2a 已接上全量模型：`test_artifacts/formula_multiround_attention4_tinybdmath_v4_full_model` 中 Attention 前 4 页 `r2a_tinybdmath_structural:done=46`，`formula_recognition_results` 写入 46 条 `tinybdmath_structural:tinybdmath`，accepted 全部为 0。复用 DB 后 fusion 50 条均 `already_done_same_input`，r2/r3/r5 不重复入队，证明跳过机制生效。
+- `tools/tinybdmath_score_relations.py` 已新增 `--stream`，`tools/run_tinybdmath_relation_pipeline.ps1` 默认流式打分，并正确读取 PyTorch report。后续更大训练集不要再用整批读写打分。
+- 当前质量边界必须说清：链路已经全线跑通，但公式还原质量远未达标。Attention 前 4 页 TinyBDMath group near_match_rate 约 0.25、average_best_similarity 约 0.648，且 `h_{t-1}` 等样例仍可能结构错误。下一步要补强 relation hard labels/SLT 对齐、LaTeXML parser、GNN/MLP 结构模型和 verifier/decoder，不允许在 decoder 里继续手写几何补丁。
+
+2026-05-27 全软件验证补充：
+
+- 新增 `tools/full_software_validation.py`：全软件总验收入口，统一编排 pytest、公式索引性能、LaTeX 源码审计、多轮公式流水线、二次打开跳过、日志审计；可显式开启桌面 E2E、云端 r3 和本地 OCR/MFR 工具。
+- 新增 `tools/run_full_software_validation.ps1`：长时间 standard/full/nightly 验证后台运行入口，输出 pid、stdout、stderr、report 路径，避免前台干等。
+- 新增 `tests/test_full_software_validation.py`，验证总计划确实覆盖 core/RAG/GraphRAG、公式、多轮、TinyBDMath、Attention/Napkin 和可选 E2E/cloud/local tools。
+- quick 实跑已通过：`--profile quick --case all --max-pages 2` 7 步骤约 65.663s，required failures=0，报告在 `test_artifacts/full_software_validation_quick_live/full_software_validation_report.json`。
+- standard 后台首跑除 `pytest_formula_pipeline` 中一个旧顺序断言外，其余 14 步通过；断言已修正为源码顺序，`pytest_formula_pipeline` 复跑 191 passed。
+- 总验收已强化为“退出码 + JSON 产物语义检查”：公式索引、源码审计、多轮流水线和日志审计都要检查关键字段。默认总验收不能意外启用 OCR/MFD、本地工具或云端；多轮报告必须看到 r0/r0.5/TinyBDMath 候选和 reopen skip/cache 证据。
+- 强化语义门禁后 quick 通过：`test_artifacts/full_software_validation_quick_semantic_v2`，7 步约 53.721s，required failures=0。
+- 强化语义门禁后 standard 通过：`tools/full_software_validation.py --profile standard --case all --output-dir test_artifacts/full_software_validation_standard_semantic`，15 步约 119.678s，required failures=0。该报告和所有 `test_artifacts/` 产物不提交。
+- 桌面 E2E 复测：Attention 通过；Napkin UI/RAG/日志链路完成但总结果因公式 quality gate 失败而返回 1，具体失败为 `common_source_command_recall 0.128 < 0.350`。不要把这个失败改成通过；它是当前公式质量未达标的验收证据。
+
 新增资料入口：`tools/tinybdmath_sharded_dataset.py --case <name> --pdf <pdf> --latex-root <latex_root> --output-dir <dir>`。这让 Attention、Napkin 和后续任意 PDF+LaTeX source root 走同一条源码扫描、导言区宏展开、页锚点、PDF 分片、严格 gold、复核队列流程。
 
 2026-05-25 训练集 100% 准确性补充：不要把 source/PDF 相似度高的候选直接当 gold。新增 `tools/tinybdmath_gold_policy.py` 统一 verified gold 闸门，要求同页窗口、源码页窗唯一、PDF 结构证据完整、无 unknown/warnings、严格 token 签名一致，且过短/单字符公式必须复核。`tools/tinybdmath_review_queue.py` 可把未自动通过的样本导出为 JSONL、PDF crop 图、源码上下文、PDF evidence 和视觉大模型审核 prompt；`tools/tinybdmath_apply_review.py` 只把自动 verified 行和高置信 `accept/revise` 复核结果合成独立 verified gold JSONL。阶段合并结果：Attention 15 页 + Napkin 1050 页分片、30790 条 source formulas、2493 条 PDF candidates；极严自动 gold 仅 12 条，其余进入复核，不得宣称两份 PDF 已全部一一对应完成。

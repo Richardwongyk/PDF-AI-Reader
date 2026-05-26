@@ -42,6 +42,9 @@
 ## 当前自动化命令
 
 ```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/full_software_validation.py --profile quick --case all --max-pages 2 --output-dir test_artifacts/full_software_validation_quick_live
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools/run_full_software_validation.ps1 -Profile standard -Case all
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/full_software_validation.py --profile full --case all --include-desktop-e2e --strict-logs --output-dir test_artifacts/full_software_validation_full
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case attention
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case napkin
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools/e2e_pdf_workflow.py --case all
@@ -57,6 +60,15 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_mult
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case attention --max-pages 8 --output test_artifacts/formula_index_performance/attention_report.json --db test_artifacts/formula_index_performance/attention_jobs.db
 C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_index_performance.py --case napkin --max-pages 12 --output test_artifacts/formula_index_performance/napkin_report.json --db test_artifacts/formula_index_performance/napkin_jobs.db
 ```
+
+`tools/full_software_validation.py` 是当前全软件总验收入口，分四档：
+
+- `quick`：短时间确认核心 pytest、公式索引、LaTeX 源码审计、多轮公式流水线、日志审计都能启动并产出报告。
+- `standard`：覆盖 core/RAG/GraphRAG、公式、多轮、TinyBDMath、Attention、Napkin 前段和 Napkin 公式密集页段，并验证同一 DB 二次打开跳过。
+- `full`：跑全仓 pytest 和更完整 Attention/Napkin 审计；桌面 E2E 仍需显式 `--include-desktop-e2e`，避免在无 GUI/无人值守时误开窗口。
+- `nightly`：面向长时间无人值守，默认包括桌面 E2E，适合作为夜间全量验收。
+
+默认总验收仍遵守 born-digital 非 OCR 主线：不启用云端、不会自动跑本地 OCR/MFR 工具。只有显式传入 `--include-cloud` 或 `--include-local-tools` 时，才会调用 DeepSeek 或隔离工具环境。
 
 ## 判定标准
 
@@ -77,6 +89,10 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 源 LaTeX 只用于测试、审计和验收；真实用户运行路径不得依赖源码。源码中 `$...$`、`\(...\)`、`\[...\]`、`$$...$$` 包裹内容都算公式，其中行内公式必须单独统计。
 - 每次公式验收必须同时检查是否违反“禁止造轮子/禁止硬编码”：生产公式路径不能出现样本特化词表、论文样本正则、一次性手写修复链，默认 r0 不能调用自写 LaTeX 重建器冒充高精度解析。
 - r3 语义复核测试必须证明云端修正只写候选 JSON，不覆盖原始公式块；后台 QThread smoke 必须通过；真实 DeepSeek 调用作为可选 smoke test 单独运行，不能进入默认导入热路径。
+- 全软件验证必须输出 `full_software_validation_report.json`，其中包含每一步命令、耗时、退出码、stdout/stderr 日志路径和关键产物路径；失败时不得只看终端最后一行，必须查对应 step 日志。
+- 总验收不能只相信退出码：`formula_index`、`formula_latex_audit`、`formula_multiround` 和 `log_audit` 产物必须再做 JSON 语义检查。多轮报告必须能看到 r0、必要时 r0.5、TinyBDMath 候选、默认非 OCR/非云端边界、二次打开 skip/cache 证据。
+- `standard/full/nightly` 必须覆盖 Attention 和 Napkin；Napkin 至少覆盖前段页和公式密集页段，不能只用 Attention 小文件证明整套软件跑通。
+- `standard/full/nightly` 必须包含二次打开/复用 DB 跳过验证，证明 r0/r2a/fusion/r3/r4/r5 不是每次重扫。
 
 公式审计门槛：
 
@@ -103,6 +119,14 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 外部工具环境已按独立 worker 思路存在：MinerU、Paddle Formula、Pix2Text 已有不同程度 smoke；PDF-Extract-Kit/UniMERNet 尚未跑通，旧 magic-pdf 缺权重。E2E 仍必须把这些工具输出当候选审计，不能把单图 smoke 当质量通过。
 
 ## 本轮闭环结果
+
+2026-05-27 全软件与桌面闭环复测：
+
+- `tools/full_software_validation.py --profile quick --case all --max-pages 2 --output-dir test_artifacts/full_software_validation_quick_semantic_v2 --fail-fast` 通过：7 步约 53.721s，required failures=0。
+- `tools/full_software_validation.py --profile standard --case all --output-dir test_artifacts/full_software_validation_standard_semantic` 通过：15 步约 119.678s，required failures=0。该版本已经做 JSON 产物语义检查，不只是看退出码。
+- Attention 桌面 E2E 通过：启动约 7.061s，打开约 0.058s；滚动、跳页、缩放、知识库检查、真实鼠标双击翻译打开/折叠/再打开、裂缝问答、右侧全文问答全部完成；日志 `ERROR/WARNING/CRITICAL=0`；右侧问答 evidence=8、answer chars=173、followups=3；公式审计 quality gate 通过。
+- Napkin 桌面 E2E 的 UI/性能/RAG 链路跑完：启动约 50.855s，打开约 0.035s，1050 页长文档跳转到 1/11/51/121/251 页、缩放、双击翻译、裂缝问答、右侧问答均完成；日志 `ERROR/WARNING/CRITICAL=0`；知识库检查约 2.710s；缩放 max 225.5ms、render max 40.3ms、visible update max 395.9ms。
+- Napkin E2E 总退出码仍为失败，原因是公式质量门禁未过：`common_source_command_recall 0.128 < 0.350`。这不是 UI 崩溃，而是正确暴露公式识别质量未达标；不能降级为通过。
 
 2026-05-24 本轮已跑 Attention 和 Napkin 桌面闭环。结论如下：
 

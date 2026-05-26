@@ -622,6 +622,132 @@ def test_formula_fusion_report_includes_inline_math_candidates(tmp_path) -> None
     assert not any(item["candidate_id"] == "p0_b0_inline_0" for item in report["targeted_r2_queue"])
 
 
+def test_tinybdmath_r2a_processes_inline_candidates(monkeypatch, tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+
+    paragraph = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content=r"inline \(x_i\)",
+        bbox=(0, 0, 100, 20),
+        metadata={
+            "inline_math_candidates": [
+                {
+                    "latex": "x_i",
+                    "bbox": [10, 2, 22, 12],
+                    "has_script_size": True,
+                    "spans": [
+                        {"text": "x", "font": "CMMI10", "size": 10.0, "bbox": [10, 2, 17, 12]},
+                        {"text": "i", "font": "CMMI7", "size": 7.0, "bbox": [17, 6, 22, 13]},
+                    ],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(pipe, "_parse_blocks", lambda pdf, max_pages, start_page: (1, [paragraph]))
+    monkeypatch.setattr(pipe, "compute_sha256", lambda path: "doc-hash-inline")
+
+    class FakePageWorker:
+        def __init__(self, filepath, page_nums, blocks, doc_hash="", scan_round="") -> None:
+            self.finished_signal = _Signal()
+            self._doc_hash = doc_hash
+            self._scan_round = scan_round
+
+        def run(self) -> None:
+            self.finished_signal.emit(
+                {
+                    "doc_hash": self._doc_hash,
+                    "scan_round": self._scan_round,
+                    "done_pages": [0],
+                    "failed": [],
+                    "detected": [],
+                    "structure_candidates": [],
+                }
+            )
+
+    monkeypatch.setattr(pipe, "_FormulaPageScanWorker", FakePageWorker)
+
+    report = pipe.run_pipeline_case(
+        _case(),
+        formula_db_path=tmp_path / "formula_jobs.db",
+        graph_db_path=tmp_path / "graph_jobs.db",
+        max_pages=1,
+        r1_limit=0,
+        r2_limit=1,
+        r3_limit=0,
+        r4_limit=1,
+        run_tinybdmath=True,
+    )
+
+    rounds = {item.round: item for item in report.rounds}
+    details = rounds["r2a_tinybdmath_structural"].details
+    assert details["inline"]["processed"] == 1
+    assert report.recognition_results["tinybdmath_structural:tinybdmath"] == 1
+
+
+def test_tinybdmath_r2a_zero_r2_limit_still_processes_inline_candidates(monkeypatch, tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+
+    def inline_candidate(latex: str, x0: float) -> dict[str, object]:
+        return {
+            "latex": latex,
+            "bbox": [x0, 2, x0 + 12, 13],
+            "has_script_size": True,
+            "spans": [
+                {"text": latex[0], "font": "CMMI10", "size": 10.0, "bbox": [x0, 2, x0 + 7, 12]},
+                {"text": latex[-1], "font": "CMMI7", "size": 7.0, "bbox": [x0 + 7, 6, x0 + 12, 13]},
+            ],
+        }
+
+    paragraph = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content=r"inline \(x_i\) and \(y_j\)",
+        bbox=(0, 0, 100, 20),
+        metadata={"inline_math_candidates": [inline_candidate("x_i", 10), inline_candidate("y_j", 40)]},
+    )
+    monkeypatch.setattr(pipe, "_parse_blocks", lambda pdf, max_pages, start_page: (1, [paragraph]))
+    monkeypatch.setattr(pipe, "compute_sha256", lambda path: "doc-hash-inline-zero-limit")
+
+    class FakePageWorker:
+        def __init__(self, filepath, page_nums, blocks, doc_hash="", scan_round="") -> None:
+            self.finished_signal = _Signal()
+            self._doc_hash = doc_hash
+            self._scan_round = scan_round
+
+        def run(self) -> None:
+            self.finished_signal.emit(
+                {
+                    "doc_hash": self._doc_hash,
+                    "scan_round": self._scan_round,
+                    "done_pages": [0],
+                    "failed": [],
+                    "detected": [],
+                    "structure_candidates": [],
+                }
+            )
+
+    monkeypatch.setattr(pipe, "_FormulaPageScanWorker", FakePageWorker)
+
+    report = pipe.run_pipeline_case(
+        _case(),
+        formula_db_path=tmp_path / "formula_jobs.db",
+        graph_db_path=tmp_path / "graph_jobs.db",
+        max_pages=1,
+        r1_limit=0,
+        r2_limit=0,
+        r3_limit=0,
+        r4_limit=1,
+        run_tinybdmath=True,
+    )
+
+    details = {item.round: item for item in report.rounds}["r2a_tinybdmath_structural"].details
+    assert details["inline"]["records_seen"] == 2
+    assert details["inline"]["processed"] == 2
+
+
 def test_formula_fusion_keeps_multiple_inline_formulas_in_same_paragraph_separate(tmp_path) -> None:
     from tools import formula_multiround_pipeline as pipe
 
@@ -1086,6 +1212,37 @@ def test_formula_fusion_report_merges_same_bbox_candidates(tmp_path) -> None:
     row = report["candidate_rows"][0]
     assert row["member_candidate_ids"] == ["p0_b0", "p0_r0_0"]
     assert row["stages"] == ["parsed_blocks", "pdf_structure"]
+
+
+def test_formula_fusion_includes_tinybdmath_decoded_candidate(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+    from src.app.formula_index_store import FormulaIndexStore
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(r"inline \(h_t\)", encoding="utf-8")
+    case = type("Case", (), {"name": "fake", "pdf": Path("fake.pdf"), "latex_root": latex_root})()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b0_inline_0",
+        stage="tinybdmath_structural",
+        model="tinybdmath",
+        model_version="v1",
+        preprocess_version="p1",
+        input_hash="hash",
+        latex="ht",
+        normalized_latex="ht",
+        score=0.5,
+        evidence={"decoded_latex": {"latex": r"h_{t}", "confidence": 0.9, "warnings": []}},
+    )
+
+    report = pipe._formula_fusion_report(case, store, "doc-1", [], [], max_pages=0)
+    row = report["candidate_rows"][0]
+
+    assert "tinybdmath_decoded" in row["stages"]
+    assert any(item["stage"] == "tinybdmath_decoded" for item in row["ranked_candidates"])
+    assert row["decision"] != "ready_for_manual_accept"
 
 
 def test_formula_fusion_report_merges_later_candidate_id_members(tmp_path) -> None:
