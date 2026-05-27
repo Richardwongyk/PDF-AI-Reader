@@ -96,6 +96,8 @@ class FormulaKnowledgeUpdateService:
         for record in records:
             started_by_target[record.target_id] = time.perf_counter()
             block = block_map.get(record.target_id)
+            if block is None:
+                block = _block_from_record_payload(record.target_id, record.result_json, record.page_num)
             if block is None or block.block_type != BlockType.FORMULA:
                 self._store.mark_round_failed(
                     doc_hash,
@@ -164,6 +166,8 @@ def _block_for_record(block: DocumentBlock, payload: dict[str, object]) -> Docum
         "formula_r5_input_hash": str(payload.get("input_hash", "") or ""),
         "formula_r5_best_result_id": str(payload.get("best_result_id", "") or ""),
         "formula_r5_fusion_version": str(payload.get("fusion_version", "") or ""),
+        "formula_r5_acceptance_decision_id": str(payload.get("acceptance_decision_id", "") or ""),
+        "formula_r5_acceptance_source": str(payload.get("acceptance_source", "") or ""),
     }
     if accepted_latex:
         metadata["formula_r5_accepted"] = True
@@ -175,3 +179,37 @@ def _block_for_record(block: DocumentBlock, payload: dict[str, object]) -> Docum
             deep=True,
         )
     return block.model_copy(update={"metadata": metadata}, deep=True)
+
+
+def _block_from_record_payload(
+    block_id: str,
+    payload: dict[str, object],
+    default_page_num: int,
+) -> DocumentBlock | None:
+    accepted_latex = str(payload.get("accepted_latex", "") or "").strip()
+    if not accepted_latex:
+        return None
+    try:
+        page_num = int(payload.get("page_num", default_page_num))
+    except (TypeError, ValueError):
+        page_num = default_page_num
+    bbox_value = payload.get("bbox", (0, 0, 0, 0))
+    if not isinstance(bbox_value, (list, tuple)) or len(bbox_value) != 4:
+        bbox = (0.0, 0.0, 0.0, 0.0)
+    else:
+        try:
+            bbox = tuple(float(value) for value in bbox_value)
+        except (TypeError, ValueError):
+            bbox = (0.0, 0.0, 0.0, 0.0)
+    return DocumentBlock(
+        id=block_id,
+        page_num=max(0, page_num),
+        block_type=BlockType.FORMULA,
+        content=accepted_latex,
+        bbox=bbox,  # type: ignore[arg-type]
+        metadata={
+            "source": "formula_r5_payload",
+            "formula_r5_payload_block": True,
+            "formula_r5_candidate_id": str(payload.get("candidate_id", block_id) or block_id),
+        },
+    )

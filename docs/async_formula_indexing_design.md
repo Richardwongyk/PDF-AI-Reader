@@ -68,8 +68,11 @@ PDF 导入
   - `r4_knowledge_graph`
   - `r5_knowledge_incremental_update`
 - `formula_recognition_results` 已落地，用于保存不同轮次、模型、输入 hash 和预处理版本的
-  公式候选结果；`accepted=true` 已有唯一性约束逻辑，后续还要补 revision/audit 表和
-  知识库增量 upsert 接线。
+  公式候选结果；`accepted=true` 已有唯一性约束逻辑。
+- `formula_acceptance_decisions` 已落地，用于记录 accept/reject 审核事件、上一 accepted
+  result、触发来源、原因、接受后的 LaTeX 和 r5 input hash。切换 accepted 结果必须经由
+  `FormulaIndexStore.accept_recognition_result()` / `reject_recognition_result()` /
+  `accept_fusion_record()`，不能直接改表。
 - 导入 PDF 后会立即持久化：
   - 全文页码进入 `r0_pdf_structure` 页面队列。
   - `needs_ocr=True` 的公式块进入 `r1_cached_recognition`。
@@ -95,8 +98,9 @@ PDF 导入
 - fusion 派生的 r3 任务带 `semantic_review_priority`、`review_priority` 和 `review_priority_reason`：结构证据、本地工具候选、低相似、候选冲突、风险项和复杂 LaTeX 优先；低价值单字符 inline 只降优先级，仍然入库等待审计。
 - r3 done 结果会合并原始排队 payload，保留 `review_candidate`、`queued_input_hash`、`review_input_hash`、优先级和优先级原因，保证审计时能复原云端审了哪个候选、基于哪个 fusion input。
 - 行内公式候选额外携带 `inline_pdf_evidence`：原 PDF math-font span 的 text/font/size/bbox、候选 bbox、字体列表、字号范围和脚本字号证据。它用于 r3/工具复核和审计，不是默认 LaTeX 重建器，也不能绕过 accepted 门禁。
-- 真实 DeepSeek r3 单条 smoke 已跑通，但生产门禁、accepted revision 表、r4 语义级图谱质量和 r5 增量写回闭环仍未完成；
-  这些必须作为后续独立闭环完成。
+- 真实 DeepSeek r3 单条 smoke 已跑通。2026-05-28 已补上 accepted/rejected audit 表、
+  命令行审核入口和 accepted 变化触发 r5 知识库 upsert 的闭环；后续仍需产品级 UI、
+  GraphRAG accepted 同步和更高质量的 r4 语义图谱。
 
 ### 文档块
 
@@ -173,6 +177,43 @@ PDF 导入
 - `accepted=true` 只能有一条当前有效结果；切换接受结果要写 revision。
 - 本地模型输出和云端修正输出必须分开存，不能互相覆盖。
 - 缓存 key 至少包含 `doc_hash + candidate_id + input_hash + model + model_version + preprocess_version`。
+
+### 公式接受决策
+
+`formula_acceptance_decisions` 保存每次审核事件：
+
+- `decision_id`
+- `doc_hash`
+- `candidate_id`
+- `result_id`
+- `action`: `accept` / `reject`
+- `decision_source`
+- `decider`
+- `reason`
+- `accepted_latex`
+- `previous_result_id`
+- `input_hash`
+- `payload_json`
+- `created_at`
+
+规则：
+
+- 接受某个 result 时，必须清除同一候选的其他 accepted 标志，并写入一条 audit event。
+- 拒绝某个 result 时，只清除该 result 的 accepted 标志，不触发 r5 知识库覆盖。
+- 接受 fusion record 时，若 best result 已在 `formula_recognition_results` 中存在，直接接受该
+  result；否则从 fusion payload 生成 `manual_fusion_acceptance` synthetic result，再进入同一
+  acceptance 流程。
+- r5 payload 必须带 `acceptance_decision_id`、`acceptance_source`、`best_result_id`、
+  `accepted_latex`、page/bbox 和稳定 input hash。当前 blocks 列表里没有对应候选块时，
+  r5 service 可从 payload 恢复一个公式块并增量 upsert。
+- 命令行入口为 `tools/formula_acceptance_review.py`：
+  - `list` 列出 recognition results。
+  - `ready` 列出 `ready_for_manual_accept` fusion records。
+  - `accept` 接受单个 recognition result。
+  - `reject` 拒绝单个 recognition result。
+  - `accept-fusion` 接受单个 fusion record，默认只允许 `ready_for_manual_accept` /
+    `auto_accept_allowed`，强制覆盖必须显式 `--allow-not-ready` 并留下 reason。
+  - `decisions` 列出 audit events。
 
 ### 任务队列
 

@@ -77,6 +77,7 @@ class MultiRoundPipelineReport:
     formula_fusion_jobs: dict[str, int]
     graph_jobs: dict[str, int]
     recognition_results: dict[str, int]
+    formula_acceptance_decisions: dict[str, int]
     formula_accuracy: dict[str, object]
     formula_fusion_snapshots: list[dict[str, object]]
     formula_fusion: dict[str, object]
@@ -310,6 +311,7 @@ def run_pipeline_case(
         formula_fusion_jobs=formula_store.fusion_counts(doc_hash),
         graph_jobs=graph_store.counts(doc_hash),
         recognition_results=recognition_results,
+        formula_acceptance_decisions=_acceptance_decision_counts(formula_store, doc_hash),
         formula_accuracy=formula_accuracy,
         formula_fusion_snapshots=fusion_snapshots,
         formula_fusion=formula_fusion,
@@ -346,6 +348,7 @@ def _fusion_snapshot(
             )
         },
         "stored_decisions": store.fusion_counts(doc_hash),
+        "acceptance_decisions": _acceptance_decision_counts(store, doc_hash),
     }
 
 
@@ -851,6 +854,16 @@ def _recognition_result_counts(store: FormulaIndexStore, doc_hash: str) -> dict[
     for record in store.list_recognition_results(doc_hash, limit=10000):
         key = f"{record.stage}:{record.model}"
         counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _acceptance_decision_counts(store: FormulaIndexStore, doc_hash: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for decision in store.list_acceptance_decisions(doc_hash, limit=10000):
+        action_key = decision.action
+        source_key = f"{decision.action}:{decision.decision_source or 'unspecified'}"
+        counts[action_key] = counts.get(action_key, 0) + 1
+        counts[source_key] = counts.get(source_key, 0) + 1
     return counts
 
 

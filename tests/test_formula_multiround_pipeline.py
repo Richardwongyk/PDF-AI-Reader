@@ -968,6 +968,50 @@ def test_formula_fusion_report_ranks_candidates_and_targets_low_similarity(tmp_p
     }
 
 
+def test_formula_fusion_snapshot_reports_acceptance_decisions(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = DocumentBlock(
+        id="good",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"$$\frac{a}{b}$$",
+        bbox=(0, 0, 10, 10),
+    )
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake_tool",
+        input_hash="image-hash",
+        latex=r"\frac{a}{b}",
+        evidence={"page_num": 0, "bbox": list(block.bbox)},
+    )
+    store.accept_recognition_result(
+        doc_hash="doc-1",
+        result_id=result_id,
+        filepath="paper.pdf",
+        decision_source="test_snapshot",
+        reason="accepted in test",
+    )
+    snapshot = pipe._fusion_snapshot(
+        "after_accept",
+        {"summary": {"candidate_count": 1, "persisted": {}}},
+        store,
+        "doc-1",
+    )
+
+    assert pipe._acceptance_decision_counts(store, "doc-1") == {
+        "accept": 1,
+        "accept:test_snapshot": 1,
+    }
+    assert snapshot["acceptance_decisions"] == {
+        "accept": 1,
+        "accept:test_snapshot": 1,
+    }
+
+
 def test_formula_fusion_rejects_degraded_local_precise_candidate(tmp_path) -> None:
     from tools import formula_multiround_pipeline as pipe
 

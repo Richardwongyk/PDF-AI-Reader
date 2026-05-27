@@ -189,8 +189,8 @@
 
 要做：
 
-- 建立 accepted/rejected/revision 审核表和 UI/命令行入口。
-- accepted 变化触发 r5 增量 upsert，同时同步 GraphRAG artifact。
+- 已建立 accepted/rejected audit 表、store acceptance API 和命令行入口；仍需产品级 UI。
+- accepted 变化已能触发 r5 增量 upsert；仍需同步 GraphRAG accepted artifact。
 - 对 accepted precision 做单独统计，和候选 recall 分开报告。
 - E2E 覆盖二次打开跳过、缩放、双击翻译、隐藏/再显示、问答证据、日志审计。
 

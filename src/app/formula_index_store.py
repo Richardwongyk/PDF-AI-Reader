@@ -19,11 +19,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from src.core.models import DocumentBlock
+from src.core.models import DocumentBlock, wrap_math_text
 
 FormulaTaskStatus = Literal["queued", "running", "done", "failed", "skipped"]
 FormulaPageScanStatus = Literal["queued", "running", "done", "failed", "skipped"]
 FormulaRoundTarget = Literal["block", "page"]
+FormulaAcceptanceAction = Literal["accept", "reject"]
 
 
 class FormulaScanRound(StrEnum):
@@ -113,6 +114,25 @@ class FormulaRecognitionRecord:
     warnings: tuple[str, ...]
     evidence: dict[str, object]
     accepted: bool
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class FormulaAcceptanceDecision:
+    """Auditable accept/reject event for one persisted formula candidate."""
+
+    decision_id: str
+    doc_hash: str
+    candidate_id: str
+    result_id: str
+    action: FormulaAcceptanceAction
+    decision_source: str
+    decider: str
+    reason: str
+    accepted_latex: str
+    previous_result_id: str
+    input_hash: str
+    payload: dict[str, object]
     created_at: str = ""
 
 
@@ -240,6 +260,31 @@ class FormulaIndexStore:
             "ON formula_recognition_results(doc_hash, candidate_id, stage, accepted, created_at DESC)"
         )
         self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS formula_acceptance_decisions (
+                decision_id        TEXT PRIMARY KEY,
+                doc_hash           TEXT NOT NULL,
+                candidate_id       TEXT NOT NULL,
+                result_id          TEXT NOT NULL,
+                action             TEXT NOT NULL,
+                decision_source    TEXT NOT NULL DEFAULT '',
+                decider            TEXT NOT NULL DEFAULT '',
+                reason             TEXT NOT NULL DEFAULT '',
+                accepted_latex     TEXT NOT NULL DEFAULT '',
+                previous_result_id TEXT NOT NULL DEFAULT '',
+                input_hash         TEXT NOT NULL DEFAULT '',
+                payload_json       TEXT NOT NULL DEFAULT '{}',
+                created_at         TEXT NOT NULL
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_acceptance_lookup "
+            "ON formula_acceptance_decisions(doc_hash, candidate_id, created_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_acceptance_result "
+            "ON formula_acceptance_decisions(result_id, created_at DESC)"
+        )
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS formula_fusion_records (
                 fusion_id           TEXT PRIMARY KEY,
                 doc_hash            TEXT NOT NULL,
@@ -268,6 +313,11 @@ class FormulaIndexStore:
         self._migrate_schema()
         self._conn.commit()
         self._lock = threading.Lock()
+
+    def close(self) -> None:
+        """Close the SQLite connection."""
+        with self._lock:
+            self._conn.close()
 
     def enqueue_blocks(
         self,
@@ -1023,6 +1073,353 @@ class FormulaIndexStore:
             ).fetchone()
         return self._row_to_recognition_record(row) if row else None
 
+    def get_recognition_result_by_id(self, result_id: str) -> FormulaRecognitionRecord | None:
+        """Return a recognition result by its stable id."""
+        if not result_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT result_id, candidate_id, doc_hash, stage, model,
+                          model_version, preprocess_version, input_hash, latex,
+                          normalized_latex, score, duration_ms, peak_memory_mb,
+                          warnings_json, evidence_json, accepted, created_at
+                   FROM formula_recognition_results
+                   WHERE result_id=?""",
+                (str(result_id),),
+            ).fetchone()
+        return self._row_to_recognition_record(row) if row else None
+
+    def set_recognition_acceptance(
+        self,
+        *,
+        doc_hash: str,
+        result_id: str,
+        accepted: bool,
+        filepath: str = "",
+        decision_source: str = "manual",
+        decider: str = "",
+        reason: str = "",
+        payload: dict[str, object] | None = None,
+    ) -> FormulaAcceptanceDecision:
+        """Accept or reject one persisted recognition result with audit history.
+
+        Accepting a result clears other accepted results for the same candidate
+        and, when a filepath is provided, queues r5 incremental knowledge update
+        work for the accepted revision. Rejecting only clears this result.
+        """
+        if not doc_hash or not result_id:
+            raise ValueError("doc_hash and result_id are required")
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT result_id, candidate_id, doc_hash, stage, model,
+                          model_version, preprocess_version, input_hash, latex,
+                          normalized_latex, score, duration_ms, peak_memory_mb,
+                          warnings_json, evidence_json, accepted, created_at
+                   FROM formula_recognition_results
+                   WHERE doc_hash=? AND result_id=?""",
+                (doc_hash, result_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"formula recognition result not found: {result_id}")
+            record = self._row_to_recognition_record(row)
+            previous_row = self._conn.execute(
+                """SELECT result_id FROM formula_recognition_results
+                   WHERE doc_hash=? AND candidate_id=? AND accepted=1
+                   ORDER BY created_at DESC LIMIT 1""",
+                (doc_hash, record.candidate_id),
+            ).fetchone()
+            previous_result_id = str(previous_row[0]) if previous_row else ""
+            action: FormulaAcceptanceAction = "accept" if accepted else "reject"
+            display = not _evidence_is_inline(record.evidence)
+            accepted_latex = (
+                wrap_math_text(record.latex or record.normalized_latex, display=display)
+                if accepted
+                else ""
+            )
+            if accepted and not accepted_latex:
+                raise ValueError(f"accepted formula result has empty latex: {result_id}")
+            decision_payload: dict[str, object] = {
+                **(payload or {}),
+                "result": {
+                    "stage": record.stage,
+                    "model": record.model,
+                    "model_version": record.model_version,
+                    "preprocess_version": record.preprocess_version,
+                    "input_hash": record.input_hash,
+                    "score": record.score,
+                    "warnings": list(record.warnings),
+                },
+            }
+            r5_input_hash = (
+                self.acceptance_input_hash(
+                    doc_hash=record.doc_hash,
+                    candidate_id=record.candidate_id,
+                    result_id=record.result_id,
+                    result_input_hash=record.input_hash,
+                    accepted_latex=accepted_latex,
+                )
+                if accepted
+                else ""
+            )
+            decision_id = self.acceptance_decision_id(
+                doc_hash=record.doc_hash,
+                candidate_id=record.candidate_id,
+                result_id=record.result_id,
+                action=action,
+                decision_source=decision_source,
+                previous_result_id=previous_result_id,
+                input_hash=r5_input_hash or record.input_hash,
+                created_at=now,
+            )
+            try:
+                if accepted:
+                    self._conn.execute(
+                        """UPDATE formula_recognition_results
+                           SET accepted=0
+                           WHERE doc_hash=? AND candidate_id=?""",
+                        (record.doc_hash, record.candidate_id),
+                    )
+                    self._conn.execute(
+                        """UPDATE formula_recognition_results
+                           SET accepted=1
+                           WHERE doc_hash=? AND result_id=?""",
+                        (record.doc_hash, record.result_id),
+                    )
+                else:
+                    self._conn.execute(
+                        """UPDATE formula_recognition_results
+                           SET accepted=0
+                           WHERE doc_hash=? AND result_id=?""",
+                        (record.doc_hash, record.result_id),
+                    )
+                self._conn.execute(
+                    """INSERT INTO formula_acceptance_decisions
+                       (decision_id, doc_hash, candidate_id, result_id, action,
+                        decision_source, decider, reason, accepted_latex,
+                        previous_result_id, input_hash, payload_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        decision_id,
+                        record.doc_hash,
+                        record.candidate_id,
+                        record.result_id,
+                        action,
+                        str(decision_source or ""),
+                        str(decider or ""),
+                        str(reason or ""),
+                        accepted_latex,
+                        previous_result_id,
+                        r5_input_hash or record.input_hash,
+                        json.dumps(decision_payload, ensure_ascii=False, separators=(",", ":")),
+                        now,
+                    ),
+                )
+                if accepted and filepath:
+                    self._enqueue_acceptance_r5_locked(
+                        filepath=filepath,
+                        record=record,
+                        accepted_latex=accepted_latex,
+                        decision_id=decision_id,
+                        decision_source=str(decision_source or ""),
+                        reason=str(reason or ""),
+                        r5_input_hash=r5_input_hash,
+                        now=now,
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return FormulaAcceptanceDecision(
+            decision_id=decision_id,
+            doc_hash=record.doc_hash,
+            candidate_id=record.candidate_id,
+            result_id=record.result_id,
+            action=action,
+            decision_source=str(decision_source or ""),
+            decider=str(decider or ""),
+            reason=str(reason or ""),
+            accepted_latex=accepted_latex,
+            previous_result_id=previous_result_id,
+            input_hash=r5_input_hash or record.input_hash,
+            payload=decision_payload,
+            created_at=now,
+        )
+
+    def accept_recognition_result(
+        self,
+        *,
+        doc_hash: str,
+        result_id: str,
+        filepath: str = "",
+        decision_source: str = "manual",
+        decider: str = "",
+        reason: str = "",
+        payload: dict[str, object] | None = None,
+    ) -> FormulaAcceptanceDecision:
+        """Accept a recognition result and enqueue r5 when filepath is known."""
+        return self.set_recognition_acceptance(
+            doc_hash=doc_hash,
+            result_id=result_id,
+            accepted=True,
+            filepath=filepath,
+            decision_source=decision_source,
+            decider=decider,
+            reason=reason,
+            payload=payload,
+        )
+
+    def reject_recognition_result(
+        self,
+        *,
+        doc_hash: str,
+        result_id: str,
+        decision_source: str = "manual",
+        decider: str = "",
+        reason: str = "",
+        payload: dict[str, object] | None = None,
+    ) -> FormulaAcceptanceDecision:
+        """Reject a recognition result without queuing knowledge writeback."""
+        return self.set_recognition_acceptance(
+            doc_hash=doc_hash,
+            result_id=result_id,
+            accepted=False,
+            decision_source=decision_source,
+            decider=decider,
+            reason=reason,
+            payload=payload,
+        )
+
+    def list_acceptance_decisions(
+        self,
+        doc_hash: str,
+        candidate_id: str | None = None,
+        result_id: str | None = None,
+        limit: int = 100,
+    ) -> list[FormulaAcceptanceDecision]:
+        """List formula acceptance/rejection audit events."""
+        params: list[object] = [doc_hash]
+        where = "doc_hash=?"
+        if candidate_id is not None:
+            where += " AND candidate_id=?"
+            params.append(candidate_id)
+        if result_id is not None:
+            where += " AND result_id=?"
+            params.append(result_id)
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT decision_id, doc_hash, candidate_id, result_id,
+                           action, decision_source, decider, reason,
+                           accepted_latex, previous_result_id, input_hash,
+                           payload_json, created_at
+                    FROM formula_acceptance_decisions
+                    WHERE {where}
+                    ORDER BY created_at DESC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._row_to_acceptance_decision(row) for row in rows]
+
+    def accept_fusion_record(
+        self,
+        *,
+        doc_hash: str,
+        fusion_id: str,
+        filepath: str = "",
+        decision_source: str = "manual_fusion_review",
+        decider: str = "",
+        reason: str = "",
+        allow_not_ready: bool = False,
+    ) -> FormulaAcceptanceDecision:
+        """Accept the best candidate from a persisted fusion record.
+
+        If the fusion best result is already a recognition result, this method
+        accepts that result directly. Otherwise it persists a synthetic reviewed
+        result from the fusion payload and accepts that revision.
+        """
+        fusion = self.get_fusion_record_by_id(fusion_id)
+        if fusion is None or fusion.doc_hash != doc_hash:
+            raise ValueError(f"formula fusion record not found: {fusion_id}")
+        if (
+            not allow_not_ready
+            and fusion.decision not in {"ready_for_manual_accept", "auto_accept_allowed"}
+        ):
+            raise ValueError(
+                f"fusion record is not ready for acceptance: {fusion.decision}"
+            )
+        existing = self.get_recognition_result_by_id(fusion.best_result_id)
+        if existing is not None and existing.doc_hash == doc_hash:
+            return self.accept_recognition_result(
+                doc_hash=doc_hash,
+                result_id=existing.result_id,
+                filepath=filepath,
+                decision_source=decision_source,
+                decider=decider,
+                reason=reason,
+                payload={
+                    "fusion_id": fusion.fusion_id,
+                    "fusion_version": fusion.fusion_version,
+                    "fusion_input_hash": fusion.input_hash,
+                    "fusion_decision": fusion.decision,
+                },
+            )
+
+        best_latex = _best_latex_from_fusion_payload(fusion.result_json)
+        if not best_latex:
+            raise ValueError(f"fusion record has no acceptable latex: {fusion_id}")
+        ranked = fusion.result_json.get("ranked_candidates", [])
+        best_candidate = ranked[0] if isinstance(ranked, list) and ranked else {}
+        if not isinstance(best_candidate, dict):
+            best_candidate = {}
+        synthetic_input_hash = self.acceptance_input_hash(
+            doc_hash=doc_hash,
+            candidate_id=fusion.candidate_id,
+            result_id=fusion.best_result_id or fusion.fusion_id,
+            result_input_hash=fusion.input_hash,
+            accepted_latex=best_latex,
+        )
+        synthetic_result_id = self.put_recognition_result(
+            doc_hash=doc_hash,
+            candidate_id=fusion.candidate_id,
+            stage="manual_fusion_acceptance",
+            model="formula_fusion_gate",
+            model_version=fusion.fusion_version,
+            preprocess_version="manual-review-v1",
+            input_hash=synthetic_input_hash,
+            latex=best_latex,
+            normalized_latex=best_latex,
+            score=fusion.source_similarity,
+            warnings=list(fusion.risk_flags),
+            evidence={
+                "source": "formula_fusion_record",
+                "source_stage": str(best_candidate.get("stage", "") or ""),
+                "fusion_id": fusion.fusion_id,
+                "fusion_version": fusion.fusion_version,
+                "fusion_input_hash": fusion.input_hash,
+                "fusion_best_result_id": fusion.best_result_id,
+                "fusion_decision": fusion.decision,
+                "accepted_gate": fusion.accepted_gate,
+                "best_candidate": best_candidate,
+            },
+            accepted=False,
+        )
+        return self.accept_recognition_result(
+            doc_hash=doc_hash,
+            result_id=synthetic_result_id,
+            filepath=filepath,
+            decision_source=decision_source,
+            decider=decider,
+            reason=reason,
+            payload={
+                "fusion_id": fusion.fusion_id,
+                "fusion_version": fusion.fusion_version,
+                "fusion_input_hash": fusion.input_hash,
+                "fusion_decision": fusion.decision,
+                "synthetic_from_fusion": True,
+            },
+        )
+
     def list_recognition_results(
         self,
         doc_hash: str,
@@ -1163,6 +1560,23 @@ class FormulaIndexStore:
             ).fetchone()
         return self._row_to_fusion_record(row) if row else None
 
+    def get_fusion_record_by_id(self, fusion_id: str) -> FormulaFusionRecord | None:
+        """Return a persisted fusion gate by its stable id."""
+        if not fusion_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT fusion_id, doc_hash, candidate_id, fusion_version,
+                          input_hash, best_result_id, ranked_result_ids_json,
+                          coverage, agreement_score, source_similarity,
+                          syntax_valid, risk_flags_json, accepted_gate_json,
+                          decision, result_json, created_at, updated_at
+                   FROM formula_fusion_records
+                   WHERE fusion_id=?""",
+                (str(fusion_id),),
+            ).fetchone()
+        return self._row_to_fusion_record(row) if row else None
+
     def list_fusion_records(
         self,
         doc_hash: str,
@@ -1266,6 +1680,93 @@ class FormulaIndexStore:
                     increment_attempts=increment_attempts,
                 )
             self._conn.commit()
+
+    def _enqueue_acceptance_r5_locked(
+        self,
+        *,
+        filepath: str,
+        record: FormulaRecognitionRecord,
+        accepted_latex: str,
+        decision_id: str,
+        decision_source: str,
+        reason: str,
+        r5_input_hash: str,
+        now: str,
+    ) -> None:
+        job_row = self._conn.execute(
+            """SELECT page_num, bbox_json, priority FROM formula_index_jobs
+               WHERE doc_hash=? AND block_id=?""",
+            (record.doc_hash, record.candidate_id),
+        ).fetchone()
+        page_num = _record_page_num(record)
+        bbox = _record_bbox(record)
+        priority = 0.0
+        if job_row is not None:
+            try:
+                page_num = int(job_row[0])
+            except (TypeError, ValueError):
+                pass
+            try:
+                bbox_values = json.loads(str(job_row[1] or "[]"))
+                if isinstance(bbox_values, list) and len(bbox_values) == 4:
+                    bbox = tuple(float(value) for value in bbox_values)  # type: ignore[assignment]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            try:
+                priority = float(job_row[2])
+            except (TypeError, ValueError):
+                priority = 0.0
+        if page_num < 0:
+            page_num = 0
+        payload: dict[str, object] = {
+            "stage": FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE.value,
+            "input_hash": r5_input_hash,
+            "fusion_version": "manual_acceptance_v1",
+            "best_result_id": record.result_id,
+            "accepted_latex": accepted_latex,
+            "candidate_id": record.candidate_id,
+            "page_num": page_num,
+            "bbox": list(bbox),
+            "acceptance_decision_id": decision_id,
+            "acceptance_source": decision_source,
+            "acceptance_reason": reason,
+            "accepted_result": {
+                "stage": record.stage,
+                "model": record.model,
+                "model_version": record.model_version,
+                "preprocess_version": record.preprocess_version,
+                "input_hash": record.input_hash,
+                "score": record.score,
+            },
+        }
+        row = self._conn.execute(
+            """SELECT status, result_json FROM formula_round_jobs
+               WHERE doc_hash=? AND scan_round=? AND target_type='block' AND target_id=?""",
+            (
+                record.doc_hash,
+                FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE.value,
+                record.candidate_id,
+            ),
+        ).fetchone()
+        if row and str(row[0]) == "done":
+            try:
+                existing_payload = json.loads(str(row[1] or "{}"))
+            except json.JSONDecodeError:
+                existing_payload = {}
+            if isinstance(existing_payload, dict) and existing_payload.get("input_hash") == r5_input_hash:
+                return
+        self._enqueue_round_job_locked(
+            doc_hash=record.doc_hash,
+            filepath=filepath,
+            scan_round=FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE.value,
+            target_type="block",
+            target_id=record.candidate_id,
+            page_num=page_num,
+            priority=priority,
+            status="queued",
+            now=now,
+            result_json=payload,
+        )
 
     def _migrate_schema(self) -> None:
         """Add multi-round columns when opening an older task database."""
@@ -1499,6 +2000,56 @@ class FormulaIndexStore:
         return digest.hexdigest()
 
     @staticmethod
+    def acceptance_input_hash(
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        result_id: str,
+        result_input_hash: str,
+        accepted_latex: str,
+    ) -> str:
+        digest = hashlib.sha256()
+        for value in (
+            "formula_acceptance_r5_v1",
+            doc_hash,
+            candidate_id,
+            result_id,
+            result_input_hash,
+            accepted_latex,
+        ):
+            digest.update(str(value).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @staticmethod
+    def acceptance_decision_id(
+        *,
+        doc_hash: str,
+        candidate_id: str,
+        result_id: str,
+        action: str,
+        decision_source: str,
+        previous_result_id: str,
+        input_hash: str,
+        created_at: str,
+    ) -> str:
+        digest = hashlib.sha256()
+        for value in (
+            "formula_acceptance_decision_v1",
+            doc_hash,
+            candidate_id,
+            result_id,
+            action,
+            decision_source,
+            previous_result_id,
+            input_hash,
+            created_at,
+        ):
+            digest.update(str(value).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @staticmethod
     def priority_for_block(block: DocumentBlock, priority_pages: set[int]) -> float:
         page_boost = 1000.0 if block.page_num in priority_pages else 0.0
         review_priority = block.metadata.get("semantic_review_priority")
@@ -1600,6 +2151,30 @@ class FormulaIndexStore:
         )
 
     @staticmethod
+    def _row_to_acceptance_decision(row: tuple[object, ...]) -> FormulaAcceptanceDecision:
+        try:
+            payload = json.loads(str(row[11] or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return FormulaAcceptanceDecision(
+            decision_id=str(row[0]),
+            doc_hash=str(row[1]),
+            candidate_id=str(row[2]),
+            result_id=str(row[3]),
+            action=str(row[4]),  # type: ignore[arg-type]
+            decision_source=str(row[5]),
+            decider=str(row[6]),
+            reason=str(row[7]),
+            accepted_latex=str(row[8]),
+            previous_result_id=str(row[9]),
+            input_hash=str(row[10]),
+            payload=payload,
+            created_at=str(row[12]),
+        )
+
+    @staticmethod
     def _row_to_fusion_record(row: tuple[object, ...]) -> FormulaFusionRecord:
         try:
             ranked_ids = json.loads(str(row[6] or "[]"))
@@ -1652,3 +2227,70 @@ def _now() -> str:
 
 def _round_value(scan_round: str | FormulaScanRound) -> str:
     return scan_round.value if isinstance(scan_round, FormulaScanRound) else str(scan_round)
+
+
+def _evidence_is_inline(evidence: dict[str, object]) -> bool:
+    source = str(evidence.get("source", "") or "").lower()
+    stage = str(evidence.get("source_stage", evidence.get("stage", "")) or "").lower()
+    return "inline" in source or "inline" in stage
+
+
+def _record_page_num(record: FormulaRecognitionRecord) -> int:
+    candidates: list[object] = [record.evidence.get("page_num")]
+    details = record.evidence.get("details")
+    if isinstance(details, dict):
+        candidates.append(details.get("page_num"))
+    r0_region = record.evidence.get("r0_region")
+    if isinstance(r0_region, dict):
+        candidates.append(r0_region.get("page_num"))
+    inline_pdf = record.evidence.get("inline_pdf_evidence")
+    if isinstance(inline_pdf, dict):
+        candidates.append(inline_pdf.get("page_num"))
+    for value in candidates:
+        try:
+            page_num = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if page_num >= 0:
+            return page_num
+    return 0
+
+
+def _record_bbox(record: FormulaRecognitionRecord) -> tuple[float, float, float, float]:
+    candidates: list[object] = [record.evidence.get("bbox")]
+    details = record.evidence.get("details")
+    if isinstance(details, dict):
+        candidates.append(details.get("bbox"))
+    r0_region = record.evidence.get("r0_region")
+    if isinstance(r0_region, dict):
+        candidates.append(r0_region.get("bbox"))
+    inline_pdf = record.evidence.get("inline_pdf_evidence")
+    if isinstance(inline_pdf, dict):
+        candidates.append(inline_pdf.get("bbox"))
+    for value in candidates:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            continue
+        try:
+            return tuple(float(item) for item in value)  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            continue
+    return (0.0, 0.0, 0.0, 0.0)
+
+
+def _best_latex_from_fusion_payload(payload: dict[str, object]) -> str:
+    ranked = payload.get("ranked_candidates", [])
+    if isinstance(ranked, list):
+        for item in ranked:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("result_id", "") or "") == str(payload.get("best_result_id", "") or ""):
+                latex = str(item.get("latex", "") or "").strip()
+                if latex:
+                    return latex
+        if ranked:
+            first = ranked[0]
+            if isinstance(first, dict):
+                latex = str(first.get("latex", "") or "").strip()
+                if latex:
+                    return latex
+    return str(payload.get("best_latex", "") or "").strip()

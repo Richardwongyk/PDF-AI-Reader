@@ -115,6 +115,34 @@ FormulaFusionRecord 描述“候选融合结果”，也仍然不是正文。
 - 如果多个工具输出不一致，必须保留冲突和各自证据。
 - `auto_accept_allowed` 只表示满足自动接受前置条件，真正写回仍需 accepted/revision 流程。
 
+### FormulaAcceptanceDecision
+
+FormulaAcceptanceDecision 描述产品级接受/拒绝审核事件：
+
+- `decision_id`
+- `doc_hash`
+- `candidate_id`
+- `result_id`
+- `action`: `accept` / `reject`
+- `decision_source`
+- `decider`
+- `reason`
+- `accepted_latex`
+- `previous_result_id`
+- `input_hash`
+- `payload`
+
+规则：
+
+- 只能通过 acceptance API 切换 `accepted=true`，不能直接改候选或 fusion 表。
+- 接受 result 时清除同一 candidate 的上一 accepted result，并在有 filepath 时派生 r5。
+- 拒绝 result 只写 audit 并清除该 result 的 accepted 标志，不能派生 r5。
+- 接受 fusion record 时，如果 best result 已存在于 `formula_recognition_results`，直接接受该
+  result；否则生成 `manual_fusion_acceptance:formula_fusion_gate` synthetic result，evidence
+  必须引用 fusion id、fusion input hash、gate decision 和 best candidate。
+- r5 写回的 block metadata 会带 `formula_r5_acceptance_decision_id` 和
+  `formula_r5_acceptance_source`，保证 RAG evidence 能追溯到门禁事件。
+
 ## 多工具协同策略
 
 ### r0: born-digital 结构事实层
@@ -233,6 +261,19 @@ r5：
 - 只有 accepted 结果变化后，才按 block/content/input hash 增量 upsert FTS/RAG/向量库。
 - 未变内容必须跳过。
 - 低置信候选不能进入知识库正文。
+- 如果 accepted 候选不是当前 `DocumentBlock` 列表中的原始公式块，r5 可以从 acceptance payload
+  的 `accepted_latex/page_num/bbox` 恢复公式块并写入知识库；这只适用于已通过 acceptance gate
+  的结果，不能用于普通候选。
+
+命令行审核入口：
+
+```powershell
+python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> ready
+python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> accept-fusion --fusion-id <id> --filepath <pdf> --reason "source/audit match"
+python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> decisions
+```
+
+`--allow-not-ready` 只用于显式人工覆盖，必须留下 reason。
 
 ## accepted 门禁
 
@@ -301,13 +342,15 @@ r5：
 4. 已新增 r5 accepted 增量写回 service：
    - 只消费 accepted 结果变化。
    - 知识库未就绪时保持 queued。
-   - 当前仍缺 accepted/rejected/revision 的产品级审核 UI 和 GraphRAG 同步更新。
+   - 2026-05-28 已新增 `formula_acceptance_decisions` audit 表、store acceptance API、
+     `tools/formula_acceptance_review.py` 命令行审核入口和 fusion -> synthetic accepted result
+     路径；当前仍缺产品级审核 UI 和 GraphRAG accepted 同步更新。
 5. 行内公式已纳入候选与质量门禁：
    - `inline_spans:document_chunker` 参与 accuracy/fusion。
    - 纯脚注/装饰符号不再包成公式。
    - 纯 inline 候选默认不进入 OCR/MFR，只进入审计和 r3 复核。
 6. 下一步仍必须完成：
-   - 建立 accepted/rejected/revision 表与 UI。
+   - 建立 accepted/rejected/revision 产品级 UI。
    - r5 accepted 变化后同步 GraphRAG artifact。
    - 用 Attention/Napkin 大样本跑质量门禁和性能门禁。
    - 优化 r2 常驻 worker/批处理，降低多工具冷启动。
