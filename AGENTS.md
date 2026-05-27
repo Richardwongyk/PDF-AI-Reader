@@ -20,8 +20,9 @@
 - 当前工具验证状态：MinerU 3.1.15 已用本地新模型跑通 Attention 单页 smoke；
   PaddleOCR Formula 与 Pix2Text 已通过单张公式图 worker smoke，但结果只能作为候选；
   `magic-pdf` 旧路线已装但缺旧权重；PDF-Extract-Kit 环境存在但源码拉取失败，尚未跑通。
-- MinerU/Paddle 模型缓存主要放在 `C:\pdf_ai_reader_tool_models`；Pix2Text 仍可能使用
-  用户 AppData 默认缓存，生产化前应迁到专用工具缓存。
+- 外部工具模型缓存已迁到仓库本地 `.tool_models/`，并由 `PDF_AI_READER_TOOL_MODELS_DIR`
+  作为统一覆盖入口；不要再把新模型缓存放到 `C:\pdf_ai_reader_tool_models` 或用户默认
+  `.cache\modelscope`。
 - 如果新会话要修改、重装或删除外部工具，必须先 `conda env list` 和检查残留进程，
   不能假设旧环境不存在或一定可用。
 - 不要把测试资料、日志、缓存、临时 benchmark 输出提交进版本库。

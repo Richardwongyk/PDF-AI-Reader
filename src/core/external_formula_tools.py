@@ -20,6 +20,30 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKER_SCRIPT = ROOT / "tools" / "formula_tool_worker.py"
+TOOL_MODELS_ROOT = Path(
+    os.getenv("PDF_AI_READER_TOOL_MODELS_DIR", str(ROOT / ".tool_models"))
+)
+
+
+def _tool_model_path(*parts: str) -> Path:
+    return TOOL_MODELS_ROOT.joinpath(*parts)
+
+
+def _default_tool_cache_env() -> dict[str, str]:
+    """Return local model-cache env vars for process-isolated tools."""
+    root = TOOL_MODELS_ROOT
+    return {
+        "PDF_AI_READER_TOOL_MODELS_DIR": str(root),
+        "HF_HOME": os.getenv("HF_HOME", str(root / "huggingface")),
+        "HF_HUB_CACHE": os.getenv("HF_HUB_CACHE", str(root / "huggingface" / "hub")),
+        "TRANSFORMERS_CACHE": os.getenv("TRANSFORMERS_CACHE", str(root / "huggingface" / "transformers")),
+        "MODELSCOPE_CACHE": os.getenv("MODELSCOPE_CACHE", str(root / "modelscope")),
+        "PADDLE_HOME": os.getenv("PADDLE_HOME", str(root / "paddle")),
+        "PADDLE_PDX_CACHE_HOME": os.getenv(
+            "PADDLE_PDX_CACHE_HOME",
+            str(root / "pdf_ai_reader_tool_models" / "paddlex_cache"),
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -154,9 +178,10 @@ class ExternalFormulaToolRunner:
             paddle_python = resolved_root / "pdf_tool_paddle310" / "python.exe"
             if paddle_python.exists():
                 env = {
+                    **_default_tool_cache_env(),
                     "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
                 }
-                paddle_cache = Path("C:/pdf_ai_reader_tool_models/paddlex_cache")
+                paddle_cache = _tool_model_path("pdf_ai_reader_tool_models", "paddlex_cache")
                 if paddle_cache.exists():
                     env["PADDLE_PDX_CACHE_HOME"] = str(paddle_cache)
                 specs.append(
@@ -177,6 +202,7 @@ class ExternalFormulaToolRunner:
                         backend="pix2text_formula",
                         python=str(pix2text_python),
                         model="pix2text",
+                        env=_default_tool_cache_env(),
                     )
                 )
 
@@ -192,9 +218,9 @@ class ExternalFormulaToolRunner:
                         preprocess_version="pdf-page-txt-v1",
                         timeout_sec=900,
                         env={
+                            **_default_tool_cache_env(),
                             "MINERU_MODEL_SOURCE": "local",
-                            "HF_HOME": str(Path("C:/pdf_ai_reader_tool_models/huggingface")),
-                            "MODELSCOPE_CACHE": str(Path("C:/pdf_ai_reader_tool_models/modelscope")),
+                            "MINERU_MODEL_DIR": str(_tool_model_path("pdf_ai_reader_tool_models", "mineru_pipeline")),
                         },
                     )
                 )
@@ -210,6 +236,7 @@ class ExternalFormulaToolRunner:
                         model_version="pdf-extract-kit",
                         preprocess_version="png-v1",
                         timeout_sec=300,
+                        env=_default_tool_cache_env(),
                     )
                 )
 
