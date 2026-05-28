@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
         self._dock_followup_questions: list[str] = []
         self._pending_kb_upserts: dict[str, DocumentBlock] = {}
         self._last_formula_viewport_pages: set[int] = set()
+        self._formula_import_thread: _FormulaImportPlanThread | None = None
         self._formula_viewport_timer = QTimer(self)
         self._formula_viewport_timer.setSingleShot(True)
         self._formula_viewport_timer.setInterval(250)
@@ -485,6 +486,7 @@ class MainWindow(QMainWindow):
         self._pending_kb_upserts.clear()
         self._formula_index_flow.stop()
         self._formula_semantic_review_flow.stop()
+        self._stop_formula_import_thread()
         self._formula_viewport_timer.stop()
         self._formula_idle_timer.stop()
         self._last_formula_viewport_pages.clear()
@@ -542,7 +544,7 @@ class MainWindow(QMainWindow):
         self._viewer_document_loaded = True
         self._last_formula_viewport_pages.clear()
         self._formula_idle_timer.stop()
-        self._persist_import_formula_scan_plan(result.filepath)
+        QTimer.singleShot(250, lambda fp=result.filepath: self._start_import_formula_plan_thread(fp))
 
         # 加载目录
         if result.toc:
@@ -808,9 +810,19 @@ class MainWindow(QMainWindow):
         filepath = getattr(self._doc_engine, "_filepath", "")
         service = FormulaAcceptanceReviewService(self._formula_index_flow.store)
         dlg = FormulaAcceptanceDialog(service, self._current_doc_hash, filepath, self)
+        dlg.evidence_location_requested.connect(self._on_formula_evidence_location_requested)
         dlg.exec()
         if self._formula_knowledge_update_service.pending_count(self._current_doc_hash) > 0:
             self._formula_idle_timer.start(1000)
+
+    def _on_formula_evidence_location_requested(self, page_num: int, bbox: object) -> None:
+        try:
+            box = tuple(float(value) for value in bbox)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        if len(box) != 4:
+            return
+        self._pdf_viewer.scroll_to_bbox(int(page_num), box)
 
     def _schedule_evidence_formula_scan(self, evidence: list[dict[str, Any]]) -> None:
         if not evidence or not self._current_doc_hash:
@@ -855,9 +867,11 @@ class MainWindow(QMainWindow):
         )
         self._formula_index_flow.enqueue_plan(filepath, self._current_doc_hash, plan)
 
-    def _persist_import_formula_scan_plan(self, filepath: str) -> None:
-        """Queue full-document formula work at import without blocking first render."""
+    def _start_import_formula_plan_thread(self, filepath: str) -> None:
+        """Persist full-document formula work off the UI thread."""
         if not filepath or not self._current_doc_hash or self._doc_engine.page_count <= 0:
+            return
+        if self._formula_import_thread is not None and self._formula_import_thread.isRunning():
             return
         plan = self._formula_index_scheduler.plan_for_pages(
             self._current_blocks,
@@ -865,31 +879,31 @@ class MainWindow(QMainWindow):
             trigger=FormulaScanTrigger.BACKGROUND,
             page_count=self._doc_engine.page_count,
         )
-        queued_blocks = self._formula_index_flow.persist_plan(
-            filepath,
-            self._current_doc_hash,
-            plan,
-        )
-        queued_pages = self._formula_index_flow.enqueue_page_scans(
-            filepath=filepath,
-            pages=range(self._doc_engine.page_count),
-            blocks=self._current_blocks,
-            doc_hash=self._current_doc_hash,
-            batch_budget=0,
-        )
-        queued_reviews = self._formula_index_flow.enqueue_semantic_review_blocks(
+        self._formula_import_thread = _FormulaImportPlanThread(
+            store=self._formula_index_flow.store,
             filepath=filepath,
             doc_hash=self._current_doc_hash,
-            blocks=[
+            page_count=self._doc_engine.page_count,
+            plan_blocks=plan.blocks,
+            plan_priority_pages=plan.priority_pages,
+            plan_scan_round=plan.scan_round,
+            formula_blocks=[
                 block for block in self._current_blocks
                 if block.block_type == BlockType.FORMULA
             ],
         )
-        queued_graph = self._formula_knowledge_graph_service.enqueue_formula_blocks(
-            filepath,
-            self._current_doc_hash,
-            self._current_blocks,
-        )
+        self._formula_import_thread.finished_signal.connect(self._on_import_formula_plan_persisted)
+        self._formula_import_thread.finished.connect(self._formula_import_thread.deleteLater)
+        self._formula_import_thread.finished.connect(self._on_formula_import_thread_done)
+        self._formula_import_thread.start()
+
+    def _on_import_formula_plan_persisted(self, result: dict[str, int | str]) -> None:
+        if result.get("doc_hash") != self._current_doc_hash:
+            return
+        queued_blocks = int(result.get("queued_blocks", 0) or 0)
+        queued_pages = int(result.get("queued_pages", 0) or 0)
+        queued_reviews = int(result.get("queued_reviews", 0) or 0)
+        queued_graph = int(result.get("queued_graph", 0) or 0)
         if queued_blocks or queued_pages or queued_reviews or queued_graph:
             self.logger.info(
                 "导入后全篇公式任务入队: block_ocr=%d page_mfd=%d semantic_review=%d knowledge_graph=%d",
@@ -901,6 +915,19 @@ class MainWindow(QMainWindow):
             self._ai_doc_status.setText(
                 f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}，复核 {queued_reviews}，图谱 {queued_graph}"
             )
+        if self._pending_formula_work_count() > 0:
+            self._formula_idle_timer.start(8000)
+
+    def _on_formula_import_thread_done(self) -> None:
+        self._formula_import_thread = None
+
+    def _stop_formula_import_thread(self) -> None:
+        thread = self._formula_import_thread
+        if thread and thread.isRunning():
+            thread.requestInterruption()
+            thread.quit()
+            thread.wait(1500)
+        self._formula_import_thread = None
 
     def _start_import_page_scan_batch(self) -> bool:
         filepath = getattr(self._doc_engine, "_filepath", "")
@@ -1585,6 +1612,7 @@ class MainWindow(QMainWindow):
         """
         # 1. 关闭文档（停止解析线程，关闭 PDF 文件）
         self._formula_index_flow.stop()
+        self._stop_formula_import_thread()
         self._doc_engine.close_document()
         # 2. 关闭知识库引擎（等待构建任务完成，关闭数据库连接）
         self._knowledge_engine.close()
@@ -1623,5 +1651,111 @@ class _PyMuPDF4LLMThread(QThread):
                 self.finished_signal.emit(enhanced)
         except Exception:
             pass
+
+
+class _FormulaImportPlanThread(QThread):
+    """Persist import-time formula jobs without blocking first-page interaction."""
+
+    finished_signal = Signal(dict)
+
+    def __init__(
+        self,
+        *,
+        store: object,
+        filepath: str,
+        doc_hash: str,
+        page_count: int,
+        plan_blocks: list[DocumentBlock],
+        plan_priority_pages: set[int],
+        plan_scan_round: str,
+        formula_blocks: list[DocumentBlock],
+    ) -> None:
+        super().__init__()
+        self._store = store
+        self._filepath = filepath
+        self._doc_hash = doc_hash
+        self._page_count = int(page_count)
+        self._plan_blocks = [block.model_copy(deep=True) for block in plan_blocks]
+        self._plan_priority_pages = set(plan_priority_pages)
+        self._plan_scan_round = str(plan_scan_round)
+        self._formula_blocks = [block.model_copy(deep=True) for block in formula_blocks]
+
+    def run(self) -> None:
+        from src.app.formula_index_store import FormulaScanRound
+
+        result: dict[str, int | str] = {
+            "doc_hash": self._doc_hash,
+            "queued_blocks": 0,
+            "queued_pages": 0,
+            "queued_reviews": 0,
+            "queued_graph": 0,
+        }
+        if self.isInterruptionRequested():
+            self.finished_signal.emit(result)
+            return
+        try:
+            result["queued_blocks"] = self._store.enqueue_blocks(
+                self._doc_hash,
+                self._filepath,
+                self._plan_blocks,
+                self._plan_priority_pages,
+                scan_round=self._plan_scan_round,
+            )
+            if self.isInterruptionRequested():
+                self.finished_signal.emit(result)
+                return
+            result["queued_pages"] = self._store.enqueue_pages(
+                self._doc_hash,
+                self._filepath,
+                range(max(0, self._page_count)),
+                scan_round=FormulaScanRound.PDF_STRUCTURE,
+            )
+            if self.isInterruptionRequested():
+                self.finished_signal.emit(result)
+                return
+            semantic_payloads = {
+                block.id: {
+                    "stage": FormulaScanRound.CLOUD_SEMANTIC_REVIEW.value,
+                    "input_hash": self._store.content_hash(block),
+                    "content_hash": self._store.content_hash(block),
+                    "model": "pending_semantic_review",
+                    "model_version": "pending_semantic_review",
+                }
+                for block in self._formula_blocks
+            }
+            result["queued_reviews"] = self._store.enqueue_round_records(
+                self._doc_hash,
+                self._filepath,
+                FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+                "block",
+                self._formula_blocks,
+                result_json_by_target=semantic_payloads,
+            )
+            graph_payloads = {
+                block.id: {
+                    "stage": FormulaScanRound.KNOWLEDGE_GRAPH.value,
+                    "input_hash": self._store.content_hash(block),
+                    "content_hash": self._store.content_hash(block),
+                    "extractor": "structural_graph_v1",
+                    "model_version": "structural_graph_v1",
+                }
+                for block in self._formula_blocks
+                if str(block.content or "").strip()
+            }
+            graph_blocks = [
+                block for block in self._formula_blocks
+                if str(block.content or "").strip()
+            ]
+            result["queued_graph"] = self._store.enqueue_round_records(
+                self._doc_hash,
+                self._filepath,
+                FormulaScanRound.KNOWLEDGE_GRAPH,
+                "block",
+                graph_blocks,
+                result_json_by_target=graph_payloads,
+            )
+        except Exception as exc:
+            result["error"] = repr(exc)
+        self.finished_signal.emit(result)
 
 

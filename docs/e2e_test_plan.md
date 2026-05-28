@@ -94,6 +94,18 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - `standard/full/nightly` 必须覆盖 Attention 和 Napkin；Napkin 至少覆盖前段页和公式密集页段，不能只用 Attention 小文件证明整套软件跑通。
 - `standard/full/nightly` 必须包含二次打开/复用 DB 跳过验证，证明 r0/r2a/fusion/r3/r4/r5 不是每次重扫。
 
+2026-05-28 新增交互门槛：
+
+- Napkin 前台 400x 或更高强度测试不能只统计动作次数。滚动强度必须模拟人类连续大滚轮：
+  单次大幅滚动、连续 20 次以上无延迟滚动、反向滚动、极大缩放下滚动和翻译框打开时滚动。
+- 极大缩放/快速滚动/跳页时，中间页必须始终可见。允许短暂显示模糊旧图、低清整页 fallback
+  或最近 snapshot，不允许黑底、空白页或只有页码占位。
+- tile 渲染首次 miss 时必须有视觉 fallback；日志中如果出现 `_paint_tiles` 首帧 `缓存:0 裁剪:0`，
+  对应截图不能是纯黑/空白，否则测试失败。
+- 400x 压测脚本必须覆盖多页和极端页，不允许在两三页之间重复跳几百次来凑次数。当前脚本已改成
+  覆盖型抽样，但还需要在渲染 fallback 修好后重跑前台视觉验证。
+- 翻译专项 E2E 需新增并发公式保护测试：同时请求两个含不同公式的段落，最终渲染的公式不得互相串线。
+
 公式审计门槛：
 
 - 公式审计报告需记录 `recovered_common_source_commands`、`common_source_command_recall`、`source_near_match_rate`、`source_weak_match_rate`、`average_best_similarity`、`low_similarity_pdf_formula_count`，用于量化源码常见命令和源码公式在 PDF 抽取/MFR 后的恢复情况。
@@ -117,6 +129,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 右侧全文问答已有证据面板、检索状态、引用页跳转和追问建议；仍需补真实模型质量评估和更细粒度的引用高亮。
 - 公式审计已经能统计 LaTeX 源和 PDF 抽取差距；扫描/图片公式已接入 Pix2Text MFR OCR，但整体 LaTeX 保真仍明显不足，需要继续做源码对齐和文本公式恢复。
 - 外部工具环境已按独立 worker 思路存在：MinerU、Paddle Formula、Pix2Text 已有不同程度 smoke；PDF-Extract-Kit/UniMERNet 尚未跑通，旧 magic-pdf 缺权重。E2E 仍必须把这些工具输出当候选审计，不能把单图 smoke 当质量通过。
+- 公式审核基础 UI 已支持 manual revision、recognition/fusion evidence 预览和 PDF page/bbox 定位；E2E 还需要补真实 UI 触发、批量审核、二次打开 accepted 状态复用和 GraphRAG 路径证据检查。
 
 ## 本轮闭环结果
 
@@ -127,6 +140,19 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - Attention 桌面 E2E 通过：启动约 7.061s，打开约 0.058s；滚动、跳页、缩放、知识库检查、真实鼠标双击翻译打开/折叠/再打开、裂缝问答、右侧全文问答全部完成；日志 `ERROR/WARNING/CRITICAL=0`；右侧问答 evidence=8、answer chars=173、followups=3；公式审计 quality gate 通过。
 - Napkin 桌面 E2E 的 UI/性能/RAG 链路跑完：启动约 50.855s，打开约 0.035s，1050 页长文档跳转到 1/11/51/121/251 页、缩放、双击翻译、裂缝问答、右侧问答均完成；日志 `ERROR/WARNING/CRITICAL=0`；知识库检查约 2.710s；缩放 max 225.5ms、render max 40.3ms、visible update max 395.9ms。
 - Napkin E2E 总退出码仍为失败，原因是公式质量门禁未过：`common_source_command_recall 0.128 < 0.350`。这不是 UI 崩溃，而是正确暴露公式识别质量未达标；不能降级为通过。
+
+2026-05-28 公式审核定位补充：
+
+- 基础审核对话框可展示 recognition result / fusion record 的已落库 evidence JSON，并把 `page_num + bbox` 传给 `PdfViewer.scroll_to_bbox()`。
+- 已补回归测试覆盖 fresh/offscreen layout 下 bbox 定位时滚动范围同步；此前可能出现高亮对象已创建但滚动条 maximum 为 0、页面没有移动的 bug。
+- 后续桌面 E2E 应把“打开审核对话框 → 选择候选 → 预览证据 → 定位 PDF bbox → accepted/revision → r5 写回/GraphRAG artifact”纳入完整路径。
+
+2026-05-28 Napkin 400x 前台验证失败记录：
+
+- 本轮验证暴露大页面 tile-only 渲染退化：极大缩放快速滚动/跳页时，中间页可能显示黑底/空白。
+- 日志证据包括 `大页面 ... 仅瓦片渲染`、`_paint_tiles: ... 缓存:0 裁剪:0`、`TileCache: EVICT`，
+  以及 `_update_visible_pages` 峰值约 241.9ms。
+- 该失败不是“压力测试太强”，而是阅读器必须修复的 P0 体验问题。后续 E2E 只有在页面内容始终可见时才可通过。
 
 2026-05-24 本轮已跑 Attention 和 Napkin 桌面闭环。结论如下：
 

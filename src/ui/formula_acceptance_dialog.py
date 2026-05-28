@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -25,6 +26,8 @@ from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 
 class FormulaAcceptanceDialog(QDialog):
     """Review persisted formula candidates through the shared service API."""
+
+    evidence_location_requested = Signal(int, object)
 
     def __init__(
         self,
@@ -53,6 +56,12 @@ class FormulaAcceptanceDialog(QDialog):
         self._tabs.addTab(self._decision_table, "审核记录")
         layout.addWidget(self._tabs, 1)
 
+        self._evidence = QTextEdit()
+        self._evidence.setReadOnly(True)
+        self._evidence.setPlaceholderText("证据预览")
+        self._evidence.setFixedHeight(130)
+        layout.addWidget(self._evidence)
+
         self._revision_latex = QLineEdit()
         self._revision_latex.setPlaceholderText("修订 LaTeX")
         layout.addWidget(self._revision_latex)
@@ -68,6 +77,7 @@ class FormulaAcceptanceDialog(QDialog):
         self._accept_result_button = QPushButton("接受选中结果")
         self._revise_fusion_button = QPushButton("修订融合")
         self._revise_result_button = QPushButton("修订结果")
+        self._locate_evidence_button = QPushButton("定位证据")
         self._reject_result_button = QPushButton("拒绝选中结果")
         self._close_button = QPushButton("关闭")
         buttons.addWidget(self._refresh_button)
@@ -76,6 +86,7 @@ class FormulaAcceptanceDialog(QDialog):
         buttons.addWidget(self._accept_result_button)
         buttons.addWidget(self._revise_fusion_button)
         buttons.addWidget(self._revise_result_button)
+        buttons.addWidget(self._locate_evidence_button)
         buttons.addWidget(self._reject_result_button)
         buttons.addWidget(self._close_button)
         layout.addLayout(buttons)
@@ -85,9 +96,13 @@ class FormulaAcceptanceDialog(QDialog):
         self._accept_result_button.clicked.connect(self._accept_selected_result)
         self._revise_fusion_button.clicked.connect(self._revise_selected_fusion)
         self._revise_result_button.clicked.connect(self._revise_selected_result)
+        self._locate_evidence_button.clicked.connect(self._locate_selected_evidence)
         self._reject_result_button.clicked.connect(self._reject_selected_result)
         self._close_button.clicked.connect(self.accept)
+        self._ready_table.itemSelectionChanged.connect(self._preview_selected_evidence)
+        self._result_table.itemSelectionChanged.connect(self._preview_selected_evidence)
         self.refresh()
+        self._preview_selected_evidence()
 
     def _revise_selected_fusion(self) -> None:
         fusion_id = _selected_id(self._ready_table, 3)
@@ -147,6 +162,39 @@ class FormulaAcceptanceDialog(QDialog):
         self._status.setText(
             f"融合 {ready.get('count', 0)}，候选 {results.get('count', 0)}，审核记录 {decisions.get('count', 0)}"
         )
+        self._preview_selected_evidence()
+
+    def _preview_selected_evidence(self) -> None:
+        payload = self._selected_evidence_payload()
+        if not payload:
+            self._evidence.clear()
+            return
+        self._evidence.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _locate_selected_evidence(self) -> None:
+        payload = self._selected_evidence_payload()
+        location = payload.get("location", {}) if payload else {}
+        bbox = location.get("bbox") if isinstance(location, dict) else None
+        page_num = location.get("page_num") if isinstance(location, dict) else None
+        if not isinstance(bbox, list) or len(bbox) != 4 or page_num is None:
+            QMessageBox.information(self, "公式审核", "当前记录没有可定位的 page/bbox 证据。")
+            return
+        self.evidence_location_requested.emit(int(page_num), bbox)
+
+    def _selected_evidence_payload(self) -> dict[str, Any]:
+        current = self._tabs.currentWidget()
+        try:
+            if current is self._ready_table:
+                fusion_id = _selected_id(self._ready_table, 3)
+                if fusion_id:
+                    return self._service.fusion_evidence(self._doc_hash, fusion_id=fusion_id)
+            if current is self._result_table:
+                result_id = _selected_id(self._result_table, 4)
+                if result_id:
+                    return self._service.result_evidence(self._doc_hash, result_id=result_id)
+        except Exception as exc:
+            return {"error": str(exc)}
+        return {}
 
     def _accept_selected_fusion(self) -> None:
         fusion_id = _selected_id(self._ready_table, 3)

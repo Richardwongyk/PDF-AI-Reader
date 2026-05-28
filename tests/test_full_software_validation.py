@@ -18,6 +18,7 @@ def _options(tmp_path: Path, **overrides):
         "include_local_tools": False,
         "strict_logs": False,
         "tinybdmath_edge_model": None,
+        "stress_multiplier": 1,
     }
     values.update(overrides)
     return ValidationOptions(**values)
@@ -61,6 +62,35 @@ def test_build_plan_enables_explicit_e2e_cloud_and_local_tools(tmp_path) -> None
     assert "--run-cloud-review" in command
     assert "--auto-local-tools" in command
     assert "--r2-sample-formulas" in command
+
+
+def test_stress_multiplier_scales_pages_limits_and_desktop_e2e(tmp_path) -> None:
+    from tools.full_software_validation import build_plan
+
+    steps = build_plan(
+        _options(
+            tmp_path,
+            include_desktop_e2e=True,
+            include_cloud=True,
+            include_local_tools=True,
+            max_pages=2,
+            stress_multiplier=5,
+        )
+    )
+    by_name = {step.name: step for step in steps}
+
+    index_cmd = list(by_name["formula_index_performance_attention"].command)
+    multiround_cmd = list(by_name["formula_multiround_attention"].command)
+    e2e_cmd = list(by_name["desktop_e2e_workflow"].command)
+
+    assert index_cmd[index_cmd.index("--max-pages") + 1] == "10"
+    assert multiround_cmd[multiround_cmd.index("--max-pages") + 1] == "10"
+    assert multiround_cmd[multiround_cmd.index("--r2-limit") + 1] == "40"
+    assert multiround_cmd[multiround_cmd.index("--r2-sample-formulas") + 1] == "40"
+    assert multiround_cmd[multiround_cmd.index("--r3-limit") + 1] == "20"
+    assert multiround_cmd[multiround_cmd.index("--r4-limit") + 1] == "80"
+    assert multiround_cmd[multiround_cmd.index("--r5-limit") + 1] == "20"
+    assert e2e_cmd[e2e_cmd.index("--stress-multiplier") + 1] == "5"
 
 
 def test_dry_run_writes_auditable_report(tmp_path) -> None:

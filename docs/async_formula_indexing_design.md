@@ -15,6 +15,10 @@
 - 每个模型后端都必须可替换：MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、DeepSeek
   只通过统一接口接入。
 
+2026-05-28 性能复盘补充：首屏解析拆成“前 8 页快速返回 + 后台全文解析”是符合性能优先的方向，
+但必须验证后台补页后 `DocumentBlock`、知识库、公式任务和 GraphRAG 增量状态一致。不能因为首屏快，
+让全文索引、公式入队或翻译/问答只看到前几页。详细审计见 `TODO.md` 顶部今日复盘。
+
 ## 总体流水线
 
 ```text
@@ -52,7 +56,7 @@ PDF 导入
 
 所有轮次都必须持久化。不能只把结果留在内存，也不能每次打开文档重新扫描。
 
-### 当前落地状态（2026-05-24）
+### 当前落地状态（2026-05-28）
 
 已在现有 `FormulaIndexStore` 上完成第一版多轮任务持久化，而不是另起一个同步扫描器：
 
@@ -87,7 +91,7 @@ PDF 导入
 - `formula_round_jobs.result_json` 和 `formula_recognition_results` 已记录输入 hash、模型和预处理版本；同一轮次同一输入完成后，二次打开或 `--reuse-db` 会跳过已完成 r0/r2 重任务。
 - 新增 `tools/formula_multiround_pipeline.py`，用于 r0-r5 端到端 smoke/benchmark：默认 born-digital 路线不 OCR，显式 `--r2-sample-formulas` 才把现有公式块送入 r2 多工具候选复核，`--run-cloud-review` 可跑真实 DeepSeek r3，r4/r5 可用小批量 drain 验证图谱和知识库增量更新。
 - 多轮报告已接入源 LaTeX 对照准确率复核：每个 stage/model 都输出 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 必须证明准确率逐轮递增，未达门槛的结果不能 accepted。
-- 多工具协同细设计见 `docs/formula_multitool_fusion_design.md`：下一步实现候选级 fusion table、coverage-comparable 检查、accepted 门禁和 r5 增量写回；自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
+- 多工具协同细设计见 `docs/formula_multitool_fusion_design.md`：候选级 fusion table、coverage-comparable 检查、accepted/rejected audit、manual revision 和 r5 增量写回基础闭环已经落地；下一步是批量审核、路径证据和大样本质量门禁。自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
 
 这一步已完成多轮调度、存储闭环和 r3 候选写回的第一版：
 
@@ -99,9 +103,9 @@ PDF 导入
 - r3 done 结果会合并原始排队 payload，保留 `review_candidate`、`queued_input_hash`、`review_input_hash`、优先级和优先级原因，保证审计时能复原云端审了哪个候选、基于哪个 fusion input。
 - 行内公式候选额外携带 `inline_pdf_evidence`：原 PDF math-font span 的 text/font/size/bbox、候选 bbox、字体列表、字号范围和脚本字号证据。它用于 r3/工具复核和审计，不是默认 LaTeX 重建器，也不能绕过 accepted 门禁。
 - 真实 DeepSeek r3 单条 smoke 已跑通。2026-05-28 已补上 accepted/rejected audit 表、
-  命令行审核入口和 accepted 变化触发 r5 知识库 upsert 的闭环；r5 已同步 accepted
-  公式 GraphRAG artifact 并记录 graph sync 状态。后续仍需产品级 UI 和更高质量的
-  r4 语义图谱。
+  命令行审核入口、基础审核对话框、manual revision、evidence 预览、PDF bbox 定位和
+  accepted 变化触发 r5 知识库 upsert 的闭环；r5 已同步 accepted 公式 GraphRAG artifact
+  并记录 graph sync 状态。后续仍需批量审核体验和更高质量的 r4 语义图谱。
 
 ### 文档块
 
@@ -220,6 +224,8 @@ PDF 导入
     `auto_accept_allowed`，强制覆盖必须显式 `--allow-not-ready` 并留下 reason。
   - `revise-fusion` 用审核者提供的 LaTeX 修订单个 fusion record，并接受该 revision。
   - `decisions` 列出 audit events。
+- 基础审核对话框已能预览 recognition/fusion evidence JSON，并按 `page_num + bbox` 跳回
+  PDF 证据位置；定位只消费已落库 evidence，不做公式修正规则。
 
 ### 任务队列
 
@@ -441,10 +447,10 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_inde
 
 ## 下一步落地
 
-1. 定义统一 `FormulaCandidateStore` / `FormulaResultStore` / `AsyncJobStore`。
-2. `FormulaIndexStore` 多轮任务表、`formula_recognition_results` 和 accepted 唯一性已完成第一版；继续补 accepted revision/audit 表。
+1. 保持 `FormulaIndexStore` / `formula_recognition_results` / `formula_fusion_records` / `formula_acceptance_decisions` 为当前持久化边界，继续补租约恢复、失败重试和二次打开 skip 审计。
+2. 在已有基础审核 UI 上补批量审核、accepted precision 报告、审核筛选和二次打开 accepted 状态复用。
 3. Pix2Text/Paddle 外部 worker 已有最小候选接入；下一步用同一批 Attention/Napkin 裁剪样本扩展到 MinerU、UniMERNet/PDF-Extract-Kit，并做源码对齐。
 4. 增加更完整 worker 抽象：常驻 worker、批量协议、模型版本探测、模型缓存路径、失败降级和超时回收。
 5. 用 Attention/Napkin 建立同一批候选样本，比较 Pix2Text、Paddle Formula、UniMERNet、PDF-Extract-Kit、MinerU 的准确率与耗时。
-6. 对 bbox overlap 和 LaTeX 相似度审计做 profile，确认是否值得 C++17 下沉。
-7. 把 accepted 高置信结果增量写回知识库和 GraphRAG artifact，低置信进入修正队列。
+6. 对 bbox overlap、PDF bbox 定位、LaTeX 相似度审计和 fusion 分组做 profile，确认是否值得 C++17 下沉。
+7. 强化 r4/r5 GraphRAG 路径证据：accepted 高置信结果已能增量写回知识库和 GraphRAG artifact，下一步要证明问答 evidence 能沿 accepted decision -> block -> graph artifact 追溯。

@@ -97,6 +97,7 @@ class ValidationOptions:
     include_local_tools: bool = False
     strict_logs: bool = False
     tinybdmath_edge_model: Path | None = None
+    stress_multiplier: int = 1
 
 
 @dataclass
@@ -193,7 +194,18 @@ def _page_budget(profile: str, requested: int, case_name: str, dense_slice: bool
     return 0
 
 
-def _selected_case_slices(case: str, profile: str, max_pages: int) -> list[tuple[str, str, int, int]]:
+def _scale_positive(value: int, multiplier: int) -> int:
+    if value <= 0:
+        return value
+    return max(1, int(value) * max(1, int(multiplier)))
+
+
+def _selected_case_slices(
+    case: str,
+    profile: str,
+    max_pages: int,
+    stress_multiplier: int = 1,
+) -> list[tuple[str, str, int, int]]:
     names = ["attention", "napkin"] if case == "all" else [case]
     slices: list[tuple[str, str, int, int]] = []
     for name in names:
@@ -202,16 +214,27 @@ def _selected_case_slices(case: str, profile: str, max_pages: int) -> list[tuple
                 "napkin_front",
                 "napkin",
                 0,
-                _page_budget(profile, max_pages, "napkin", dense_slice=False),
+                _scale_positive(
+                    _page_budget(profile, max_pages, "napkin", dense_slice=False),
+                    stress_multiplier,
+                ),
             ))
             slices.append((
                 "napkin_formula_dense",
                 "napkin",
                 8,
-                _page_budget(profile, max_pages, "napkin", dense_slice=True),
+                _scale_positive(
+                    _page_budget(profile, max_pages, "napkin", dense_slice=True),
+                    stress_multiplier,
+                ),
             ))
             continue
-        slices.append((name, name, 0, _page_budget(profile, max_pages, name)))
+        slices.append((
+            name,
+            name,
+            0,
+            _scale_positive(_page_budget(profile, max_pages, name), stress_multiplier),
+        ))
     return slices
 
 
@@ -225,6 +248,7 @@ def _formula_index_steps(options: ValidationOptions) -> list[ValidationStep]:
         options.case,
         options.profile,
         options.max_pages,
+        options.stress_multiplier,
     ):
         out = options.output_dir / f"formula_index_{slice_name}.json"
         db = options.output_dir / f"formula_index_{slice_name}.db"
@@ -259,6 +283,7 @@ def _formula_audit_steps(options: ValidationOptions) -> list[ValidationStep]:
         pages = 3
     if pages <= 0 and options.profile == "standard":
         pages = 12
+    pages = _scale_positive(pages, options.stress_multiplier)
     command: list[object] = [
         "tools/formula_latex_audit.py",
         "--case",
@@ -295,10 +320,23 @@ def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
         options.case,
         options.profile,
         options.max_pages,
+        options.stress_multiplier,
     ):
         formula_db = options.output_dir / f"multiround_{slice_name}.db"
         graph_db = options.output_dir / f"graph_{slice_name}.db"
         report = options.output_dir / f"multiround_{slice_name}.json"
+        r2_limit = 0
+        r2_sample_limit = 0
+        r3_limit = 0
+        r4_limit = 64 if options.profile in {"full", "nightly"} else 16
+        r5_limit = 16 if options.profile in {"full", "nightly"} else 4
+        if options.include_local_tools:
+            r2_limit = _scale_positive(8, options.stress_multiplier)
+            r2_sample_limit = r2_limit
+        if options.include_cloud:
+            r3_limit = _scale_positive(4, options.stress_multiplier)
+        r4_limit = _scale_positive(r4_limit, options.stress_multiplier)
+        r5_limit = _scale_positive(r5_limit, options.stress_multiplier)
         command: list[object] = [
             "tools/formula_multiround_pipeline.py",
             "--case",
@@ -310,15 +348,15 @@ def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
             "--r1-limit",
             0,
             "--r2-limit",
-            0,
+            r2_limit,
             "--r2-sample-formulas",
-            0,
+            r2_sample_limit,
             "--r3-limit",
-            0,
+            r3_limit,
             "--r4-limit",
-            64 if options.profile in {"full", "nightly"} else 16,
+            r4_limit,
             "--r5-limit",
-            16 if options.profile in {"full", "nightly"} else 4,
+            r5_limit,
             "--formula-db",
             _rel(formula_db),
             "--graph-db",
@@ -334,10 +372,10 @@ def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
         else:
             notes.append("TinyBDMath uses deterministic model fallback because edge model artifact is absent")
         if options.include_local_tools:
-            command.extend(["--auto-local-tools", "--r2-limit", 8, "--r2-sample-formulas", 8])
+            command.append("--auto-local-tools")
             notes.append("explicit local OCR/MFR tool comparison enabled")
         if options.include_cloud:
-            command.extend(["--run-cloud-review", "--r3-limit", 4])
+            command.append("--run-cloud-review")
             notes.append("explicit cloud semantic review enabled")
         steps.append(ValidationStep(
             name=f"formula_multiround_{slice_name}",
@@ -376,6 +414,8 @@ def _desktop_e2e_step(options: ValidationOptions) -> list[ValidationStep]:
                 "tools/e2e_pdf_workflow.py",
                 "--case",
                 _case_arg(options.case),
+                "--stress-multiplier",
+                max(1, options.stress_multiplier),
             ),
             timeout_sec=1800,
             output_files=("test_artifacts/e2e/report.json",),
@@ -828,6 +868,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
     parser.add_argument("--include-local-tools", action="store_true")
     parser.add_argument("--strict-logs", action="store_true")
     parser.add_argument("--tinybdmath-edge-model", type=Path)
+    parser.add_argument(
+        "--stress-multiplier",
+        type=int,
+        default=1,
+        help="Multiply page budgets and desktop E2E interaction counts.",
+    )
     args = parser.parse_args(argv)
     return ValidationOptions(
         profile=args.profile,
@@ -842,6 +888,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
         include_local_tools=args.include_local_tools,
         strict_logs=args.strict_logs,
         tinybdmath_edge_model=args.tinybdmath_edge_model,
+        stress_multiplier=max(1, args.stress_multiplier),
     )
 
 

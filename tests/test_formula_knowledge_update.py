@@ -256,6 +256,51 @@ def test_acceptance_review_service_revises_fusion_and_queues_r5(tmp_path) -> Non
     assert decision.payload["manual_revision"] is True
 
 
+def test_acceptance_review_service_exposes_result_and_fusion_evidence(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake-tool",
+        input_hash="image-input",
+        latex=r"\alpha+\beta",
+        score=0.72,
+        evidence={"page_num": 0, "bbox": [1, 2, 30, 12], "glyphs": [{"text": "a"}]},
+    )
+    fusion_id = store.put_fusion_record(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        fusion_version="fusion-v1",
+        input_hash="fusion-input",
+        best_result_id=result_id,
+        ranked_result_ids=[result_id],
+        source_similarity=0.7,
+        risk_flags=["needs_review"],
+        accepted_gate={"passed": False},
+        decision="needs_more_evidence",
+        result_json={
+            "ranked_candidates": [
+                {
+                    "result_id": result_id,
+                    "latex": r"\alpha+\beta",
+                    "evidence": {"page_num": 0, "bbox": [3, 4, 50, 15]},
+                }
+            ],
+        },
+    )
+    service = FormulaAcceptanceReviewService(store)
+
+    result_evidence = service.result_evidence("doc-1", result_id=result_id)
+    fusion_evidence = service.fusion_evidence("doc-1", fusion_id=fusion_id)
+
+    assert result_evidence["location"] == {"page_num": 0, "bbox": [1.0, 2.0, 30.0, 12.0]}
+    assert result_evidence["evidence"]["glyphs"] == [{"text": "a"}]
+    assert fusion_evidence["risk_flags"] == ["needs_review"]
+    assert fusion_evidence["location"] == {"page_num": 0, "bbox": [3.0, 4.0, 50.0, 15.0]}
+
+
 def test_acceptance_r5_update_upserts_manual_decision_metadata(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula()

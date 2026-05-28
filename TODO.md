@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
 > 基于 git 日志 93 次提交 + 12 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-08 (P2 交付 — AskQuestionFlow + 翻译框优化 + 段落宽度CSS + 重复翻译防护)
+> 最后更新：2026-05-28 (今日性能/渲染/翻译改动复盘、Napkin 400x 退化记录、文档状态修订)
 
 ---
 
@@ -20,6 +20,154 @@
 4. 防休眠脚本在仓库 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`，新会话必须先检查是否仍在运行。
 5. 外部工具（MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR、magic-pdf）要按独立 worker 环境矩阵验证，不得混装到主环境。
 6. 所有提交不得带额外署名、来源标记或生成工具署名；不要提交 `测试资料/`、日志、缓存、临时 benchmark 输出。
+
+## 2026-05-28 今日性能修复复盘：相对最初基线改了什么、优化了什么、搞坏了什么
+
+> 本节是今天前台 400x/Napkin 压测中断后的审计记录。这里的“最开始”指当前工作树相对
+> HEAD 的未提交差异开始前，即今天动性能、渲染、测试压力和翻译公式保护之前的代码基线。
+> 这些结论必须先于继续优化阅读器性能执行；不能继续用“性能优化”掩盖用户可见体验退化。
+
+### 0. 当前工作树范围
+
+- 当前未提交 diff 涉及 40 个已跟踪文件，约 2132 行新增、487 行删除；另有
+  `tests/test_e2e_pdf_workflow_stress.py`、`tests/test_pdf_viewer_navigation.py`、
+  `tests/test_tile_cache_performance.py`、`tools/offscreen_ui_stress.py` 等新增文件。
+- 未跟踪的 `测试资料/` 仍不能提交；`logs/`、`test_artifacts/`、缓存和临时 benchmark
+  也不能提交。
+- 防休眠进程仍在：`tools/keep_awake_watchdog.ps1` 和 `tools/keep_awake.ps1`。没有发现
+  `src/main.py`、`tools/e2e_pdf_workflow.py`、pytest 或 offscreen stress 残留进程。
+
+### 1. 今天做出的主要代码改动
+
+1. `src/core/pdf_engine.py`
+   - 将原 `_ParseThread` 从“两阶段解析 + 后台 MFD”改成“首屏前 8 页解析后立即 emit
+     `parse_finished`”，再由新的 `_BackgroundParseThread` 延迟解析剩余页面和 MFD。
+   - 新增 `_background_thread` 生命周期管理，打开新文档、关闭文档和 shutdown 时都会尝试停止后台解析。
+   - 目的：降低 Napkin 冷启动等待，让窗口和首屏更快出现。
+   - 风险：解析完成语义被拆成 `parse_finished` 与 `parse_completed` 两阶段后，任何假设
+     `parse_finished` 已有全文 blocks 的 UI/知识库/公式任务都可能只看到前 8 页；需要逐项确认
+     后台 page_blocks_ready、知识库构建和公式入队是否一致。
+
+2. `src/ui/pdf_viewer.py`
+   - `_VirtualPageLayout` 加入 start/end offset 数组和二分定位，替换原线性扫描。
+   - 缩放流程改成“先更新布局/容器尺寸，旧 pixmap 在 paintEvent 中拉伸过渡，再延迟请求清晰渲染”，避免缩放时同步生成大 scaled pixmap。
+   - 大页面阈值下改走 tile rendering，避免极大 pixmap 直接驻留和主线程切片开销。
+   - 滚动时 `_update_visible_pages()` 立即执行，并扩大 active/needed 页面窗口，试图减少纯 spacer 曝露。
+   - overlay 改成复用而不是每次全删全建；裂缝页面段内 overlay 也改为刷新几何。
+   - 新增 `scroll_to_bbox()`、短暂 evidence highlight 和滚动范围同步，用于公式审核证据定位。
+   - 目的：降低缩放和滚动时 UI 线程工作量，支持 page/bbox 定位。
+   - 风险：大页面“仅瓦片渲染”路径没有保留最近可见整页/低清 fallback；tile cache 未命中时
+     paint 只能画黑底或占位，直接破坏用户对滚动位置的感知。
+
+3. `src/ui/split_widget.py`
+   - WebViewPool 改为预热 `about:blank`，`acquire()` 不再立刻清空旧 HTML；新增
+     `load_template()`，桥接对象先注册再载入模板。
+   - 预热间隔从 50ms 改到 5000ms，避免频繁创建 Chromium 实例；新增 `clear()` 测试辅助。
+   - 目的：减少裂缝翻译框创建/回收时的 QWebEngine 冷启动和 IPC 不稳定。
+   - 风险：如果模板 reload/loadFinished 顺序异常，翻译框可能暂时无内容或恢复缓存不及时；仍需前台验证。
+
+4. `src/ui/main_window.py`
+   - 导入后公式任务持久化从 UI 线程挪到 `_FormulaImportPlanThread`。
+   - 基础审核对话框接入 `evidence_location_requested`，可跳转 PDF page/bbox。
+   - 目的：避免导入时大量公式任务落库阻塞首屏；补齐审核证据定位。
+   - 风险：`FormulaIndexStore` 虽有 `check_same_thread=False` 和 lock，但同一个 store 跨 UI/worker
+     线程写入仍需重点测试 SQLite 竞争、关闭文档时线程中断和 stale doc_hash。
+
+5. `src/app/formula_acceptance_review.py`、`src/ui/formula_acceptance_dialog.py`
+   - recognition result / fusion record 可导出 evidence payload，基础 UI 可预览 JSON。
+   - 可从 evidence 中读取 `page_num + bbox` 并请求 PDF 定位。
+   - 这是正向进展：更接近“每个 accepted 都可追溯到证据”的要求。
+
+6. `src/app/formula_index_flow.py`
+   - 调整 block queue 和 page queue drain 顺序，page scan 完成后可继续 block batch，block batch
+     完成后也能继续 page queue。
+   - 目的：避免一种队列 drain 完后另一种队列饿死。
+
+7. `src/app/test_command_bridge.py`、`tools/e2e_pdf_workflow.py`、`tools/full_software_validation.py`
+   - 测试命令桥增加 command_id、partial JSONL 处理、公式扫描状态事件和公式扫描命令。
+   - E2E 增加 `--stress-multiplier`，覆盖大滚轮、连续快速滚动、极大缩放下滚动、缩放状态跳页、翻译框保持打开时滚动/缩放、公式扫描压力。
+   - 修正 400x 早期机械重复同几页的问题：`_stress_pages()` 改为覆盖型抽样并交错首尾、极端页和中点页，避免在两三页之间反复跳几百次。
+   - `full_software_validation.py` 将 stress multiplier 传播到页数、r2/r3/r4/r5 limit 和桌面 E2E。
+   - 目的：把用户指出的“滚动、翻页、缩放、翻译、扫描识别压力不够”变成可自动化的覆盖。
+   - 风险：压测强度扩大本身不是体验优化；如果渲染 fallback 错了，压测会放大用户可见黑屏。
+
+8. `src/core/pdf_engine.py::TextPreprocessor`
+   - 今日 diff 中将 `$...$` 恢复格式从原来的 `$...$` 改成 `\(...\)`，并对 display/inline
+     公式内容 `.strip()`。
+   - 新增测试强调不再猜裸数学表达式，这是反硬编码方向正确；但“改变原始 delimiter/空白”可能导致翻译后公式和原文不完全一致。
+   - 更严重的待确认风险：`TranslationService` 仍复用同一个 `TextPreprocessor` 实例，流式翻译结束后才恢复公式。并发多个翻译时，请求 A 的公式表可能被请求 B 覆盖，导致随机符号/公式错乱。这一项今天只是发现风险，尚未修复。
+
+### 2. 今天确实产生的正向进展
+
+- Napkin 首屏解析从“全量长文档解析后才可用”的方向改为首批页面快速返回；这是正确方向，但需要补全后台解析完成后的知识库/公式任务一致性测试。
+- 虚拟布局从 O(n) 页面扫描改成二分定位，理论上对 1050 页 Napkin 的滚动/跳页定位更稳定。
+- 缩放时不再在 UI 线程同步生成大 scaled pixmap，理论上降低缩放卡顿峰值。
+- overlay 复用减少大量 QWidget 创建/销毁，对频繁缩放和裂缝页重排有潜在收益。
+- 公式审核 evidence 预览、PDF bbox 定位和 r5 accepted GraphRAG artifact 同步是明确的产品功能推进。
+- 400x 压测脚本从“机械重复次数”改成“覆盖更多页、更多交互相位”的方向，这符合用户要求：压力不应只靠堆次数。
+- 已跑过 `tests/test_e2e_pdf_workflow_stress.py -q`，结果 8 passed；这只证明压力分配函数和脚本结构，不证明 UI 体验合格。
+
+### 3. 今天明确搞坏或暴露的问题
+
+P0：极大缩放滚动黑底/空白页
+
+- 前台 Napkin 400x 验证中，极大缩放约 5x 后跨页快速滚动/跳页，中间页会进入“大页面仅瓦片渲染”。
+- 日志证据：`logs/app.log` 中本轮出现 `大页面 ... 仅瓦片渲染` 85 次、首次空瓦片绘制 19 次、
+  `TileCache: EVICT` 24 次；`_paint_tiles: ... 缓存:0 裁剪:0` 后用户看到黑底/空白。
+- 这是不可接受的用户体验退化。PDF 阅读器滚动时必须始终有可辨识页面内容，哪怕先模糊，不能让用户在黑底中猜位置。
+- 根因判断：为了避免大 pixmap 和同步缩放，代码把极大页面切到 tile-only；但 tile cache 首次未命中时没有
+  使用旧整页 pixmap、低分辨率 page pixmap 或上一次 rendered snapshot 作为 fallback。
+- 修复原则：大页面/极大缩放路径必须采用“旧图/低清整页即时可见 + tile 渐进清晰化”，不能再画纯占位。
+
+P0：不能以牺牲滚动体验换性能数字
+
+- 当前优化把用户最关注的连续滚动定位感破坏了。哪怕 `_update_visible_pages`、缩放耗时或冷启动有下降，
+  只要滚动中间页不可见，就不能算成功优化。
+- 后续任何性能提交必须附带前台视觉验证：极大缩放、连续大滚轮、翻译框打开、缩放状态跳页都必须截图/日志双重通过。
+
+P1：首屏解析拆分后的数据一致性风险
+
+- 现在 `parse_finished` 可能只含前 8 页 blocks，后台解析再逐页补齐。
+- 如果知识库构建、公式全篇入队、目录/块索引在 `parse_finished` 时就假设全文已完成，会造成只索引前几页、后续页翻译/问答/公式任务延迟或缺失。
+- 已有 `page_blocks_ready` 路径，但必须全量检查：`_current_blocks`、`_blocks_by_id`、知识库重建、GraphRAG、公式 import plan 是否能在后台补页后增量更新。
+
+P1：翻译公式保护仍有并发状态污染风险
+
+- `TranslationService` 内部共享一个 `TextPreprocessor`，每次 `protect_formulas()` 都会清空 `_formula_store`。
+- 流式模式下，A 请求 protect 后开始 streaming；B 请求如果先执行 protect，会覆盖 store；A 结束时 `_post_process()` 可能用 B 的 store 恢复公式。
+- 这会造成随机公式错乱，和用户前面看到“随便点一个翻译都渲染错误”的现象一致。正确修复应是每个翻译请求使用独立 protection session/store，不能靠硬编码保护规则。
+- 今天没有继续修，因为用户要求先停止并写复盘；后续主攻翻译时应先写并发复现测试。
+
+P1：翻译公式格式被改写
+
+- 当前 diff 将 `$M$` 恢复成 `\(M\)`，并去掉公式内部首尾空白。这满足“输出有定界符”的形式要求，
+  但不满足“翻译保护应原样保留原公式”的更高要求。
+- 后续应评估：翻译链路公式保护应保存 `match.group(0)` 原文，渲染层再负责 KaTeX 识别；不要在翻译预处理阶段改写用户原始 LaTeX。
+
+P2：WebView 预热可能改善冷启动，但需确认没有内容恢复回退
+
+- `WebViewPool` 从立即预热改成 5 秒后预热，减少资源抖动，但也可能让首次翻译仍冷启动。
+- 需要测量第一次双击翻译从请求到可见内容的耗时，以及折叠/展开后内容是否稳定恢复。
+
+### 4. 今天新增/修改测试的意义和不足
+
+- `tests/test_e2e_pdf_workflow_stress.py`：验证 stress multiplier 不再把 400x 变成同几页重复跳转，且滚动/缩放/翻译/公式扫描动作数有上界。它不是 UI 体验测试。
+- `tests/test_pdf_viewer_navigation.py`：覆盖 bbox 跳转和滚动范围同步，是公式证据定位的回归测试。
+- `tests/test_tile_cache_performance.py`：覆盖 tile cache/large page 行为，但还不足以证明“首次 tile miss 时页面仍可见”。
+- `tools/offscreen_ui_stress.py`：可用于后台/offscreen 压力，但不能替代前台视觉测试；用户已经明确表示最终要看完整程序效果。
+- 需要新增的关键测试：
+  - 极大缩放 tile miss 时必须绘制 fallback pixmap，而不是黑底/空白。
+  - 连续 20 次以上大幅滚轮时，中间页始终有页面内容或低清占位内容，不允许纯黑。
+  - 翻译框保持打开时滚动/缩放/跳页，裂缝内容和页面段落不能错位或丢失。
+  - 并发两个含不同公式的翻译请求，最终各自公式恢复必须互不污染。
+
+### 5. 下一步修复顺序
+
+1. 先修 P0 渲染体验：大页/极大缩放时保留旧整页或低分辨率 fallback，tile 只负责逐步清晰化。
+2. 再验证首屏解析拆分后的全文 blocks/知识库/公式任务增量一致性，防止只处理前 8 页。
+3. 再处理翻译：每次翻译独立 formula protection session，公式恢复尽量原样保留，不引入手写样本规则。
+4. 再重新跑 Napkin 前台 400x 视觉验证；只有滚动中间页始终可见，才能继续谈更强压力。
+5. 最后再看性能指标，避免用“更快”掩盖“看不见”。
 
 2026-05-26 标准资料补充：
 
@@ -49,6 +197,25 @@
 - 强化语义门禁后 standard 通过：`tools/full_software_validation.py --profile standard --case all --output-dir test_artifacts/full_software_validation_standard_semantic`，15 步约 119.678s，required failures=0。该目录是临时产物，不提交。
 - 桌面 E2E：Attention 完整通过；Napkin 的 UI、长文档跳转、缩放、双击翻译、问答、日志链路完成，但公式质量门禁失败并返回 1，`common_source_command_recall 0.128 < 0.350`。这是当前未达 99.9% 公式质量的明确证据。
 
+2026-05-28 公式审核与定位补充：
+
+- `FormulaAcceptanceReviewService` 已暴露 recognition result / fusion record 的 evidence payload，
+  基础审核对话框可预览 JSON 证据，并按已落库的 `page_num + bbox` 跳回 PDF 证据位置。
+- `PdfViewer.scroll_to_bbox()` 已补齐 fresh/offscreen layout 下的滚动范围同步；此前证据高亮已创建但
+  初始滚动条 maximum 可能仍为 0，导致定位不动。新增回归测试覆盖 bbox 定位和无效 bbox 拒绝。
+- 手工 revision 仍只写入 `manual_revision/human_review` 候选并走同一 acceptance/r5 流程，
+  不是自动修正规则；低置信候选不会写正文、FTS、向量库或 GraphRAG accepted。
+
+2026-05-28 前台 Napkin 400x 交互验证新增问题：
+
+- 极大缩放（约 5x）下跨页快速滚动/跳页时，中间页会进入“仅瓦片渲染”路径；首次 paint 可能出现
+  `_paint_tiles: ... 缓存:0 裁剪:0`，用户看到黑底/空白/占位，而不是可辨识的旧页面内容。
+- 日志证据：`logs/app.log` 中本轮出现 `大页面 ... 仅瓦片渲染` 85 次、首次空瓦片绘制 19 次、
+  `TileCache: EVICT` 24 次，widget pool 一度到 250，`_update_visible_pages` 峰值 241.9ms。
+- 这不是可接受的性能优化结果。后续修复方向：大页面/极大缩放滚动时必须保留并拉伸最近可用整页
+  pixmap 或低分辨率 fallback，瓦片只做清晰化替换；不能让首次瓦片未命中时绘制纯占位。
+- 压测脚本已改为覆盖型跳页，避免 400x 机械重复同一组页面；后续仍需在修复渲染后重跑前台验证。
+
 多轮公式解析必须让下一个助手首先看到并遵守：
 
 | 轮次 | 必须完成的事 | 不能做的事 |
@@ -58,7 +225,7 @@
 | r2 本地高精度 | 用 Pix2Text/PaddleOCR/UniMERNet/PDF-Extract-Kit/MinerU 等独立 worker 做低置信复核 | 不把工具混进主环境，不直接覆盖正文 |
 | r3 云端语义复核 | DeepSeek 基于上下文和候选公式写 `suggested_latex/confidence/reason/risks` | 不无证据猜公式，不自动覆盖 |
 | r4 GraphRAG | 异步写公式、章节、定理、引用、概念关系 | 不阻塞基础 RAG 和阅读 |
-| r5 知识库增量更新（枚举已落地，接线未完成） | accepted 高置信结果变化后按 hash 增量 upsert | 不重建整篇、不重复 embedding |
+| r5 知识库增量更新（基础接线已落地） | accepted 高置信结果变化后按 hash 增量 upsert，并同步 accepted 公式 GraphRAG artifact | 不重建整篇、不重复 embedding；低置信候选不污染知识库 |
 
 下一步优先级：
 
@@ -67,7 +234,7 @@
 3. 先把插桩训练集资产化：Attention 138 条、Napkin v3 29743 条 verified exact rows 转为 TinyBDMath graph training/eval rows，输出 schema、hash、split、类型统计和错误报告。
 4. 训练并评测 TinyBDMath 非 OCR baseline：先 MLP edge/quality scorer + 解码/verifier，指标必须按 inline/display、上下标、分数线/根号/overline、align、数学字体分项统计；只有证明比 r0/fusion baseline 提升，才接入更高门禁。
 5. 将新模型以 candidate-only 方式接入 r2a/fusion：所有结果带 input hash、model/version、preprocess_version、result JSON 和跳过机制；低置信继续只写候选，不覆盖正文/RAG。
-6. 再推进 accepted/rejected/revision 门禁、r5 知识库增量写回和 GraphRAG 同步；最终用 Attention/Napkin/E2E 证明准确率、性能和二次打开跳过。
+6. 继续推进批量审核体验、accepted precision 统计、r4/r5 语义路径证据和 GraphRAG 产品体验；最终用 Attention/Napkin/E2E 证明准确率、性能和二次打开跳过。
 7. 外部工具继续作为 r2b/兜底路线验证：MinerU 新模型、Paddle Formula、Pix2Text 已有 smoke；PEK/UniMERNet 和旧 magic-pdf 仍要补齐或明确淘汰，但不能替代 born-digital 非 OCR 主线。
 
 2026-05-25 最新实现检查点：
@@ -114,7 +281,7 @@
 - r3 证据包复测：Attention 前 2 页 mock drain 约 0.926s，r3/r4 各 9 条；真实 DeepSeek 限 1 条约 37.304s，遇到非 JSON 响应时 failed 落库，保留 raw response 摘要，正文和 accepted 结果不变。
 - r3 优先队列复测：Attention 前 2 页 `--r3-limit 1` 不 drain 时，首条处理 `ht−1`，剩 8 条 queued；单字符 `t` 仍保留 queued 但被延后。SQLite 审计可看到 done 记录保留候选 LaTeX、queued/review hash 和 `review_priority_reason`。
 - inline evidence 复测：Attention 前 2 页 `ht−1` 的 fusion evidence 包含 CMMI10/CMMI7/CMSY7/CMR7、字号范围 6.974 到 9.963、真实 bbox 和 `has_script_size=true`；后续 r3/工具可据此恢复上下标，但当前结果仍只是候选证据。
-- 结论必须明确：r1/r3/r4/r5 的异步落库链路已经跑通，降质候选也不会污染正文/RAG；但是 99.9% 公式准确率和产品级 RAG/GraphRAG 未完成，下一步应集中提升 born-digital LaTeX 恢复质量、Napkin 大样本门禁、常驻 worker 性能和 accepted/revision UI。
+- 结论必须明确：r1/r3/r4/r5 的异步落库链路已经跑通，降质候选也不会污染正文/RAG；但是 99.9% 公式准确率和产品级 RAG/GraphRAG 未完成，下一步应集中提升 born-digital LaTeX 恢复质量、Napkin 大样本门禁、常驻 worker 性能、批量审核和路径证据。
 
 - 此前实现：r0-r5 命令行流水线已完整显示 `r5_knowledge_incremental_update`；新增 `formula_fusion_records` 持久化表，fusion 记录包含 `fusion_version`、`input_hash`、best/ranked result ids、coverage、agreement、risk flags、decision 和完整 result JSON；同 input hash 二次运行跳过 fusion 派生 r2/r3/r5 队列。
 - 新增 `FormulaKnowledgeUpdateService`：消费 r5 round jobs，只有 accepted 结果变化后才把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文；UI idle 调度已接入 r5。

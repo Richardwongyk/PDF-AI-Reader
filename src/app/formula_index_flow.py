@@ -374,6 +374,15 @@ class FormulaIndexFlow(QObject):
         )
         self._thread.start()
 
+    def _start_next_available_batch(self, filepath: str, batch_budget: int) -> None:
+        if self.is_running:
+            return
+        if self._queued_blocks:
+            self._start_next_batch(filepath, batch_budget)
+            return
+        if self._queued_page_nums:
+            self._start_next_page_scan_batch(filepath, batch_budget)
+
     def _start_next_page_scan_batch(self, filepath: str, batch_budget: int) -> None:
         if self.is_running:
             return
@@ -644,13 +653,13 @@ class FormulaIndexFlow(QObject):
     
     def _on_worker_thread_done(self, filepath: str, batch_budget: int) -> None:
         self._thread = None
-        if self._drain_queue and self._queued_blocks:
-            self._start_next_batch(filepath, batch_budget)
+        if self._drain_queue or (self._drain_page_queue and self._queued_page_nums):
+            self._start_next_available_batch(filepath, batch_budget)
 
     def _on_page_scan_thread_done(self, filepath: str, batch_budget: int) -> None:
         self._page_thread = None
-        if self._drain_page_queue and self._queued_page_nums:
-            self._start_next_page_scan_batch(filepath, batch_budget)
+        if self._queued_blocks or (self._drain_page_queue and self._queued_page_nums):
+            self._start_next_available_batch(filepath, batch_budget)
 
     @staticmethod
     def _ocr_candidates(blocks: list[DocumentBlock]) -> list[DocumentBlock]:

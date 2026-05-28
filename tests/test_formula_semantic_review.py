@@ -1,6 +1,7 @@
 import json
 
-from PySide6.QtCore import QCoreApplication, QTimer
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
 from src.app import formula_semantic_review as semantic_module
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
@@ -496,7 +497,7 @@ def test_formula_semantic_review_flow_does_not_start_without_pending(tmp_path) -
 
 
 def test_formula_semantic_review_flow_real_qthread_smoke(tmp_path) -> None:
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula()
     store.enqueue_round_records(
@@ -524,3 +525,4 @@ def test_formula_semantic_review_flow_real_qthread_smoke(tmp_path) -> None:
     assert results[0]["done"] == 1
     assert results[0]["pending"] == 0
     assert store.round_counts("doc-1") == {"r3_cloud_semantic_review:done": 1}
+    flow.stop()

@@ -206,6 +206,57 @@ def test_sample_pdf_parse_smoke() -> None:
     assert "pdf parse smoke ok" in result.stdout
 
 
+def test_long_pdf_parse_finished_before_full_background_parse() -> None:
+    napkin_candidates = list(ROOT.rglob("Napkin.pdf"))
+    if not napkin_candidates:
+        pytest.skip("Napkin PDF is not available in this checkout")
+    result = _run_python(
+        f"""
+        import sys, time
+        from pathlib import Path
+        from PySide6.QtCore import QCoreApplication, QTimer
+        from src.core.models import AppConfig
+        from src.core.pdf_engine import DocumentEngine
+
+        app = QCoreApplication(sys.argv)
+        engine = DocumentEngine(AppConfig())
+        state = {{"first": None, "completed": None, "error": None, "start": 0.0}}
+
+        def finish():
+            engine.shutdown()
+            app.quit()
+
+        def on_finished(result):
+            state["first"] = time.perf_counter() - state["start"]
+            print(f"first={{state['first']:.3f}} blocks={{len(result.blocks)}} pages={{len(result.parsed_pages)}}")
+            QTimer.singleShot(1200, finish)
+
+        def on_completed(result):
+            state["completed"] = time.perf_counter() - state["start"]
+            print(f"completed={{state['completed']:.3f}} blocks={{len(result.blocks)}}")
+
+        def on_error(message):
+            state["error"] = message
+            QTimer.singleShot(0, finish)
+
+        engine.parse_finished.connect(on_finished)
+        engine.parse_completed.connect(on_completed)
+        engine.parse_error.connect(on_error)
+        state["start"] = time.perf_counter()
+        engine.open_document(str(Path({str(napkin_candidates[0])!r})))
+        QTimer.singleShot(10000, lambda: (state.__setitem__("error", "timeout"), finish()))
+        app.exec()
+
+        if state["error"]:
+            raise RuntimeError(state["error"])
+        assert state["first"] is not None
+        assert state["first"] < 5.0
+        print("long pdf first parse smoke ok")
+        """
+    )
+    assert "long pdf first parse smoke ok" in result.stdout
+
+
 def test_main_window_smoke() -> None:
     result = _run_python(
         """
@@ -275,3 +326,36 @@ def test_split_widget_followup_buttons() -> None:
         timeout=60,
     )
     assert "split followup smoke ok" in result.stdout
+
+
+def test_webview_pool_prewarm_starts_engine() -> None:
+    result = _run_python(
+        """
+        import sys
+        import time
+        from PySide6.QtWidgets import QApplication
+
+        from src.ui.split_widget import WebViewPool
+
+        app = QApplication(sys.argv)
+        WebViewPool.prewarm()
+        deadline = time.time() + 8
+        while time.time() < deadline and not getattr(WebViewPool._standby, "_engine_ready", False):
+            app.processEvents()
+            time.sleep(0.02)
+        assert WebViewPool._standby is not None
+        assert getattr(WebViewPool._standby, "_engine_ready", False) is True
+        view = WebViewPool.acquire()
+        assert getattr(view, "_engine_ready", False) is True
+        WebViewPool.clear()
+        view.close()
+        view.deleteLater()
+        for _ in range(20):
+            app.processEvents()
+            time.sleep(0.01)
+        app.quit()
+        print("webview prewarm ok")
+        """,
+        timeout=30,
+    )
+    assert "webview prewarm ok" in result.stdout

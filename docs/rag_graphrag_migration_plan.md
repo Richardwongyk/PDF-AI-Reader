@@ -1,5 +1,18 @@
 # RAG / GraphRAG 迁移方案
 
+## 2026-05-28 状态补充
+
+基础 RAG/FTS/Chroma 后端切换和 GraphIndexStore artifact 管线已经落地。公式侧 r5 已能在
+accepted 结果变化后增量 upsert 知识库，并同步 accepted 公式 GraphRAG artifact；未审核或低置信
+fusion 仍只能作为 candidate evidence，不能被问答当成正文事实。
+
+当前未完成的是产品级 GraphRAG：章节、定理、公式、引用、概念之间的语义路径抽取、路径证据展示、
+真实模型质量评估和批量 accepted 公式带来的增量图谱一致性检查。
+
+2026-05-28 性能复盘补充：首屏解析改为前 8 页快速返回后，RAG/GraphRAG 构建不能误以为
+`parse_finished` 已代表全文完成。后续必须验证后台补页会增量进入 `_current_blocks`、FTS/向量索引、
+公式任务和 GraphRAG artifact，避免长文档只索引前几页。
+
 ## 目标
 
 把当前“Chroma 向量检索 + 手写问答流程”升级为可扩展的全文理解架构，同时保留现有 PDF 解析、阅读 UI、测试桥和缓存机制。

@@ -25,6 +25,10 @@ class TestCommandBridge(QObject):
         self._command_file = command_file
         self._event_file = event_file
         self._offset = 0
+        self._pending_fragment = ""
+        self._active_command_id = ""
+        self._kb_rebuild_command_id = ""
+        self._formula_scan_command_id = ""
         self._kb_rebuild_pending = False
         self._timer = QTimer(self)
         self._timer.setInterval(200)
@@ -32,6 +36,9 @@ class TestCommandBridge(QObject):
         self._timer.start()
         self._window._knowledge_engine.build_finished.connect(self._on_kb_finished)
         self._window._knowledge_engine.build_error.connect(self._on_kb_error)
+        formula_flow = getattr(self._window, "_formula_index_flow", None)
+        if formula_flow is not None:
+            formula_flow.scan_finished.connect(self._on_formula_scan_finished)
         self._emit("ready", {})
 
     def _poll(self) -> None:
@@ -40,11 +47,24 @@ class TestCommandBridge(QObject):
         try:
             with self._command_file.open("r", encoding="utf-8") as f:
                 f.seek(self._offset)
-                lines = f.readlines()
+                chunk = f.read()
                 self._offset = f.tell()
         except OSError as exc:
             self._emit("error", {"error": repr(exc)})
             return
+        if not chunk:
+            return
+        text = self._pending_fragment + chunk
+        if text.endswith("\n"):
+            lines = text.splitlines()
+            self._pending_fragment = ""
+        else:
+            parts = text.splitlines()
+            if not parts:
+                self._pending_fragment = text
+                return
+            lines = parts[:-1]
+            self._pending_fragment = parts[-1]
         for line in lines:
             line = line.strip()
             if not line:
@@ -56,105 +76,146 @@ class TestCommandBridge(QObject):
                 self._emit("error", {"command": line, "error": repr(exc)})
 
     def _execute(self, command: dict[str, Any]) -> None:
+        self._active_command_id = str(command.get("command_id") or "")
         cmd = command.get("cmd")
-        if cmd == "scroll_to_page":
-            page = max(0, int(command.get("page", 0)))
-            self._window._pdf_viewer.scroll_to_page(page)
-            self._emit("scrolled_to_page", {"page": page})
-            return
-        if cmd == "open_translation":
-            block_id = self._pick_block(command)
-            if not block_id:
-                raise RuntimeError("no block available for open_translation")
-            self._window._on_block_double_clicked(block_id)
-            self._emit("translation_requested", {"block_id": block_id})
-            return
-        if cmd == "pick_block":
-            block_id = self._pick_block(command)
-            if not block_id:
-                raise RuntimeError("no block available for pick_block")
-            self._emit("block_picked", {"block_id": block_id, **self._block_geometry(block_id)})
-            return
-        if cmd == "toggle_split":
-            block_id = str(command.get("block_id") or "")
-            if not block_id:
+        try:
+            if cmd == "scroll_to_page":
+                page = max(0, int(command.get("page", 0)))
+                self._window._pdf_viewer.scroll_to_page(page)
+                self._emit("scrolled_to_page", {"page": page})
+                return
+            if cmd == "open_translation":
                 block_id = self._pick_block(command)
-            if not block_id:
-                raise RuntimeError("no block available for toggle_split")
-            self._window._on_block_double_clicked(block_id)
-            split = self._window._pdf_viewer.find_split_widget(block_id)
-            self._emit(
-                "split_toggled",
-                {
-                    "block_id": block_id,
-                    "collapsed": bool(getattr(split, "collapsed", False)) if split else None,
-                },
-            )
-            return
-        if cmd == "set_split_collapsed":
-            block_id = str(command.get("block_id") or "")
-            if not block_id:
+                if not block_id:
+                    raise RuntimeError("no block available for open_translation")
+                self._window._on_block_double_clicked(block_id)
+                self._emit("translation_requested", {"block_id": block_id})
+                return
+            if cmd == "pick_block":
                 block_id = self._pick_block(command)
-            if not block_id:
-                raise RuntimeError("no block available for set_split_collapsed")
-            target = bool(command.get("collapsed", False))
-            split = self._window._pdf_viewer.find_split_widget(block_id)
-            for _ in range(2):
-                if split is not None and bool(getattr(split, "collapsed", False)) is target:
-                    break
+                if not block_id:
+                    raise RuntimeError("no block available for pick_block")
+                self._emit("block_picked", {"block_id": block_id, **self._block_geometry(block_id)})
+                return
+            if cmd == "toggle_split":
+                block_id = str(command.get("block_id") or "")
+                if not block_id:
+                    block_id = self._pick_block(command)
+                if not block_id:
+                    raise RuntimeError("no block available for toggle_split")
                 self._window._on_block_double_clicked(block_id)
                 split = self._window._pdf_viewer.find_split_widget(block_id)
-            self._emit(
-                "split_state_set",
-                {
-                    "block_id": block_id,
-                    "collapsed": bool(getattr(split, "collapsed", False)) if split else None,
-                    "target": target,
-                },
-            )
-            return
-        if cmd == "rebuild_kb":
-            self._kb_rebuild_pending = True
-            self._window._on_build_knowledge_base()
-            self._emit("kb_rebuild_requested", self._state())
-            return
-        if cmd == "ask_question":
-            block_id = self._pick_block(command)
-            if not block_id:
-                raise RuntimeError("no block available for ask_question")
-            question = str(command.get("question") or "What is this document about?")
-            self._window._on_block_question(block_id)
-            self._window._on_split_ask(question, block_id)
-            self._emit("qa_requested", {"block_id": block_id, "question": question})
-            return
-        if cmd == "ask_dock_question":
-            question = str(command.get("question") or "What is this document about?")
-            self._window._ai_question_input.setText(question)
-            self._window._on_dock_question_submitted()
-            self._emit("dock_qa_requested", {"question": question, **self._dock_state()})
-            return
-        if cmd == "snapshot_state":
-            self._emit("state", self._state())
-            return
-        raise ValueError(f"unknown test command: {cmd}")
+                self._emit(
+                    "split_toggled",
+                    {
+                        "block_id": block_id,
+                        "collapsed": bool(getattr(split, "collapsed", False)) if split else None,
+                    },
+                )
+                return
+            if cmd == "set_split_collapsed":
+                block_id = str(command.get("block_id") or "")
+                if not block_id:
+                    block_id = self._pick_block(command)
+                if not block_id:
+                    raise RuntimeError("no block available for set_split_collapsed")
+                target = bool(command.get("collapsed", False))
+                split = self._window._pdf_viewer.find_split_widget(block_id)
+                for _ in range(2):
+                    if split is not None and bool(getattr(split, "collapsed", False)) is target:
+                        break
+                    self._window._on_block_double_clicked(block_id)
+                    split = self._window._pdf_viewer.find_split_widget(block_id)
+                self._emit(
+                    "split_state_set",
+                    {
+                        "block_id": block_id,
+                        "collapsed": bool(getattr(split, "collapsed", False)) if split else None,
+                        "target": target,
+                    },
+                )
+                return
+            if cmd == "rebuild_kb":
+                self._kb_rebuild_pending = True
+                self._kb_rebuild_command_id = self._active_command_id
+                self._window._on_build_knowledge_base()
+                self._emit("kb_rebuild_requested", self._state())
+                return
+            if cmd == "ask_question":
+                block_id = self._pick_block(command)
+                if not block_id:
+                    raise RuntimeError("no block available for ask_question")
+                question = str(command.get("question") or "What is this document about?")
+                self._window._on_block_question(block_id)
+                self._window._on_split_ask(question, block_id)
+                self._emit("qa_requested", {"block_id": block_id, "question": question})
+                return
+            if cmd == "ask_dock_question":
+                question = str(command.get("question") or "What is this document about?")
+                self._window._ai_question_input.setText(question)
+                self._window._on_dock_question_submitted()
+                self._emit("dock_qa_requested", {"question": question, **self._dock_state()})
+                return
+            if cmd == "run_formula_page_scan_batch":
+                started = bool(self._window._start_import_page_scan_batch())
+                self._emit(
+                    "formula_page_scan_requested",
+                    {"started": started, **self._formula_state()},
+                )
+                return
+            if cmd == "high_precision_formula_scan":
+                before = self._formula_state()
+                self._formula_scan_command_id = self._active_command_id
+                self._window._on_high_precision_formula_scan()
+                self._emit(
+                    "formula_scan_requested",
+                    {
+                        "mode": "high_precision",
+                        "before": before,
+                        "after": self._formula_state(),
+                    },
+                )
+                return
+            if cmd == "snapshot_state":
+                self._emit("state", self._state())
+                return
+            raise ValueError(f"unknown test command: {cmd}")
+        finally:
+            self._active_command_id = ""
 
     def _on_kb_finished(self, doc_hash: str) -> None:
         if not self._kb_rebuild_pending:
             return
         self._kb_rebuild_pending = False
-        self._emit(
-            "kb_rebuilt",
-            {
-                "doc_hash": doc_hash,
-                "blocks": len(getattr(self._window, "_current_blocks", [])),
-            },
-        )
+        payload = {
+            "doc_hash": doc_hash,
+            "blocks": len(getattr(self._window, "_current_blocks", [])),
+        }
+        if self._kb_rebuild_command_id:
+            payload["command_id"] = self._kb_rebuild_command_id
+            self._kb_rebuild_command_id = ""
+        self._emit("kb_rebuilt", payload)
 
     def _on_kb_error(self, message: str) -> None:
         if not self._kb_rebuild_pending:
             return
         self._kb_rebuild_pending = False
-        self._emit("kb_error", {"message": message})
+        payload = {"message": message}
+        if self._kb_rebuild_command_id:
+            payload["command_id"] = self._kb_rebuild_command_id
+            self._kb_rebuild_command_id = ""
+        self._emit("kb_error", payload)
+
+    def _on_formula_scan_finished(self, recognized: int, pending: int) -> None:
+        payload = {
+            "recognized": int(recognized),
+            "pending": int(pending),
+            **self._formula_state(),
+        }
+        if self._formula_scan_command_id:
+            payload["command_id"] = self._formula_scan_command_id
+            self._formula_scan_command_id = ""
+        self._emit("formula_scan_finished", payload)
 
     def _pick_block(self, command: dict[str, Any]) -> str:
         block_id = command.get("block_id")
@@ -226,6 +287,28 @@ class TestCommandBridge(QObject):
             "pages": self._window._doc_engine.page_count,
             "dock": self._dock_state(),
             "split_followups": self._split_followup_state(splits),
+            "formula": self._formula_state(),
+        }
+
+    def _formula_state(self) -> dict[str, Any]:
+        doc_hash = str(getattr(self._window, "_current_doc_hash", "") or "")
+        flow = getattr(self._window, "_formula_index_flow", None)
+        if not doc_hash or flow is None:
+            return {
+                "formula_running": bool(getattr(flow, "is_running", False)) if flow else False,
+                "formula_work_pending": 0,
+                "formula_block_pending": 0,
+                "formula_index_pending": 0,
+                "formula_page_pending": 0,
+                "formula_round_pending": 0,
+            }
+        return {
+            "formula_running": bool(getattr(flow, "is_running", False)),
+            "formula_work_pending": int(self._window._pending_formula_work_count()),
+            "formula_block_pending": int(self._window._pending_formula_block_count()),
+            "formula_index_pending": int(flow.pending_count(doc_hash)),
+            "formula_page_pending": int(flow.page_pending_count(doc_hash)),
+            "formula_round_pending": int(flow.round_pending_count(doc_hash)),
         }
 
     def _dock_state(self) -> dict[str, Any]:
@@ -264,6 +347,8 @@ class TestCommandBridge(QObject):
         return events
 
     def _emit(self, event: str, payload: dict[str, Any]) -> None:
+        if self._active_command_id and "command_id" not in payload:
+            payload = {**payload, "command_id": self._active_command_id}
         record = {"ts": time.time(), "event": event, **payload}
         try:
             self._event_file.parent.mkdir(parents=True, exist_ok=True)

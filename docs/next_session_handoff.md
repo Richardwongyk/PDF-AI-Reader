@@ -55,6 +55,28 @@
 
 新会话不要先安装工具。先确认当前工作树、环境、防休眠和测试基线，再按本文的顺序继续。
 
+## 2026-05-28 性能修复复盘与当前最高优先级
+
+先读 `TODO.md` 顶部的“2026-05-28 今日性能修复复盘”。该节已经按当前未提交 diff
+详细记录：今天相对最初基线改了哪些文件、优化意图是什么、哪些地方实际破坏了体验、哪些测试只
+证明脚本结构而不证明 UI 可用。
+
+当前最高优先级不是继续加压测次数，而是修复 P0 用户可见退化：
+
+- Napkin 前台 400x 测试中，极大缩放约 5x 后快速滚动/跳页，页面进入大页 tile-only 路径。
+- 日志里出现多次 `_paint_tiles: ... 缓存:0 裁剪:0`、`大页面 ... 仅瓦片渲染` 和
+  `TileCache: EVICT`；用户实际看到黑底/空白页。
+- 后续修复必须保证滚动中间页始终可见：先显示旧整页 pixmap、低分辨率 fallback 或最近 snapshot，
+  再由 tile 渐进替换为清晰内容。不能再用纯占位或黑底作为“性能优化”结果。
+
+同一复盘还记录两个 P1 风险：
+
+- 首屏解析被拆成前 8 页快速返回后，必须审计后台 `page_blocks_ready`、知识库构建、公式入队和
+  `_current_blocks/_blocks_by_id` 是否完整增量补齐，避免只处理前几页。
+- 翻译链路共享 `TextPreprocessor`，流式并发翻译可能互相覆盖公式占位映射；当前 diff 还会把
+  `$...$` 改写为 `\(...\)` 并 strip 内容。后续主攻翻译时先写并发复现测试，再改成每请求独立
+  formula protection session，不要靠硬编码保护规则。
+
 ## 当前真实状态
 
 - 工作目录：`D:\程设大作业`。
@@ -165,7 +187,7 @@
 - 新增 `docs/formula_multitool_fusion_design.md`：明确下一步不是手写公式解析规则，而是统一 evidence/candidate/fusion schema、源码准确率复核、候选融合、accepted 门禁和 r5 增量写回。
 - `FormulaSemanticReviewService` 和 `FormulaSemanticReviewFlow` 已接入候选/fusion 证据：批量调用分析模型，写回 JSON 候选，不覆盖正文。
 - `FormulaKnowledgeUpdateService` 已接入 r5：只有 accepted 结果变化才按 input hash 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文；同一批 accepted 公式会同步写入 `GraphIndexStore` artifact，并在 r5 result JSON 记录 `graph_synced/graph_failed`。
-- `tools/formula_acceptance_review.py` 和基础公式审核对话框已支持 accept/reject、accept-fusion 以及审核者输入的 manual revision；revision 写成 `manual_revision/human_review` 候选后再走同一 audit/r5 流程，不是自动修正规则。
+- `tools/formula_acceptance_review.py` 和基础公式审核对话框已支持 accept/reject、accept-fusion 以及审核者输入的 manual revision；revision 写成 `manual_revision/human_review` 候选后再走同一 audit/r5 流程，不是自动修正规则。对话框也能预览 recognition/fusion evidence JSON，并按 page/bbox 跳回 PDF 证据位置。
 - UI 空闲时可小批量调度公式索引/语义复核，避免导入热路径同步等待。
 - 日志改为轮转并增加清理工具，避免日志无限膨胀。
 
@@ -393,7 +415,7 @@ P0：
 P1：
 
 1. 将外部工具封装成 worker/backend 接口，主环境只调统一协议。
-2. 建立公式候选 accepted/rejected/revision 门禁。
+2. 在已有 accepted/rejected/revision 门禁、基础 UI、manual revision、evidence 预览和 PDF bbox 定位之上，补齐批量审核、accepted precision 统计和更清晰的路径证据。
 3. 改进问答 UI：证据可读性、全文知识库状态、追问、失败原因、性能反馈。
 4. 完成 DeepSeek 分析回答真实 smoke test，并确保错误时有清晰降级。
 5. 继续推进 GraphRAG artifact：章节、定理、公式、引用、概念关系。

@@ -113,25 +113,37 @@ class WebViewPool:
         view.page().setWebChannel(channel)
         view._permanent_channel = channel
         view._current_bridge = None
+        view._template_ready = False
+        view._engine_ready = False
+        view.loadFinished.connect(lambda ok, v=view: setattr(v, "_engine_ready", bool(ok)))
         return view
+
+    @classmethod
+    def load_template(cls, view: QWebEngineView) -> None:
+        """Load the markdown template after the active bridge is registered."""
+        view._template_ready = False
+        url = cls._template_url()
+        if view.url() == url:
+            view.reload()
+        else:
+            view.setUrl(url)
 
     @classmethod
     def prewarm(cls) -> None:
         if cls._standby is not None:
             return
         cls._standby = cls._create_view()
+        cls._standby.setUrl(QUrl("about:blank"))
 
     @classmethod
     def acquire(cls) -> QWebEngineView:
         if cls._standby is not None:
             view = cls._standby
             cls._standby = None
-            # 强制清空旧内容，避免 setUrl(同URL) 不刷新
-            view.setHtml("")
         else:
             view = cls._create_view()
         cls._in_use += 1
-        QTimer.singleShot(50, cls.prewarm)
+        QTimer.singleShot(5000, cls.prewarm)
         return view
 
     @classmethod
@@ -147,6 +159,14 @@ class WebViewPool:
             cls._standby = view
         else:
             view.deleteLater()
+
+    @classmethod
+    def clear(cls) -> None:
+        if cls._standby is not None:
+            cls._standby.close()
+            cls._standby.deleteLater()
+            cls._standby = None
+        cls._in_use = 0
 
     @classmethod
     def swap_bridge(cls, view: QWebEngineView, new_bridge: QObject) -> None:
@@ -411,11 +431,9 @@ class SplitWidget(QFrame):
         self._height_bridge.height_changed.connect(self._adjust_height)
         WebViewPool.swap_bridge(self._result_view, self._height_bridge)
 
+        self._page_ready = False
         self._result_view.loadFinished.connect(self._on_page_loaded)
-        template_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "markdown_template.html")
-        )
-        self._result_view.setUrl(QUrl.fromLocalFile(template_path))
+        WebViewPool.load_template(self._result_view)
         self._result_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -574,6 +592,7 @@ class SplitWidget(QFrame):
         # 切换 bridge 到当前 SplitWidget（永久 channel 不重新绑定）
         WebViewPool.swap_bridge(view, self._height_bridge)
 
+        self._page_ready = False
         view.loadFinished.connect(self._on_page_loaded)
         # 页面加载完成后恢复缓存内容
         if self._cached_result:
@@ -581,10 +600,7 @@ class SplitWidget(QFrame):
             self._pending_js = f"updateContent({safe_text}, true);"
             self._current_answer = self._cached_result
 
-        template_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "markdown_template.html")
-        )
-        view.setUrl(QUrl.fromLocalFile(template_path))
+        WebViewPool.load_template(view)
         view.setVisible(True)
         self._frozen_label.setVisible(False)
 
@@ -657,6 +673,8 @@ class SplitWidget(QFrame):
 
     def _on_page_loaded(self, ok: bool) -> None:
         if ok:
+            if self._result_view is not None:
+                self._result_view._template_ready = True
             self._page_ready = True
             self._result_view.page().runJavaScript("window.pageReady = true;")
             if self._pending_theme:

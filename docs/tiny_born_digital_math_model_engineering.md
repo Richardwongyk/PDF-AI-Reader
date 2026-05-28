@@ -6,6 +6,10 @@
 
 相关标准和本地资料缓存见 `docs/local_standards_cache_index.md`。TinyBDMath 不能替代这些标准和补丁层：它的目标是学习 PDF glyph/vector graph 中的二维结构关系，而不是凭模型记忆覆盖完整 TeX/LaTeX 规则或修复所有 glyph identity。
 
+2026-05-28 状态补充：TinyBDMath 之外另有 P0 UI 退化需要先修。Napkin 极大缩放快速滚动/跳页时
+出现黑底/空白页，属于 PDF viewer tile/fallback 渲染问题；不能把模型质量、公式候选或 OCR 工具优化
+当成该问题的解决方案。详细复盘见 `TODO.md` 顶部。
+
 ## 1. 小模型职责
 
 TinyBDMath 的输入是 r0.5 之后的 Enriched Glyph Graph。图中每个节点已经尽力修复了符号身份，并保留身份置信度和候选。小模型的任务是预测这些符号之间的二维数学结构关系。
@@ -458,6 +462,6 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
    - `--reuse-db` 必须跳过同 input hash 的已完成 r2a。
 
 5. **门禁与 E2E**
-   - accepted/rejected/revision 表和最小命令行审核先行，UI 可后接。
+   - accepted/rejected/revision 表、命令行审核、基础 UI、manual revision、evidence 预览、PDF bbox 定位和 r5 增量写回已接线；下一步补批量审核、accepted precision 报告和更清晰的 GraphRAG 路径证据。
    - Napkin 长文档默认打开路径不得加载训练/模型冷启动。
    - E2E 再覆盖滚动、跳转、缩放、翻译、问答和日志审计。

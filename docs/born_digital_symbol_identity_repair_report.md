@@ -10,6 +10,13 @@
 
 本地参考：2026-05-26 已把 PDF、MathML、Unicode、OpenType、AGL/texglyphlist 和 LaTeX/amsmath/unicode-math 资料下载到 `.local_references/standards/`，清单见 `docs/local_standards_cache_index.md`。该目录已本地排除，不提交。r0.5 后续接入资源时必须记录 mapping file hash、资源版本和许可证判断，不能把本地缓存全文直接塞进仓库。
 
+2026-05-28 状态补充：r0.5 仍是 TinyBDMath 之前必须经过的补丁层。当前 r2a、fusion、r3、r4/r5
+和审核 UI 已接线，但它们不能替代符号身份修复；unknown/乱码 glyph 仍必须先走 ToUnicode、font cmap、
+AGL/texglyphlist、TeX encoding、文档内传播和 shape candidate 的证据链，失败后再降置信或进入候选复核。
+
+同日 UI 状态补充：极大缩放滚动黑底/空白页不是 r0.5 可解决的问题。它属于 viewer tile/fallback
+渲染退化；修复时仍可复用 PDF 结构事实生成低清 fallback，但不能把该问题归因到符号身份修复。
+
 ## 1. 结论
 
 此前 TinyBDMath 方案中有一个关键缺口：r0 能发现 ToUnicode 缺失、乱码、未知 glyph，但处理策略偏粗，容易把仍可在结构层修复的 PDF 过早交给视觉 OCR。正确路线是在 r0 PDF 事实抽取和 r2a TinyBDMath 结构解析之间加入一个独立的 r0.5 符号身份修复层。

@@ -2,6 +2,14 @@
 
 日期：2026-05-25
 
+2026-05-28 状态补充：r0/r0.5/r2a/r3/r4/r5 的主线接线已经从设计推进到可运行候选链。
+accepted/rejected audit、基础审核 UI、manual revision、evidence 预览、PDF bbox 定位和 r5
+accepted 写回也已落地。本文仍是路线索引；最终公式质量、批量审核和语义级 GraphRAG
+路径证据仍未完成，不能把 candidate-only 输出当作 accepted truth。
+
+同日 UI 复盘：Napkin 极大缩放快速滚动出现黑底/空白页，属于阅读器渲染 fallback P0。公式系统
+继续推进前，前台阅读体验必须恢复到“滚动中间页始终可见”。详细复盘见 `TODO.md` 顶部。
+
 本索引用来把 born-digital PDF 公式解析研发拆成单一职责文档。不要再把 PDF 基础、符号修复、小模型训练、质量门禁和产品集成混在一篇巨型报告里。
 
 ## 1. 总体目标
@@ -69,11 +77,11 @@ TinyBDMath 小模型研发只负责：
 3. 已完成 r0.5 最小持久化：`FormulaScanRound.SYMBOL_IDENTITY_REPAIR` 写入 `formula_round_jobs`，记录 `input_hash/raw_input_hash/model_version/preprocess_version/summary`，同 input hash 跳过。
 4. 已建立本地标准/映射参考缓存：`.local_references/standards/`，索引见 `docs/local_standards_cache_index.md`。该缓存不提交，只用于研发对照；后续把 AGL/texglyphlist/Unicode/MathML/OpenType 资源产品化前必须确认许可证和资源 hash。
 5. 已完成源码插桩/重编译训练集第一阶段：Attention 138/138、Napkin v3 29743/29743 verified exact rows，作为 TinyBDMath 训练/评测主资产。
-6. 下一步必须先强化 r0.5 补丁层：接入真实 AGL/texglyphlist、fonttools cmap、TeX encoding、OpenType MATH/cmap 证据和 outline/path shape candidate。不能把 TinyBDMath 当成符号身份修复层。
-7. 下一步优先把插桩训练集转换成 TinyBDMath graph rows、manifest 和 split，而不是继续做不可靠的 PDF/source 粗匹配。
-8. 下一步训练/实现 MLP edge/quality scorer baseline，并建立按 inline/display、上下标、分数线、根号、overline、large operator limits、align、matrix/cases、数学字体分项的评测。
-9. 建立 verifier 和 accepted gate。目标是 `accepted precision` 极高，不是把所有候选强行 accepted。
-10. 再升级 GNN/Graph Transformer。
+6. 插桩训练集已经资产化为 graph rows、relation labels、relation scorer、structural candidate 和主线 r2a candidate-only 服务；当前质量仍未达标。
+7. 下一步优先把 `mathml_relation_hints` 升级为可对齐 glyph graph 的 SLT/MathML hard labels，降低 weak hint 依赖。
+8. 下一步训练更正式的 MLP/GNN edge baseline，并建立按 inline/display、上下标、分数线、根号、overline、large operator limits、align、matrix/cases、数学字体分项的评测。
+9. 已建立 verifier/accepted gate 基础闭环；下一步补 decoder/verifier 质量、accepted precision 统计和批量审核。目标是 `accepted precision` 极高，不是把所有候选强行 accepted。
+10. 继续强化 r0.5 补丁层：接入真实 AGL/texglyphlist、fonttools cmap、TeX encoding、OpenType MATH/cmap 证据和 outline/path shape candidate。不能把 TinyBDMath 当成符号身份修复层。
 
 ## 6. 覆盖策略红线
 

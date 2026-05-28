@@ -164,6 +164,37 @@ def test_router_keeps_followups_on_lightweight_cloud_model() -> None:
     assert router.route(TaskType.FOLLOWUP_QUESTIONS).model_name == "translation"
 
 
+def test_translation_preprocessor_restores_inline_math_delimiters() -> None:
+    from src.core.pdf_engine import TextPreprocessor
+
+    preprocessor = TextPreprocessor()
+    protected = preprocessor.protect_formulas(r"The model \(M\) contains \(G\).")
+
+    assert protected == "The model 【FORMULA_0】 contains 【FORMULA_1】."
+    assert preprocessor.restore_formulas(protected) == r"The model \(M\) contains \(G\)."
+
+
+def test_translation_preprocessor_does_not_guess_split_bare_math() -> None:
+    from src.core.pdf_engine import TextPreprocessor
+
+    preprocessor = TextPreprocessor()
+    protected = preprocessor.protect_formulas(r"generic subset \(G ⊆\) P, where \(G\) is new")
+
+    assert protected == "generic subset 【FORMULA_0】 P, where 【FORMULA_1】 is new"
+    restored = preprocessor.restore_formulas(protected)
+    assert restored == r"generic subset \(G ⊆\) P, where \(G\) is new"
+
+
+def test_translation_preprocessor_does_not_protect_bare_math_without_evidence() -> None:
+    from src.core.pdf_engine import TextPreprocessor
+
+    preprocessor = TextPreprocessor()
+    protected = preprocessor.protect_formulas("the statement Π 1 is absolute")
+
+    assert protected == "the statement Π 1 is absolute"
+    assert preprocessor.restore_formulas(protected) == "the statement Π 1 is absolute"
+
+
 def test_qa_without_context_does_not_invite_free_answering() -> None:
     cfg = AppConfig()
     router = HybridModelRouter(None, None, MockLLMClient(), cfg)

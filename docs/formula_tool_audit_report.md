@@ -3,6 +3,14 @@
 **日期：** 2026-05-25
 **范围：** 审计项目中已安装工具对 **born-digital PDF** 的公式解析能力。Born-digital PDF 已有文本层、字体、glyph 坐标和矢量绘制信息，**必须走文档结构解析，不能走 OCR/图像识别路线**。
 
+**2026-05-28 状态补充：** 本报告的工具性质判断仍有效：Pix2Text、Paddle Formula、MinerU、
+UniMERNet/PEK 都不能替代 born-digital 结构路线。当前代码已把这些工具放进 r1/r2 候选 worker
+边界，并通过 fusion、accepted/rejected audit、manual revision、evidence 预览、PDF bbox 定位和 r5
+写回闭环隔离风险。下一步是大样本质量/性能对照和常驻 worker 优化，不是把图像路线升为默认主路。
+
+同日性能复盘补充：Napkin 极大缩放快速滚动黑底/空白页与外部 OCR/MFR 工具无关，不能通过切换
+Pix2Text/Paddle/MinerU 解决。它属于 PDF viewer 渲染 fallback P0，详见 `TODO.md` 顶部。
+
 ---
 
 ## 〇、前置分类：结构路线 vs 图像路线

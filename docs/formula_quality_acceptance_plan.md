@@ -4,6 +4,14 @@
 
 本文件只定义质量、验收和 accepted 门禁。模型研发见 `docs/tiny_born_digital_math_model_engineering.md`。
 
+2026-05-28 状态补充：accepted/rejected audit 表、命令行审核、基础审核 UI、manual revision、
+evidence JSON 预览、PDF page/bbox 定位、r5 知识库增量 upsert 和 accepted 公式 GraphRAG
+artifact 同步已经接线。这些能力只解决“如何安全接受和写回”，不等于公式识别质量已达标。
+Napkin 大样本公式门禁仍失败，后续必须补批量审核、accepted precision 统计和路径证据。
+
+同日交互质量补充：阅读器本体也未过关。Napkin 极大缩放快速滚动/跳页时曾出现黑底/空白页，
+该问题必须按 P0 修复；公式 accepted 门禁通过也不能替代 UI 可见性门禁。
+
 ## 1. 核心原则
 
 - 候选可以多，accepted 必须少而准。

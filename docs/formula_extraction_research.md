@@ -1,5 +1,18 @@
 # 公式抽取与识别调研设计
 
+## 2026-05-28 状态修订
+
+本文件保留 born-digital 公式路线的研究结论。当前代码已经比早期调研推进得更远：
+r0/r0.5/r2a/r3/r4/r5 多轮候选链、fusion 持久化、r3 压缩证据包、r4 图谱 artifact、
+r5 accepted 增量写回、基础审核 UI、manual revision、evidence 预览和 PDF bbox 定位已经接线。
+
+仍未改变的结论是：born-digital PDF 默认不能走 OCR；低置信公式不能直接覆盖正文或知识库；
+当前 Attention/Napkin 尤其是 Napkin 的公式质量仍未达最终门禁。后续工作应提升 SLT/MathML hard
+labels、decoder/verifier、r0.5 字符身份补丁和大样本质量证明，而不是继续堆样本正则或手写修复链。
+
+另一个独立风险是 UI 渲染体验：2026-05-28 Napkin 400x 前台验证中，极大缩放快速滚动出现黑底/空白页。
+这不是公式抽取路线问题，但会阻塞任何“性能优化已完成”的结论；详见 `TODO.md` 顶部复盘。
+
 ## 当前结论
 
 - 最新实现新增 display region 诊断层：对每个 born-digital 候选公式输出分类、风险、math density、operator/digit/vector/line 统计。该层只做审计和门禁，不生成 LaTeX，不把低置信结果写入默认路径。

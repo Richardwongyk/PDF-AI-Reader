@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QPixmap
 
 from src.core.base_service import BaseService
@@ -71,14 +71,14 @@ class TextPreprocessor:
         def _replace_display(match: re.Match[str]) -> str:
             nonlocal counter
             placeholder = f"【FORMULA_{counter}】"
-            self._formula_store[placeholder] = f"$${match.group(1)}$$"
+            self._formula_store[placeholder] = f"$${match.group(1).strip()}$$"
             counter += 1
             return placeholder
 
         def _replace_inline(match: re.Match[str]) -> str:
             nonlocal counter
             placeholder = f"【FORMULA_{counter}】"
-            self._formula_store[placeholder] = f"${match.group(1)}$"
+            self._formula_store[placeholder] = rf"\({match.group(1).strip()}\)"
             counter += 1
             return placeholder
 
@@ -904,6 +904,7 @@ class DocumentEngine(BaseService):
         self._pending_renders: set[tuple[int, int]] = set()
         self._latest_render_dpi: dict[int, int] = {}
         self._thread: QThread | None = None
+        self._background_thread: QThread | None = None
         self._retired_parse_threads: list[QThread] = []
         # 使用 PageCache 替代内嵌字典（借鉴 PDFCrop，线程安全 + LRU + 高分辨率回退）
         self._page_cache = page_cache
@@ -969,6 +970,13 @@ class DocumentEngine(BaseService):
             self._stop_parse_thread(self._thread, timeout_ms=2000, reason="打开新文档")
             self._thread = None
             self.logger.info("上一解析线程已清理")
+        if self._background_thread is not None:
+            self._stop_parse_thread(
+                self._background_thread,
+                timeout_ms=2000,
+                reason="打开新文档",
+            )
+            self._background_thread = None
         self._render_pool.clear()
         self._render_pool.waitForDone(2000)
         self._page_parse_pool.clear()
@@ -984,10 +992,7 @@ class DocumentEngine(BaseService):
         self._thread = _ParseThread(filepath, self._chunker)
         self._thread.progress.connect(self.parse_progress.emit)
         self._thread.finished_parsing.connect(self._on_parse_finished)
-        self._thread.completed_parsing.connect(self._on_parse_completed)
         self._thread.parse_error.connect(self.parse_error.emit)
-        self._thread.formula_blocks_updated.connect(self.formula_blocks_updated.emit)
-        self._thread.page_blocks_ready.connect(self._on_thread_page_blocks_ready)
         self._thread.start()
         self.logger.info("新解析线程已启动")
 
@@ -1006,6 +1011,39 @@ class DocumentEngine(BaseService):
             self._page_cache.clear_document(result.filepath)
         self._remember_page_blocks(result.blocks, result.parsed_pages)
         self.parse_finished.emit(result)
+        generation = self._document_generation
+        QTimer.singleShot(250, lambda r=result, g=generation: self._start_background_parse(r, g))
+
+    def _start_background_parse(self, initial_result: ParseResult, generation: int) -> None:
+        """Start full-document parsing after the first-page UI has had a turn."""
+        if generation != self._document_generation:
+            return
+        if self._background_thread is not None and self._background_thread.isRunning():
+            return
+        initial_pages = set(initial_result.parsed_pages or [])
+        start_page = max(initial_pages) + 1 if initial_pages else 0
+        if start_page >= initial_result.page_count:
+            self.parse_completed.emit(initial_result)
+            return
+
+        self._background_thread = _BackgroundParseThread(
+            initial_result.filepath,
+            self._chunker,
+            initial_result,
+            start_page=start_page,
+        )
+        self._background_thread.progress.connect(self.parse_progress.emit)
+        self._background_thread.completed_parsing.connect(self._on_parse_completed)
+        self._background_thread.parse_error.connect(self.parse_error.emit)
+        self._background_thread.formula_blocks_updated.connect(self.formula_blocks_updated.emit)
+        self._background_thread.page_blocks_ready.connect(self._on_thread_page_blocks_ready)
+        self._background_thread.finished.connect(self._on_background_parse_thread_done)
+        self._background_thread.start()
+
+    def _on_background_parse_thread_done(self) -> None:
+        if self._background_thread is not None and not self._background_thread.isRunning():
+            self._background_thread.deleteLater()
+            self._background_thread = None
 
     def _on_parse_completed(self, result: ParseResult) -> None:
         """全量解析完成。"""
@@ -1042,6 +1080,13 @@ class DocumentEngine(BaseService):
         if self._thread is not None:
             self._stop_parse_thread(self._thread, timeout_ms=2000, reason="关闭文档")
             self._thread = None
+        if self._background_thread is not None:
+            self._stop_parse_thread(
+                self._background_thread,
+                timeout_ms=2000,
+                reason="关闭文档",
+            )
+            self._background_thread = None
 
         # 2. 取消异步渲染 / 按需解析。必须先等后台任务退出，再关闭共享的 fitz.Document。
         self._pending_renders.clear()
@@ -1067,6 +1112,13 @@ class DocumentEngine(BaseService):
     def shutdown(self) -> None:
         """服务关闭入口，供 ServiceContainer 调用。"""
         self.close_document()
+        if self._background_thread is not None:
+            self._stop_parse_thread(
+                self._background_thread,
+                timeout_ms=10000,
+                reason="服务关闭",
+            )
+            self._background_thread = None
         for thread in list(self._retired_parse_threads):
             if thread.isRunning():
                 thread.requestInterruption()
@@ -1340,19 +1392,15 @@ class _PageBlockParseTask(QRunnable):
 # =============================================================================
 
 class _ParseThread(QThread):
-    """PDF 解析线程 —— 两阶段异步加载。
+    """PDF 首屏解析线程。
 
-    阶段一（极速呈现）：仅启发式分块，立刻发射 finished_parsing。
-    阶段二（后台精扫）：Pix2Text MFD 深度学习模型补充公式检测，
-    完成后发射 formula_blocks_updated。
+    只负责打开 PDF、读取元信息和解析前几页，然后立刻结束。全文分块和
+    MFD 精扫由 _BackgroundParseThread 延后启动，避免首屏信号被长任务抢占。
     """
 
     progress = Signal(int, int)
     finished_parsing = Signal(ParseResult)
-    completed_parsing = Signal(ParseResult)
     parse_error = Signal(str)
-    formula_blocks_updated = Signal(list)  # list[dict] — 被 MFD 修正的块信息
-    page_blocks_ready = Signal(int, object)  # (page_num, list[DocumentBlock])
 
     INITIAL_PARSE_PAGES = 8
 
@@ -1362,12 +1410,7 @@ class _ParseThread(QThread):
         self._chunker = chunker
 
     def run(self) -> None:
-        """两阶段渐进式 PDF 解析。
-
-        阶段一（极速呈现）：启发式分块 → finished_parsing
-        阶段二（公式检测）：Pix2Text MFD → formula_blocks_updated
-        PyMuPDF4LLM 增强、MFR 公式识别改为异步运行，不阻塞解析线程。
-        """
+        """Parse only the first pages needed for immediate display."""
         import logging as _log
         _log.getLogger("ParseThread").info("run: START %s", self._filepath)
         try:
@@ -1422,54 +1465,91 @@ class _ParseThread(QThread):
             _log.getLogger("ParseThread").info("run: emit finished_parsing...")
             self.finished_parsing.emit(result)
             _log.getLogger("ParseThread").info("run: finished_parsing emitted")
-            self.msleep(100)
+            doc.close()
+            _log.getLogger("ParseThread").info("run: END")
 
-            import logging as _log2
-            logger = _log2.getLogger("ParseThread")
+        except FileNotFoundError:
+            self.parse_error.emit(f"文件不存在: {self._filepath}")
+        except Exception as e:
+            import traceback
+            self.parse_error.emit(f"PDF 解析失败: {e}\n{traceback.format_exc()}")
 
-            # ── 阶段二：后台补齐剩余页面分块 ──
-            if self.isInterruptionRequested():
-                logger.info("run: 中断, 退出")
+
+class _BackgroundParseThread(QThread):
+    """PDF 后台全文解析线程。"""
+
+    progress = Signal(int, int)
+    completed_parsing = Signal(ParseResult)
+    parse_error = Signal(str)
+    formula_blocks_updated = Signal(list)
+    page_blocks_ready = Signal(int, object)
+
+    def __init__(
+        self,
+        filepath: str,
+        chunker: DocumentChunker,
+        initial_result: ParseResult,
+        *,
+        start_page: int,
+    ) -> None:
+        super().__init__()
+        self._filepath = filepath
+        self._chunker = chunker
+        self._initial_result = initial_result
+        self._start_page = max(0, int(start_page))
+
+    def run(self) -> None:
+        import logging as _log
+        logger = _log.getLogger("ParseThread")
+        logger.info("background: START %s from p%d", self._filepath, self._start_page)
+        try:
+            doc = fitz.open(self._filepath)
+            if doc.needs_pass:
+                self.parse_error.emit("PDF 文件已加密，暂不支持密码保护的文件。")
                 doc.close()
                 return
 
-            logger.info("run: 阶段二 继续解析剩余页面...")
-            for page_num in range(initial_pages, page_count):
+            page_count = doc.page_count
+            blocks: list[DocumentBlock] = list(self._initial_result.blocks)
+            parsed_pages = set(self._initial_result.parsed_pages or [])
+
+            logger.info("background: 阶段二 继续解析剩余页面...")
+            for page_num in range(self._start_page, page_count):
                 if self.isInterruptionRequested():
-                    logger.info("run: 中断于剩余页面解析, 退出")
+                    logger.info("background: 中断于剩余页面解析, 退出")
                     doc.close()
                     return
                 page_blocks = self._chunker.chunk_page(doc, page_num)
                 blocks.extend(page_blocks)
+                parsed_pages.add(page_num)
                 self.page_blocks_ready.emit(page_num, page_blocks)
                 self.progress.emit(page_num + 1, page_count)
 
             completed = ParseResult(
-                filepath=self._filepath,
-                title=title,
-                author=author,
+                filepath=self._initial_result.filepath,
+                title=self._initial_result.title,
+                author=self._initial_result.author,
                 page_count=page_count,
-                toc=toc,
+                toc=self._initial_result.toc,
                 blocks=list(blocks),
                 parsed_pages=list(range(page_count)),
             )
             self.completed_parsing.emit(completed)
-            self.msleep(100)
 
-            # ── 阶段三：Pix2Text MFD 公式检测（后台，不阻塞阅读） ──
             if self.isInterruptionRequested():
-                logger.info("run: 中断于 MFD 前, 退出")
+                logger.info("background: 中断于 MFD 前, 退出")
                 doc.close()
                 return
-            logger.info("run: 阶段三 MFD...")
+            logger.info("background: 阶段三 MFD...")
             from src.core.formula_detector import Pix2TextMFDDetector
             try:
                 refined = Pix2TextMFDDetector(dpi=200).apply_to_blocks(blocks, doc)
-                # 收集被 ML 修正的块
                 updated: list[dict] = []
                 for b in refined:
-                    if (b.block_type.value == "formula"
-                            and b.metadata.get("formula_detector") == "pix2text-mfd"):
+                    if (
+                        b.block_type.value == "formula"
+                        and b.metadata.get("formula_detector") == "pix2text-mfd"
+                    ):
                         info = {
                             "id": b.id,
                             "page_num": b.page_num,
@@ -1483,18 +1563,15 @@ class _ParseThread(QThread):
                         updated.append(info)
                 if updated and not self.isInterruptionRequested():
                     self.formula_blocks_updated.emit(updated)
-                logger.info(
-                    "MFD 精扫完成: %d 个公式块被修正", len(updated),
-                )
+                logger.info("background: MFD 精扫完成: %d 个公式块被修正", len(updated))
             except Exception as e:
-                logger.warning("MFD 精扫失败（不影响阅读）: %s", e)
+                logger.warning("background: MFD 精扫失败（不影响阅读）: %s", e)
 
-            logger.info("run: 所有阶段完成, 关闭 doc...")
+            logger.info("background: 所有阶段完成, 关闭 doc...")
             doc.close()
-            logger.info("run: END")
-
+            logger.info("background: END")
         except FileNotFoundError:
             self.parse_error.emit(f"文件不存在: {self._filepath}")
         except Exception as e:
             import traceback
-            self.parse_error.emit(f"PDF 解析失败: {e}\n{traceback.format_exc()}")
+            self.parse_error.emit(f"PDF 后台解析失败: {e}\n{traceback.format_exc()}")

@@ -11,6 +11,14 @@
 
 本文讨论一个明确目标：不把 born-digital PDF 公式默认转成图片做 OCR，而是直接利用 PDF 结构层中的 glyph、font、bbox、字号、baseline、绘图线段和 ToUnicode 等事实，研发一个极轻量模型，将数学公式区域还原为可审计的 LaTeX / Symbol Layout Tree / MathML 候选。本文中的“模型”不负责从像素识别字符，而主要负责从 PDF 坐标云和图形原语中推断二维数学结构。LaTeX 源码只作为训练、验证和审计数据来源，真实用户 PDF 解析不能依赖源码。
 
+2026-05-28 状态补充：可行性调研已经部分落地为 TinyBDMath graph rows、weak relation labels、
+edge scorer、structural candidate、SLT skeleton/verifier 和 r2a candidate-only 服务。当前结论是
+“链路可运行但质量未达标”：Attention/Napkin 仍不能通过最终公式门禁，TinyBDMath 输出不能 accepted。
+下一步重点是 SLT/MathML hard labels、正式 MLP/GNN、decoder/verifier 和大样本 accepted precision 证明。
+
+同日交互状态补充：TinyBDMath 和公式质量优化不能替代 PDF viewer 体验修复。Napkin 极大缩放快速滚动
+黑底/空白页是 P0 渲染 fallback 问题，必须先恢复页面可见性，再继续扩大前台压力测试。
+
 ## 1. 结论先行
 
 ### 1.1 可行性判断

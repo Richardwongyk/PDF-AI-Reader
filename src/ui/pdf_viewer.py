@@ -11,6 +11,7 @@ PDF 阅读器 —— 瓦片化渲染 + 点击段落时页面在该段落下边�
 
 import logging
 import time
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass
@@ -56,6 +57,8 @@ class _VirtualPageLayout:
         self._entries: list[_VirtualPageEntry] = []
         self._page_index: dict[int, int] = {}
         self._offsets: dict[int, float] = {}
+        self._start_offsets: list[float] = []
+        self._end_offsets: list[float] = []
         self._total_height: float = 0.0
         self._dirty: bool = True
         for pn, h in sorted(page_heights.items()):
@@ -67,9 +70,13 @@ class _VirtualPageLayout:
     def _recalc(self) -> None:
         y = 0.0
         self._offsets.clear()
+        self._start_offsets.clear()
+        self._end_offsets.clear()
         for entry in self._entries:
             self._offsets[entry.page_num] = y
+            self._start_offsets.append(y)
             y += entry.logical_height + entry.split_extra_height
+            self._end_offsets.append(y)
         self._total_height = y
         self._dirty = False
 
@@ -121,11 +128,26 @@ class _VirtualPageLayout:
         self._entries.clear()
         self._page_index.clear()
         self._offsets.clear()
+        self._start_offsets.clear()
+        self._end_offsets.clear()
         for pn, h in sorted(page_heights.items()):
             idx = len(self._entries)
             self._entries.append(_VirtualPageEntry(pn, h, split_extras.get(pn, 0.0)))
             self._page_index[pn] = idx
         self._dirty = True
+
+    def page_at_y(self, y: float) -> int | None:
+        """返回指定纵向位置所在页面，使用二分定位。"""
+        if self._dirty:
+            self._recalc()
+        if not self._entries:
+            return None
+        idx = bisect_right(self._start_offsets, y) - 1
+        if idx < 0:
+            return self._entries[0].page_num
+        if idx >= len(self._entries):
+            return self._entries[-1].page_num
+        return self._entries[idx].page_num
 
     def page_range_for_viewport(
         self, scroll_y: float, viewport_h: float, margin: float = 0.0
@@ -135,13 +157,11 @@ class _VirtualPageLayout:
             self._recalc()
         lo = scroll_y - margin
         hi = scroll_y + viewport_h + margin
-        result: list[int] = []
-        for entry in self._entries:
-            y = self._offsets[entry.page_num]
-            h = entry.logical_height + entry.split_extra_height
-            if y + h > lo and y < hi:
-                result.append(entry.page_num)
-        return result
+        start_idx = bisect_right(self._end_offsets, lo)
+        end_idx = bisect_left(self._start_offsets, hi)
+        if end_idx < start_idx:
+            return []
+        return [entry.page_num for entry in self._entries[start_idx:end_idx]]
 
 
 class _LazyPageWidget(QWidget):
@@ -193,8 +213,9 @@ class _LazyPageWidget(QWidget):
         self._tile_cache = tile_cache
         self._zoom = scale
 
-        # 全页 pixmap 切片存入 TileCache（后台缓存预热，不参与显示）
-        if tile_cache is not None and not pixmap.isNull():
+        # Small pages are drawn directly from the full pixmap. Pre-slicing them
+        # into TileCache only adds UI-thread work during scroll/zoom storms.
+        if tile_cache is not None and self._should_use_tiles(pixmap):
             sliced = self._slice_pixmap_to_tiles(pixmap)
             _logger.debug("_LazyPageWidget.render: p%d 切片 %d 瓦片 → TileCache (%.1fms)",
                           self.page_num, sliced, (time.perf_counter() - t0) * 1000)
@@ -243,6 +264,13 @@ class _LazyPageWidget(QWidget):
     def overlay(self, block_id: str) -> BlockOverlay | None:
         return self._overlays.get(block_id)
 
+    def _should_use_tiles(self, pixmap: QPixmap) -> bool:
+        if pixmap.isNull():
+            return False
+        phys_w = pixmap.width() * pixmap.devicePixelRatio()
+        phys_h = pixmap.height() * pixmap.devicePixelRatio()
+        return max(phys_w, phys_h) >= 4096
+
     # ------------------------------------------------------------------
     # QPainter 绘制 — 借鉴 qpageview AbstractRenderer.paint()
     # ------------------------------------------------------------------
@@ -267,7 +295,7 @@ class _LazyPageWidget(QWidget):
             phys_h = pix.height() * pix.devicePixelRatio()
             if max(phys_w, phys_h) < 4096:
                 # 小页面 → 全页绘制（快速路径）
-                painter.drawPixmap(0, 0, pix)
+                self._draw_full_pixmap(painter, pix)
                 painter.end()
                 return
 
@@ -281,10 +309,16 @@ class _LazyPageWidget(QWidget):
 
         # 最终回退
         if pix is not None and not pix.isNull():
-            painter.drawPixmap(0, 0, pix)
+            self._draw_full_pixmap(painter, pix)
         else:
             self._draw_placeholder(painter)
         painter.end()
+
+    def _draw_full_pixmap(self, painter: QPainter, pixmap: QPixmap) -> None:
+        if pixmap.width() == self.width() and pixmap.height() == self.height():
+            painter.drawPixmap(0, 0, pixmap)
+            return
+        painter.drawPixmap(self.rect(), pixmap)
 
     def _paint_tiles(self, painter: QPainter, tile_px: int) -> None:
         """绘制瓦片网格 —— 借鉴 qpageview info() + paint()。
@@ -409,12 +443,14 @@ class PdfViewer(QScrollArea):
         self._all_blocks: list[DocumentBlock] = []
         self._page_segments: dict[int, list[dict]] = {}
         self._splits: dict[str, SplitWidget] = {}
+        self._page_rects_pt: dict[int, tuple[float, float]] = {}
         self._block_to_page: dict[str, int] = {}
         self._blocks_by_id: dict[str, DocumentBlock] = {}
         self._parsed_block_pages: set[int] = set()
         self._requested_block_pages: set[int] = set()
         self._overlays: dict[str, BlockOverlay] = {}
         self._trans_indicators: dict[str, QWidget] = {}
+        self._evidence_highlight: QWidget | None = None
 
         # 瓦片化渲染器（借鉴 qpageview + Syncfusion），使用屏幕物理 DPI
         self._tile_renderer = TileRenderer(dpi=self._dpi)
@@ -440,6 +476,15 @@ class PdfViewer(QScrollArea):
         self._page_containers: dict[int, _LazyPageWidget] = {}
         self._rendered_pages: set[int] = set()
         self._split_pages: set[int] = set()
+        self._precise_render_timer = QTimer(self)
+        self._precise_render_timer.setSingleShot(True)
+        self._precise_render_timer.setInterval(180)
+        self._precise_render_timer.timeout.connect(self._request_precise_renders)
+        self._pending_split_rerenders: set[int] = set()
+        self._split_rerender_timer = QTimer(self)
+        self._split_rerender_timer.setSingleShot(True)
+        self._split_rerender_timer.setInterval(180)
+        self._split_rerender_timer.timeout.connect(self._request_pending_split_rerenders)
         self._viewport_timer = QTimer(self)
         self._viewport_timer.setSingleShot(True)
         self._viewport_timer.setInterval(80)
@@ -494,10 +539,10 @@ class PdfViewer(QScrollArea):
                 self._remember_widget_page(w, segment_page)
             return w
 
-        # QPixmap.copy() 使用物理像素坐标
+        # QPixmap.copy() 使用物理像素坐标；这是翻译裂缝的正确性路径。
         phys_y0 = int(y0 * dpr)
         phys_h = int(h * dpr)
-        cropped = pixmap.copy(0, phys_y0, pixmap.width() * dpr, phys_h)
+        cropped = pixmap.copy(0, phys_y0, int(pixmap.width() * dpr), phys_h)
         cropped.setDevicePixelRatio(dpr)
 
         w = QWidget()
@@ -559,10 +604,13 @@ class PdfViewer(QScrollArea):
         for page_num in range(page_count):
             if doc and page_num < doc.page_count:
                 rect = doc[page_num].rect
-                w_px = int(rect.width * self._scale)
-                h_px = int(rect.height * self._scale)
+                rect_w_pt = float(rect.width)
+                rect_h_pt = float(rect.height)
             else:
-                w_px, h_px = 600, 800
+                rect_w_pt, rect_h_pt = 600.0 / self._scale, 800.0 / self._scale
+            self._page_rects_pt[page_num] = (rect_w_pt, rect_h_pt)
+            w_px = int(rect_w_pt * self._scale)
+            h_px = int(rect_h_pt * self._scale)
             page_blocks = pages.get(page_num, [])
             page_heights[page_num] = float(h_px)
             self._page_metas[page_num] = {
@@ -576,6 +624,7 @@ class PdfViewer(QScrollArea):
             }]
 
         self._vlayout = _VirtualPageLayout(page_heights)
+        self._content.setMinimumHeight(int(self._vlayout.total_height))
         _logger.info("PdfViewer.load_document: _VirtualPageLayout 已构建 (%d pages, total_h=%.0f)",
                      len(page_heights), self._vlayout.total_height)
 
@@ -632,8 +681,7 @@ class PdfViewer(QScrollArea):
         self, container: _LazyPageWidget, blocks: list[DocumentBlock]
     ) -> None:
         """重建页面 widget 上的 BlockOverlay。"""
-        self._clear_container_overlays(container)
-
+        keep: set[str] = set()
         for block in blocks:
             bx0, by0, bx1, by1 = block.bbox
             sx0 = int(bx0 * self._scale)
@@ -642,8 +690,16 @@ class PdfViewer(QScrollArea):
             sh = max(int((by1 - by0) * self._scale), 1)
             if sy0 + sh <= 0 or sy0 >= container.height():
                 continue
-            ov = BlockOverlay(block)
-            ov.setParent(container)
+            keep.add(block.id)
+            ov = container._overlays.get(block.id)
+            if ov is not None and _isValid(ov) and ov.block is not block:
+                self._overlays.pop(block.id, None)
+                ov.deleteLater()
+                ov = None
+            if ov is None or not _isValid(ov):
+                ov = BlockOverlay(block)
+                ov.setParent(container)
+                self._connect_overlay(ov)
             ov.setGeometry(
                 sx0,
                 max(sy0, 0),
@@ -652,8 +708,66 @@ class PdfViewer(QScrollArea):
             )
             ov.raise_()
             ov.show()
-            self._connect_overlay(ov)
             container._overlays[block.id] = ov
+            self._overlays[block.id] = ov
+
+        for block_id, ov in list(container._overlays.items()):
+            if block_id in keep:
+                continue
+            self._overlays.pop(block_id, None)
+            if _isValid(ov):
+                ov.deleteLater()
+            container._overlays.pop(block_id, None)
+
+    def _refresh_segment_overlays(
+        self,
+        widget: QWidget,
+        blocks: list[DocumentBlock],
+        y0: int,
+        height: int,
+    ) -> None:
+        """复用裂缝段内 overlay，只更新几何，避免缩放时批量重建 QWidget。"""
+        existing = {
+            child.block_id: child
+            for child in widget.findChildren(BlockOverlay)
+            if _isValid(child)
+        }
+        keep: set[str] = set()
+        seg_h = max(height, 1)
+        for block in blocks:
+            bx0, by0, bx1, by1 = block.bbox
+            sx0 = int(bx0 * self._scale)
+            sy0 = int(by0 * self._scale) - y0
+            sw = max(int((bx1 - bx0) * self._scale), 1)
+            sh = max(int((by1 - by0) * self._scale), 1)
+            if sy0 + sh <= 0 or sy0 >= seg_h:
+                continue
+            keep.add(block.id)
+            ov = existing.get(block.id)
+            if ov is not None and ov.block is not block:
+                self._overlays.pop(block.id, None)
+                ov.deleteLater()
+                ov = None
+            if ov is None or not _isValid(ov):
+                ov = BlockOverlay(block)
+                ov.setParent(widget)
+                self._connect_overlay(ov)
+            ov.setGeometry(
+                sx0,
+                max(sy0, 0),
+                sw,
+                max(min(sy0 + sh, seg_h) - max(sy0, 0), 1),
+            )
+            ov.raise_()
+            ov.show()
+            self._overlays[block.id] = ov
+
+        for block_id, ov in existing.items():
+            if block_id in keep:
+                continue
+            self._overlays.pop(block_id, None)
+            if _isValid(ov):
+                ov.deleteLater()
 
     def _clear_container_overlays(self, container: _LazyPageWidget) -> None:
         """清理页面 widget 上的 BlockOverlay，并同步全局索引。"""
@@ -673,6 +787,13 @@ class PdfViewer(QScrollArea):
             self._scroll_history.append(-1)  # 向上/向后
         self._last_scroll_value = value
 
+        if self._precise_render_pending:
+            self._precise_render_timer.start(350)
+        if self._pending_split_rerenders:
+            self._split_rerender_timer.start(350)
+        # Keep page widgets in the layout immediately during real wheel scrolls.
+        # Deferring this leaves the viewport over spacer/background between events.
+        self._update_visible_pages()
         self._viewport_timer.start()
         self.viewport_changed.emit(value, self.verticalScrollBar().maximum())
 
@@ -726,6 +847,14 @@ class PdfViewer(QScrollArea):
 
         container = self._widget_pool.get(page_num)
         if container is not None:
+            if container.width() != meta["width"] or container.height() != meta["height"]:
+                container.setFixedSize(meta["width"], meta["height"])
+            if container.rendered and abs(container._zoom - self._scale) > 0.001:
+                cleared = container.unrender()
+                for block_id in cleared:
+                    self._overlays.pop(block_id, None)
+                self._rendered_pages.discard(page_num)
+                self._precise_render_pending.discard(page_num)
             if not container.isVisible():
                 insert_idx = self._layout_index_for_page(page_num)
                 self._layout.insertWidget(insert_idx, container)
@@ -864,6 +993,7 @@ class PdfViewer(QScrollArea):
         last_bottom = self._vlayout.page_y(last_page) + self._vlayout.page_height(last_page)
         bottom_h = int(self._vlayout.total_height - last_bottom)
         self._bottom_spacer.setFixedHeight(max(0, bottom_h))
+        self._content.setMinimumHeight(int(self._vlayout.total_height))
 
     # ── 视口更新 ──
 
@@ -884,22 +1014,26 @@ class PdfViewer(QScrollArea):
         if viewport_h <= 0:
             return
 
-        # 从虚拟布局获取视口内页面（纯 Python 列表扫描，500页 < 1ms）
-        margin = viewport_h
+        visible_now: set[int] = set(
+            self._vlayout.page_range_for_viewport(float(scroll_y), float(viewport_h), 0.0)
+        )
+        # 保留足够的真实页面 widget。PDF 阅读器滚动时中间页必须可见，
+        # 不能为了减少 widget 数量让视口落到纯背景或占位上。
+        margin = viewport_h * 2.0
         needed: set[int] = set(
             self._vlayout.page_range_for_viewport(float(scroll_y), float(viewport_h), float(margin))
         )
+        needed |= visible_now
         needed |= self._split_pages  # 有裂缝的页面始终保留
 
         # ── 方向感知预渲染（借鉴 Sioyek 趋势感知算法）──
         trend = sum(self._scroll_history)
         viewport_center = scroll_y + viewport_h // 2
-        current_page = 0
-        for page_num in self._vlayout._page_index:
-            if self._vlayout.page_y(page_num) <= viewport_center:
-                current_page = page_num
+        current_page = self._vlayout.page_at_y(float(viewport_center))
+        if current_page is None:
+            current_page = 0
         max_page = max(self._page_metas.keys()) if self._page_metas else 0
-        preload_count = 4
+        preload_count = 3 if self._zoom_multiplier > 1.0 else 4
 
         if trend >= 2:
             for p in range(current_page + 1, min(max_page + 1, current_page + 1 + preload_count)):
@@ -912,7 +1046,7 @@ class PdfViewer(QScrollArea):
                     needed.add(p)
                     self._request_page_blocks(p)
 
-        # ── 进入视口：创建/复用 widget → 渲染 ──
+        # ── 进入视口：创建/复用 widget → 请求后台渲染 ──
         for page_num in sorted(needed - self._active_pages):
             if page_num not in self._page_metas:
                 continue
@@ -1173,7 +1307,7 @@ class PdfViewer(QScrollArea):
         old_widget = seg["widget"]
         all_blocks = seg["blocks"]
         pixmap = self._doc_engine.get_page_pixmap(page_num, dpi=self._dpi)
-        if pixmap is None:
+        if pixmap is None or pixmap.isNull():
             return None
 
         block = self._find_block(block_id)
@@ -1195,9 +1329,9 @@ class PdfViewer(QScrollArea):
         )
         split.setFixedWidth(page_display_w)
         # 段落内边距：使文字区域左右与紫色框对齐
-        doc = self._doc_engine.document
-        if doc and page_num < doc.page_count:
-            page_pt_w = doc[page_num].rect.width
+        rect = self._page_rects_pt.get(page_num)
+        if rect:
+            page_pt_w = rect[0]
             left_pad = int(block.bbox[0] * self._scale)
             right_pad = int((page_pt_w - block.bbox[2]) * self._scale)
             split.set_content_padding(left_pad, right_pad)
@@ -1312,17 +1446,127 @@ class PdfViewer(QScrollArea):
     def scroll_to_page(self, page_num: int) -> None:
         if self._vlayout is None:
             return
-        self._request_page_blocks_around(page_num)
+        self._request_page_blocks(page_num)
         y = int(self._vlayout.page_y(page_num))
+        viewport_h = max(self.viewport().height(), 1)
+        total_h = max(int(self._vlayout.total_height), viewport_h)
+        self._content.setMinimumHeight(total_h)
+        self.verticalScrollBar().setRange(0, max(0, total_h - viewport_h))
         self._scroll_history.clear()
         self.verticalScrollBar().setValue(y)
         if page_num in self._page_metas and page_num not in self._split_pages:
             container = self._ensure_page_widget(page_num)
             if container is not None:
                 self._render_page(page_num)
-        QTimer.singleShot(0, self._update_visible_pages)
+        self._update_visible_pages()
         _logger.info("PdfViewer: scroll_to_page p%d → y=%d (max=%d)",
                      page_num, y, self.verticalScrollBar().maximum())
+
+    def scroll_to_bbox(
+        self,
+        page_num: int,
+        bbox: tuple[float, float, float, float] | list[float],
+    ) -> bool:
+        """Scroll to a PDF-space bbox and show a short-lived evidence highlight."""
+        if self._vlayout is None or page_num not in self._page_metas:
+            return False
+        try:
+            x0, y0, x1, y1 = (float(value) for value in bbox)
+        except (TypeError, ValueError):
+            return False
+        if x1 <= x0 or y1 <= y0:
+            return False
+
+        self._request_page_blocks_around(page_num)
+        self._scroll_history.clear()
+        if page_num not in self._split_pages:
+            container = self._ensure_page_widget(page_num)
+            if container is not None:
+                self._render_page(page_num)
+        self._adjust_spacers(self._active_pages | self._split_pages | {page_num})
+
+        viewport_h = max(self.viewport().height(), 1)
+        self._sync_scroll_range(viewport_h)
+        page_y = self._vlayout.page_y(page_num)
+        target_y = int(page_y + y0 * self._scale - viewport_h * 0.25)
+        self.verticalScrollBar().setValue(max(0, target_y))
+        self._show_evidence_highlight(page_num, (x0, y0, x1, y1))
+        QTimer.singleShot(0, self._update_visible_pages)
+        _logger.info(
+            "PdfViewer: scroll_to_bbox p%d bbox=(%.1f,%.1f,%.1f,%.1f) → y=%d",
+            page_num,
+            x0,
+            y0,
+            x1,
+            y1,
+            max(0, target_y),
+        )
+        return True
+
+    def _show_evidence_highlight(
+        self,
+        page_num: int,
+        bbox: tuple[float, float, float, float],
+    ) -> None:
+        parent, y_offset = self._highlight_parent_for_bbox(page_num, bbox)
+        if parent is None:
+            return
+        self._clear_evidence_highlight()
+        x0, y0, x1, y1 = bbox
+        x = int(x0 * self._scale)
+        y = int(y0 * self._scale) - y_offset
+        w = max(int((x1 - x0) * self._scale), 3)
+        h = max(int((y1 - y0) * self._scale), 3)
+        highlight = QWidget(parent)
+        highlight.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        highlight.setObjectName("formula_evidence_highlight")
+        highlight.setGeometry(x, y, w, h)
+        highlight.setStyleSheet(
+            "background-color: rgba(47, 128, 237, 40);"
+            "border: 2px solid #2f80ed;"
+        )
+        highlight.raise_()
+        highlight.show()
+        self._evidence_highlight = highlight
+        QTimer.singleShot(2500, self._clear_evidence_highlight)
+
+    def _highlight_parent_for_bbox(
+        self,
+        page_num: int,
+        bbox: tuple[float, float, float, float],
+    ) -> tuple[QWidget | None, int]:
+        if page_num not in self._split_pages:
+            parent = self._page_containers.get(page_num) or self._widget_pool.get(page_num)
+            return parent, 0
+        y0 = int(bbox[1] * self._scale)
+        y1 = int(bbox[3] * self._scale)
+        for seg in self._page_segments.get(page_num, []):
+            if "split_id" in seg:
+                continue
+            widget = seg.get("widget")
+            if widget is None:
+                continue
+            seg_y0 = int(seg.get("y0", 0))
+            seg_y1 = int(seg.get("y1", 0))
+            if y1 >= seg_y0 and y0 <= seg_y1:
+                return widget, seg_y0
+        return None, 0
+
+    def _clear_evidence_highlight(self) -> None:
+        highlight = self._evidence_highlight
+        self._evidence_highlight = None
+        if highlight is not None and _isValid(highlight):
+            highlight.deleteLater()
+
+    def _sync_scroll_range(self, viewport_h: int) -> None:
+        if self._vlayout is None:
+            return
+        total_h = max(int(self._vlayout.total_height), viewport_h)
+        self._content.setMinimumHeight(total_h)
+        self._content.resize(max(self.viewport().width(), self._content.width()), total_h)
+        self._layout.activate()
+        self._content.adjustSize()
+        self.verticalScrollBar().setRange(0, max(0, total_h - viewport_h))
 
     # ── 缩放 ──
 
@@ -1342,7 +1586,7 @@ class PdfViewer(QScrollArea):
         """设置缩放倍数 — 借鉴 Sioyek try_closest_rendered_page 即时反馈策略。
 
         不销毁 widget，而是：
-        1. 缩放现有 pixmap 立即显示（≈0.5ms，略微模糊）
+        1. 立即更新页面布局，paintEvent 临时拉伸旧 pixmap 显示
         2. 后台异步渲染精确缩放（≈100ms）
         3. 渲染完成后自动替换为清晰 pixmap
         """
@@ -1360,13 +1604,9 @@ class PdfViewer(QScrollArea):
         center_page: int | None = None
         center_offset: float = 0.0
         if self._vlayout:
-            for pn in sorted(self._page_metas.keys()):
-                py = self._vlayout.page_y(pn)
-                ph = self._vlayout.page_height(pn)
-                if py <= center_y < py + ph:
-                    center_page = pn
-                    center_offset = center_y - py
-                    break
+            center_page = self._vlayout.page_at_y(float(center_y))
+            if center_page is not None:
+                center_offset = center_y - self._vlayout.page_y(center_page)
 
         # 更新缩放因子
         old_zoom = self._zoom_multiplier
@@ -1374,14 +1614,11 @@ class PdfViewer(QScrollArea):
         self._scale = self._base_scale * new_zoom
         self._dpi = int(self._base_dpi * new_zoom)
         # 重建页面元数据尺寸 + 虚拟布局
-        doc = self._doc_engine.document
         page_heights: dict[int, float] = {}
         for pn, meta in self._page_metas.items():
-            if doc and pn < doc.page_count:
-                w = int(doc[pn].rect.width * self._scale)
-                h = int(doc[pn].rect.height * self._scale)
-            else:
-                w, h = 600, 800
+            rect_w_pt, rect_h_pt = self._page_rects_pt.get(pn, (600.0 / self._scale, 800.0 / self._scale))
+            w = int(rect_w_pt * self._scale)
+            h = int(rect_h_pt * self._scale)
             meta["width"] = w
             meta["height"] = h
             page_heights[pn] = float(h)
@@ -1395,7 +1632,8 @@ class PdfViewer(QScrollArea):
                     seg["y1"] = int(seg["y1_pt"] * self._scale)
         self._vlayout.rebuild(page_heights)
 
-        # 处理已渲染的页面：缩放 pixmap 即时显示 + 清除旧 overlay + 请求精确渲染
+        # 处理已渲染的页面：复用旧 pixmap 过渡显示 + 清除旧 overlay + 请求精确渲染。
+        # 不在 UI 线程生成 scaled QPixmap；paintEvent 会把旧图拉伸到新 widget 尺寸。
         rerender_count = 0
         for pn in list(self._active_pages):
             container = self._widget_pool.get(pn)
@@ -1404,32 +1642,25 @@ class PdfViewer(QScrollArea):
             meta = self._page_metas[pn]
             container.setFixedSize(meta["width"], meta["height"])
 
-            # 清除旧 overlay（位置已失效）
-            self._clear_container_overlays(container)
-
-            # 缩放现有 pixmap 即时显示（借鉴 Sioyek try_closest_rendered_page）
             if container._full_pixmap and not container._full_pixmap.isNull():
-                scaled = container._full_pixmap.scaled(
-                    meta["width"], meta["height"],
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                scaled.setDevicePixelRatio(self._screen_dpr)
-                container._full_pixmap = scaled
+                container._zoom = self._scale
+                container._page_w = meta["width"]
+                container._page_h = meta["height"]
+                container._tile_cache = None
                 container._rendered = True
                 blocks = self._page_segments.get(pn, [{}])[0].get("blocks", [])
                 self._refresh_container_overlays(container, blocks)
                 container.update()
             else:
+                self._clear_container_overlays(container)
                 container._rendered = False
 
             # 标记需要重新渲染，延迟请求精确 DPI 渲染（避免同步 container.render 阻塞主线程）
             self._precise_render_pending.add(pn)
             rerender_count += 1
 
-        # 延迟请求精确渲染：避免 _set_zoom 同步等待 container.render()
-        # PageCache 命中时 render() 的 _slice_pixmap_to_tiles 对大 pixmap 很重
-        QTimer.singleShot(10, lambda: self._request_precise_renders())
+        # 连续缩放期间只更新布局和旧图即时显示，等用户停顿后再合并请求清晰渲染。
+        self._precise_render_timer.start(180)
 
         # 处理裂缝页面：缩放段内 QLabel 即时显示 + 异步渲染完成后重建
         for pn in list(self._split_pages):
@@ -1443,64 +1674,25 @@ class PdfViewer(QScrollArea):
                 old_w = seg.get("widget")
                 if old_w is None:
                     continue
-                # 缩放段内 QLabel pixmap 即时显示（借鉴 Sioyek）
+                seg_h = max(seg["y1"] - seg["y0"], 1)
                 for label in old_w.findChildren(QLabel):
                     if label.pixmap() and not label.pixmap().isNull():
                         old_pm = label.pixmap()
-                        new_w_px = self._page_metas[pn]["width"]
-                        seg_h = seg["y1"] - seg["y0"]
-                        scaled = old_pm.scaled(new_w_px, seg_h,
+                        scaled = old_pm.scaled(
+                            self._page_metas[pn]["width"],
+                            seg_h,
                             Qt.AspectRatioMode.IgnoreAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation)
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
                         scaled.setDevicePixelRatio(self._screen_dpr)
                         label.setPixmap(scaled)
-                        label.resize(new_w_px, seg_h)
-                old_w.setFixedSize(self._page_metas[pn]["width"], seg["y1"] - seg["y0"])
-                # 清除旧 overlay（位置已失效）
-                for child in old_w.findChildren(BlockOverlay):
-                    self._overlays.pop(child.block_id, None)
-                    if _isValid(child):
-                        child.deleteLater()
-                blocks = seg.get("blocks", [])
-                for b in blocks:
-                    bx0, by0, bx1, by1 = b.bbox
-                    sx0 = int(bx0 * self._scale)
-                    sy0 = int(by0 * self._scale) - seg["y0"]
-                    sw = max(int((bx1 - bx0) * self._scale), 1)
-                    sh = max(int((by1 - by0) * self._scale), 1)
-                    seg_h = max(seg["y1"] - seg["y0"], 1)
-                    if sy0 + sh <= 0 or sy0 >= seg_h:
-                        continue
-                    ov = BlockOverlay(b)
-                    ov.setParent(old_w)
-                    ov.setGeometry(
-                        sx0,
-                        max(sy0, 0),
-                        sw,
-                        max(min(sy0 + sh, seg_h) - max(sy0, 0), 1),
-                    )
-                    ov.raise_()
-                    ov.show()
-                    self._connect_overlay(ov)
+                        label.resize(self._page_metas[pn]["width"], seg_h)
+                old_w.setFixedSize(self._page_metas[pn]["width"], seg_h)
+                self._refresh_segment_overlays(old_w, seg.get("blocks", []), seg["y0"], seg_h)
             # 异步渲染 → 完成后在 _on_page_rendered_async 中重建段
-            if not hasattr(self, '_pending_split_rerenders'):
-                self._pending_split_rerenders: set[int] = set()
             self._pending_split_rerenders.add(pn)
-            self._tile_renderer.set_dpi(self._dpi)
-            self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
-
-        # 处理池中隐藏的 widget（仅调整尺寸，不渲染）
-        for pn, container in self._widget_pool.items():
-            if pn in self._active_pages:
-                continue
-            meta = self._page_metas.get(pn)
-            if meta:
-                container.setFixedSize(meta["width"], meta["height"])
-                if container.rendered:
-                    cleared = container.unrender()
-                    for block_id in cleared:
-                        self._overlays.pop(block_id, None)
-                    self._rendered_pages.discard(pn)
+        if self._pending_split_rerenders:
+            self._split_rerender_timer.start(180)
 
         # 调整 spacer 高度
         self._adjust_spacers(self._active_pages | self._split_pages)
@@ -1523,6 +1715,14 @@ class PdfViewer(QScrollArea):
                 self._precise_render_pending.discard(pn)
                 continue
             self._render_page(pn)
+
+    def _request_pending_split_rerenders(self) -> None:
+        """为裂缝页请求最终清晰渲染；连续缩放期间自动合并请求。"""
+        if not self._pending_split_rerenders:
+            return
+        self._tile_renderer.set_dpi(self._dpi)
+        for pn in list(self._pending_split_rerenders):
+            self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
 
     # ── 主题 ──
 
@@ -1553,11 +1753,16 @@ class PdfViewer(QScrollArea):
             if _isValid(ind):
                 ind.deleteLater()
         self._trans_indicators.clear()
+        self._clear_evidence_highlight()
         self._all_blocks.clear()
+        self._page_rects_pt.clear()
         self._page_containers.clear()
         self._rendered_pages.clear()
         self._active_pages.clear()
         self._precise_render_pending.clear()
+        self._precise_render_timer.stop()
+        self._pending_split_rerenders.clear()
+        self._split_rerender_timer.stop()
         self._requested_block_pages.clear()
         self._widget_page_map.clear()
         self._split_pages.clear()

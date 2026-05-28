@@ -4,6 +4,13 @@
 
 本文件只放底层基础：PDF 能提供什么、LaTeX 编译后丢失什么、Office/PPT PDF 如何分流。小模型研发见 `docs/tiny_born_digital_math_model_engineering.md`，符号身份修复见 `docs/born_digital_symbol_identity_repair_report.md`。
 
+2026-05-28 状态补充：本文是基础事实说明，不记录最新实现全貌。当前实现已经接入 r0/r0.5/r2a/r3/r4/r5
+多轮候选链、基础审核 UI、manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回；
+但这些实现不改变本文结论：PDF 通常不是 LaTeX AST，accepted 必须依赖可追溯证据和门禁。
+
+同日 UI 状态补充：PDF 结构事实层可用于快速渲染和 fallback。Napkin 极大缩放黑底/空白页说明
+当前 viewer 没有在 tile miss 时保留可见页面内容，后续应优先使用旧 pixmap/低清整页作为即时层。
+
 ## 1. PDF 不是 LaTeX AST
 
 PDF 页面是绘制指令序列，不是公式语法树。常见内容包括：

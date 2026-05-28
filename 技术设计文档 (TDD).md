@@ -1,20 +1,35 @@
 # PDF AI 阅读器 · 技术设计文档 (TDD)
 
-**版本:** V4.0（全面重写——匹配实际代码）
-**日期:** 2026-05-03
-**状态:** 详细设计——与代码库同步
-**依赖文档:** 产品需求文档 (PRD) V4.0
+**版本:** V5.0（2026-05-28 状态校准）
+**日期:** 2026-05-28
+**状态:** 架构基线 + 历史设计说明
+**依赖文档:** 产品需求文档 (PRD) V5.0
 **开发语言:** Python 3.14.4
 **GUI 框架:** PySide6 ≥ 6.11.0
-**本地默认模型:** Qwen3.5:4b
-**嵌入模型:** BGE-M3 (通过 Ollama)
+**生成模型:** LiteLLM 云端 / Ollama 本地 / Mock 测试降级
+**知识库后端:** SQLite FTS5 / Chroma / LlamaIndex 编排预留
 **环境管理:** Conda (环境名: `pdf_ai_reader_314`)
 
 ---
 
 ## 文档使用说明
 
-本文档是 PDF AI Reader 的**权威技术规范**，与 `src/` 下的实际代码同步。文档覆盖：
+本文档保留 PDF AI Reader 的主要技术结构，但 2026-05-03 版本中关于“本地 Qwen/BGE-M3 默认、Chroma 单一路线、两阶段公式检测”的内容已经被后续实现覆盖。新会话判断当前状态时，应以 `AGENTS.md`、`docs/next_session_handoff.md`、`docs/current_goal_and_next_steps.md`、`docs/async_formula_indexing_design.md` 和源码为准。
+
+2026-05-28 当前新增的权威边界：
+
+- 生成模型走可配置路由：LiteLLM 云端、Ollama 本地和 Mock 降级都必须明确标注，不能把云端伪装成本地。
+- 知识库由 `KnowledgeEngine` facade 统一管理，可选 SQLite FTS5、Chroma、LlamaIndex 编排等后端；无真实 embedding 时优先 FTS5 快速召回。
+- 公式解析采用 r0/r0.5/r1/r2/r2a/r3/r4/r5 多轮异步持久化流水线。born-digital PDF 默认不 OCR，低置信结果只做候选。
+- `FormulaAcceptanceReviewService`、命令行审核、基础审核 UI、manual revision、evidence JSON 预览、PDF page/bbox 定位、r5 知识库增量 upsert 和 accepted GraphRAG artifact 同步已接线。
+- 当前未完成项包括：最终高精度 LaTeX 还原、Napkin 大样本质量门禁、批量审核体验、r4/r5 语义路径证据和产品级 GraphRAG。
+- 2026-05-28 性能修复尝试引入/暴露 P0 渲染退化：极大缩放下大页面 tile-only 首帧无 fallback，
+  快速滚动/跳页时可能显示黑底或空白。后续渲染设计必须采用旧整页 pixmap、低清整页 fallback
+  或最近 snapshot 作为即时可见层，tile 只负责渐进清晰化。
+- 翻译公式保护需要从共享 `TextPreprocessor` 状态改为每请求独立 protection session，避免并发
+  流式翻译恢复公式时串线；预处理层不应承担样本规则式公式修补。
+
+本文档覆盖：
 - 完整的模块结构与类定义（与代码一致）
 - 所有公开方法的签名与职责
 - 信号与槽的连接规范
@@ -28,7 +43,7 @@
 
 ### 1.1 系统目标
 
-构建一款基于 PySide6 的桌面端 PDF 阅读与 AI 深度辅助软件。系统遵循 **"本地优先、隐私至上、模块化、可扩展"** 原则。
+构建一款基于 PySide6 的桌面端 PDF 阅读与 AI 深度辅助软件。系统遵循 **"本地解析、证据优先、异步持久化、模块化、可扩展"** 原则。
 
 核心闭环：
 > **PDF 解析与块分割 → 向量嵌入与知识库构建 → 混合模型路由 → 裂缝式交互呈现**
@@ -49,11 +64,10 @@
 | 包管理 | Conda | 最新 | 独立环境 `pdf_ai_reader_314`，隔离依赖 |
 | 桌面框架 | PySide6 | ≥6.11.0 | LGPL；Qt 6.11 绑定；信号发射优化 (PYSIDE-3279)；QtCanvasPainter 新模块 |
 | PDF 渲染与解析 | PyMuPDF (fitz) | ≥1.27.2 | C 语言级性能；`page.get_text("dict")` 提供结构化坐标文本 |
-| 本地模型管理 | Ollama | ≥0.6.1 | REST API (`localhost:11434`)；GGUF 量化模型；CPU-only 推理 |
-| 本地 LLM | Qwen3.5:4b | — | 4B 参数；16GB 内存流畅；中英双语；量化后 ~2.7GB |
-| 嵌入模型 | BGE-M3 | — | 1024 维；多语言语义向量；通过 Ollama 统一管理 |
-| 向量存储 | ChromaDB | ≥0.5.0 | 纯 Python 嵌入式；零配置持久化（SQLite + 自定义格式） |
+| 本地模型管理 | Ollama | 可选 | REST API (`localhost:11434`)；作为本地后端，不再是启动硬依赖 |
 | 云端模型网关 | LiteLLM | ≥1.77.3 | 统一 API 调用 100+ 模型；自动重试；支持 streaming |
+| 检索后端 | SQLite FTS5 / Chroma / LlamaIndex 编排 | 可选 | 长文档先保证快速全文召回，再叠加语义检索和图谱编排 |
+| 向量存储 | ChromaDB | ≥0.5.0 | 可选向量后端；无真实 embedding 时不应强行写入哈希向量 |
 | 数据校验 | Pydantic | ≥2.12.0 | 类型安全；自动验证；高性能序列化 |
 | 配置解析 | PyYAML | ≥6.0.2 | 读写 `config.yaml`；嵌套结构支持 |
 | 公式检测 | Pix2Text | 可选 | ONNX Runtime MFD 模型（纯检测，无需 PyTorch） |
@@ -111,7 +125,7 @@
 │     ├── AIEngine (翻译/问答协调器 — 线程管理 + 信号转发)         │
 │     │     ├── TranslationService (Prompt 构建 + 公式保护)        │
 │     │     └── QAService (知识库检索 + 上下文组装)                │
-│     ├── KnowledgeEngine (向量嵌入 + ChromaDB 构建/检索)          │
+│     ├── KnowledgeEngine (FTS/Chroma/RAG backend facade)          │
 │     ├── GlossaryManager (术语表 CRUD + Prompt 注入)              │
 │     └── Navigator (目录 + 书签管理)                              │
 │                                                                  │
@@ -125,8 +139,9 @@
 │  辅助模块:                                                       │
 │     ├── DocumentChunker (段落分割 + 公式检测 + 双栏处理)         │
 │     ├── TextPreprocessor (公式占位符保护/恢复)                   │
-│     ├── Pix2TextMFDDetector (ML 公式精扫 — 阶段二)               │
-│     └── EmbeddingService (BGE-M3 向量化 + 缓存)                  │
+│     ├── BornDigitalFormulaExtractor / FormulaIndexFlow           │
+│     ├── TinyBDMathCandidateService / FormulaAcceptanceReview      │
+│     └── EmbeddingService / SQLiteFtsBackend / Chroma backend      │
 │                                                                  │
 └─────────────────────────┬────────────────────────────────────────┘
                           │
@@ -144,6 +159,21 @@
 │     .env — API Key 环境变量                                      │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+渲染层约束补充：
+
+- 虚拟视口可以延迟清晰渲染，但不能延迟“可见页面内容”。快速滚动、跳页和缩放期间，
+  页面 widget 必须绘制旧 pixmap、低 DPI fallback 或最近 snapshot。
+- 大页面 tile cache 首帧未命中时，不能只画背景、黑底或页码占位。tile 渲染是清晰化层，
+  不是唯一可见层。
+- 任何缩放/滚动性能优化必须同时记录视觉验收截图和日志，尤其是 Napkin 极大缩放、翻译框打开、
+  连续大滚轮和缩放状态跳页。
+
+翻译层约束补充：
+
+- `TextPreprocessor` 的公式占位映射必须按翻译请求隔离。流式 token 期间不能复用可被其他请求
+  清空的全局 store。
+- 公式保护应基于明确 LaTeX delimiter 或 PDF 结构证据，不猜裸数学，也不使用样本特化规则。
 
 ### 2.2 模块依赖方向
 
@@ -243,7 +273,7 @@ D:\程设大作业\
 7. `MainWindow._on_document_loaded()` 中检查知识库：
    - 若已存在 → 状态栏显示"知识库已就绪"
    - 若不存在 → 调用 `KnowledgeEngine.build_knowledge_base()`，在 `QThreadPool` 中执行
-8. 构建过程：分批生成 BGE-M3 嵌入 → 分批（50 条/批）写入 ChromaDB
+8. 构建过程：按后端选择 FTS5 快速索引、Chroma/向量索引或后续混合索引；同一指纹未变化时跳过重建
 9. 通过 `build_progress` / `build_finished` / `build_error` 信号反馈
 
 ### 3.2 流程 B：段落翻译（裂缝交互）
@@ -623,12 +653,12 @@ class HybridModelRouter:
     """混合模型路由器。
 
     构造: HybridModelRouter(local_client, cloud_client, config)
-    - local_client: OllamaClient（实际未使用——仅检测可用性）
+    - local_client: OllamaClient 或其他本地后端（可选）
     - cloud_client: LiteLLMClient 或 MockLLMClient
-    - 当前实现：EMBEDDING 固定本地，其余任务优先检测 local→cloud→fallback
+    - 当前实现必须明确路由状态：云端、本地、Mock 不能互相伪装
 
     决策逻辑:
-    - EMBEDDING → 固定本地（BGE-M3 必须可用）
+    - EMBEDDING → 由 KnowledgeEngine/后端配置决定；无真实 embedding 时可走 SQLite FTS5
     - 其他任务 → 根据 config.routing 的策略：
       | local_only  → 仅本地，失败抛异常
       | cloud_only  → 仅云端，失败抛异常
@@ -735,12 +765,12 @@ class _QAThread(QThread):
 
 ```python
 class EmbeddingService:
-    """文本向量化服务。通过 Ollama BGE-M3 生成 1024 维语义向量。
+    """文本向量化服务。真实 embedding 后端可来自 Ollama 或后续云端/本地模型。
 
     特性:
     - 每批最多 20 条文本
     - 内存 LRU 缓存（最多 5000 条，~20MB）
-    - 逐条调用 ollama.Client.embeddings()（非 batch API）
+    - 旧路径可逐条调用 ollama.Client.embeddings()；无真实 embedding 时不应把随机/哈希向量伪装成语义向量
 
     方法:
     - embed(texts: list[str]) → list[list[float]]     批量向量化（先查缓存）
@@ -1163,7 +1193,7 @@ ConfigManager.config_changed(config)
 
 - 本地模型不可用 → `MockLLMClient` 作为最终回退（模拟翻译/问答）
 - 未配置 API Key → 系统自动使用 `MockLLMClient` 进入测试模式
-- BGE-M3 不可用 → 知识库构建在 catch 块中静默跳过（文件照样可读）
+- 真实 embedding 不可用 → 优先使用 SQLite FTS5 词法索引作为快速召回基线，不能静默伪装为语义向量
 - Pix2Text MFD 不可用 → 阶段二静默跳过，仅用启发式公式检测
 - 单个句子翻译失败 → 返回 `"[翻译失败]"`，继续翻译剩余句子
 
@@ -1256,11 +1286,11 @@ ollama pull bge-m3
 | 模块 | 状态 | 备注 |
 |------|------|------|
 | PDF 渲染 | ✅ 已实现 | 虚拟视口懒加载 + LRU 缓存 |
-| 段落/公式分割 | ✅ 已实现 | 启发式规则 + Pix2Text MFD 精扫 |
+| 段落/公式分割 | ✅ 已实现 | 段落分割 + born-digital 结构证据；OCR/MFR 只作候选兜底 |
 | 裂缝式交互 | ✅ 已实现 | SplitWidget + QWebEngineView 渲染 |
 | 翻译服务 | ✅ 已实现 | 公式保护 + 术语注入 + Few-shot |
 | 问答服务 | ✅ 已实现 | 知识库检索 + 多轮对话 |
-| 知识库构建 | ✅ 已实现 | ChromaDB + BGE-M3 嵌入 |
+| 知识库构建 | ✅ 已实现 | KnowledgeEngine facade，可走 SQLite FTS5 / Chroma / 后续混合检索 |
 | 术语表管理 | ✅ 已实现 | 3 个内置学科包 + 导入功能 |
 | 目录导航 | ✅ 已实现 | 原生大纲 + 标题推断 |
 | 书签管理 | ✅ 已实现 | 手动添加 + AI 建议 |
@@ -1273,6 +1303,8 @@ ollama pull bge-m3
 | 笔记系统 | ⏳ 未实现 | 数据模型已定义 |
 | 设置对话框（完整） | ⏳ 简化版 | 仅云端 API 配置可用 |
 | AI 工具集侧边栏 | ⏳ 占位 | 显示占位文字 |
+| 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5、审核 UI 已接线；最终质量未达标 |
+| 公式审核与写回 | 🟡 进行中 | manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回已接线；批量审核待补 |
 
 ---
 
@@ -1288,4 +1320,4 @@ ollama pull bge-m3
 
 ---
 
-*本文档与 `src/` 下的实际代码同步。最后更新: 2026-05-03。*
+*本文档已按 2026-05-28 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*

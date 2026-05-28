@@ -4,6 +4,13 @@
 > [formula_extraction_research.md](formula_extraction_research.md)。本文件只保留 OCR
 > 性能策略；后续不要再把普通 born-digital PDF 的公式判断继续堆到单个启发式函数里。
 
+2026-05-28 状态补充：外部 OCR/MFR 工具仍只作为 r1/r2 候选后端；accepted/rejected
+审核、manual revision、evidence 预览、PDF bbox 定位和 r5 写回已经接线，但这些不改变
+OCR 边界。默认 born-digital 路径仍不能加载 OCR/MFR，r2 多工具输出仍必须经过 fusion/门禁。
+
+同日性能复盘补充：阅读器渲染优化不能用 OCR/MFR 或 tile-only 占位来掩盖页面不可见问题。Napkin
+极大缩放快速滚动时出现黑底/空白页属于 UI P0，不是 OCR 后端问题；修复应在渲染 fallback 层完成。
+
 ## 目标
 
 公式 OCR 的目标不是“同步把全书扫完”，而是在不破坏阅读体验的前提下，让公式识别越用越完整、越扫越准。普通文本 PDF 的公式应先通过字符、字体、bbox、行几何结构抽取；图片/扫描公式才进入 MFD/MFR。
@@ -116,10 +123,10 @@ PDF 打开
 
 ## 下一步
 
-1. 修复并提交当前可插拔后端与缓存命名空间。
-2. 增加 `tools/formula_ocr_benchmark.py`，从 Attention/Napkin 抽样裁剪公式图，输出冷启动、批量耗时、缓存命中和样例结果。
-3. 基于基准结果优化 Pix2Text 管线：批内 hash 去重、裁剪参数、后台 batch budget。
-4. 若 Pix2Text 准确率仍达不到门禁，再评估轻量 ONNX 后端或 Paddle 独立 worker；默认程序仍保持轻量。
+1. 对现有 Pix2Text/Paddle/MinerU worker 做大样本性能和质量对照，报告冷启动、批量、缓存命中、P95 和源码相似度。
+2. 优化常驻 worker、批内 hash 去重、裁剪参数、后台 batch budget 和超时策略。
+3. 对 r2 候选继续执行 `local_precise_degraded_against_born_digital` 检查，质量低于 born-digital 结构证据时不得进入 accepted。
+4. 若 Pix2Text/Paddle/PEK 仍达不到门禁，只保留为显式精扫或离线审计；默认程序继续保持轻量。
 
 ## 当前基准
 

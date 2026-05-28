@@ -2,6 +2,7 @@ from src.app.formula_index_flow import FormulaIndexFlow, _FormulaPageScanWorker
 from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.core.models import BlockType, DocumentBlock
+from src.ui.main_window import _FormulaImportPlanThread
 
 
 def _formula(
@@ -91,6 +92,46 @@ def test_formula_index_flow_can_drain_queue_when_enabled() -> None:
     flow._on_worker_thread_done("paper.pdf", 8)
 
     assert starts == [8]
+
+
+def test_formula_index_flow_starts_queued_blocks_after_page_scan_finishes() -> None:
+    flow = FormulaIndexFlow()
+    starts: list[tuple[str, int, str]] = []
+    flow._queued_blocks = [_formula("p1_b1", 1)]
+    flow._queued_page_nums = [0]
+
+    def fake_start_batch(filepath: str, batch_budget: int) -> None:
+        starts.append((filepath, batch_budget, "block"))
+
+    def fake_start_page_batch(filepath: str, batch_budget: int) -> None:
+        starts.append((filepath, batch_budget, "page"))
+
+    flow._start_next_batch = fake_start_batch  # type: ignore[method-assign]
+    flow._start_next_page_scan_batch = fake_start_page_batch  # type: ignore[method-assign]
+
+    flow._on_page_scan_thread_done("paper.pdf", 16)
+
+    assert starts == [("paper.pdf", 16, "block")]
+
+
+def test_formula_index_flow_resumes_page_scan_after_drained_block_batch_finishes() -> None:
+    flow = FormulaIndexFlow()
+    starts: list[tuple[str, int, str]] = []
+    flow._queued_page_nums = [0]
+    flow._drain_page_queue = True
+
+    def fake_start_batch(filepath: str, batch_budget: int) -> None:
+        starts.append((filepath, batch_budget, "block"))
+
+    def fake_start_page_batch(filepath: str, batch_budget: int) -> None:
+        starts.append((filepath, batch_budget, "page"))
+
+    flow._start_next_batch = fake_start_batch  # type: ignore[method-assign]
+    flow._start_next_page_scan_batch = fake_start_page_batch  # type: ignore[method-assign]
+
+    flow._on_worker_thread_done("paper.pdf", 2)
+
+    assert starts == [("paper.pdf", 2, "page")]
 
 
 def test_formula_index_flow_default_worker_is_cache_only() -> None:
@@ -206,6 +247,47 @@ def test_formula_index_flow_can_persist_plan_without_starting_worker(tmp_path) -
     assert store.counts("doc-1") == {"queued": 1}
     assert store.round_counts("doc-1") == {
         "r1_cached_recognition:queued": 1,
+    }
+
+
+def test_formula_import_plan_thread_persists_all_rounds(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    formula = _formula("p0_b1", 0)
+    text_formula = DocumentBlock(
+        id="p1_b1",
+        page_num=1,
+        block_type=BlockType.FORMULA,
+        content=r"\(a+b\)",
+        bbox=(0, 0, 100, 20),
+        metadata={"formula_score": 0.9},
+    )
+    captured: list[dict[str, int | str]] = []
+    thread = _FormulaImportPlanThread(
+        store=store,
+        filepath="paper.pdf",
+        doc_hash="doc-1",
+        page_count=3,
+        plan_blocks=[formula],
+        plan_priority_pages={0},
+        plan_scan_round=FormulaScanRound.CACHED_RECOGNITION.value,
+        formula_blocks=[formula, text_formula],
+    )
+    thread.finished_signal.connect(lambda result: captured.append(result))
+
+    thread.run()
+
+    assert captured
+    assert captured[-1]["queued_blocks"] == 1
+    assert captured[-1]["queued_pages"] == 3
+    assert captured[-1]["queued_reviews"] == 2
+    assert captured[-1]["queued_graph"] == 2
+    assert store.counts("doc-1") == {"queued": 1}
+    assert store.page_counts("doc-1") == {"queued": 3}
+    assert store.round_counts("doc-1") == {
+        "r0_pdf_structure:queued": 3,
+        "r1_cached_recognition:queued": 1,
+        "r3_cloud_semantic_review:queued": 2,
+        "r4_knowledge_graph:queued": 2,
     }
 
 

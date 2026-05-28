@@ -268,6 +268,48 @@ class FormulaAcceptanceReviewService:
             "decisions": [_record_json(decision) for decision in decisions],
         }
 
+    def result_evidence(self, doc_hash: str, *, result_id: str) -> dict[str, Any]:
+        record = self._store.get_recognition_result_by_id(result_id)
+        if record is None or record.doc_hash != doc_hash:
+            raise ValueError(f"formula recognition result not found: {result_id}")
+        return {
+            "kind": "result",
+            "doc_hash": doc_hash,
+            "candidate_id": record.candidate_id,
+            "result_id": record.result_id,
+            "stage": record.stage,
+            "model": record.model,
+            "model_version": record.model_version,
+            "preprocess_version": record.preprocess_version,
+            "input_hash": record.input_hash,
+            "latex": record.latex,
+            "score": record.score,
+            "warnings": list(record.warnings),
+            "evidence": record.evidence,
+            "location": _location_from_evidence(record.evidence),
+        }
+
+    def fusion_evidence(self, doc_hash: str, *, fusion_id: str) -> dict[str, Any]:
+        fusion = self._store.get_fusion_record_by_id(fusion_id)
+        if fusion is None or fusion.doc_hash != doc_hash:
+            raise ValueError(f"formula fusion record not found: {fusion_id}")
+        evidence = _fusion_revision_evidence(fusion.result_json)
+        return {
+            "kind": "fusion",
+            "doc_hash": doc_hash,
+            "candidate_id": fusion.candidate_id,
+            "fusion_id": fusion.fusion_id,
+            "fusion_version": fusion.fusion_version,
+            "input_hash": fusion.input_hash,
+            "best_result_id": fusion.best_result_id,
+            "decision": fusion.decision,
+            "accepted_gate": fusion.accepted_gate,
+            "risk_flags": list(fusion.risk_flags),
+            "result_json": fusion.result_json,
+            "evidence": evidence,
+            "location": _location_from_evidence(evidence),
+        }
+
 
 def _record_json(record: Any) -> dict[str, Any]:
     return asdict(record)
@@ -300,3 +342,33 @@ def _fusion_revision_evidence(payload: dict[str, object]) -> dict[str, object]:
         return {}
     evidence = best.get("evidence", {})
     return dict(evidence) if isinstance(evidence, dict) else {}
+
+
+def _location_from_evidence(evidence: dict[str, object]) -> dict[str, object]:
+    page_num = _int_value(evidence.get("page_num"))
+    bbox = _bbox_value(evidence.get("bbox"))
+    if page_num < 0 or not bbox:
+        return {}
+    return {
+        "page_num": page_num,
+        "bbox": bbox,
+    }
+
+
+def _int_value(value: object, default: int = -1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bbox_value(value: object) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return []
+    try:
+        bbox = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return []
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return []
+    return bbox

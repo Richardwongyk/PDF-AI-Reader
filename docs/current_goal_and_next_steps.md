@@ -74,7 +74,17 @@
 
 今晚目标是持续运行到基础目标真正达成：公式扫描最终准确度高于 99.9%，RAG/知识系统完整可用，并继续全线优化。当前还没有完成这个目标，不能标记 goal 完成。LaTeX 源码只用于测试、审计和验收；真实用户运行路径不能假设有源码。
 
-当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。2026-05-25 已能在 `tools/formula_multiround_pipeline.py` 中验证 r0-r5 的落库、跳过、fusion 持久化、定向 r2、候选证据增强 r3、结构图谱 r4 和 accepted r5 增量写回 service；仍未完成 Napkin 大样本质量门禁、产品级 accepted/rejected/revision 门禁、GraphRAG 高质量语义抽取和最终 99.9% 公式准确率。
+当前阶段的核心任务是：把 r0 非 OCR 结构快扫、r1 缓存补救、r2 多工具候选、r3 语义校对、r4 图谱、r5 知识库增量更新跑成一条可验证的流水线，并用 Attention/Napkin 证明准确率和性能。2026-05-28 已能在 `tools/formula_multiround_pipeline.py` 中验证 r0-r5 的落库、跳过、fusion 持久化、定向 r2、候选证据增强 r3、结构图谱 r4、accepted r5 增量写回 service、基础审核 UI、manual revision、evidence 预览和 PDF bbox 定位；仍未完成 Napkin 大样本质量门禁、批量审核体验、GraphRAG 高质量语义抽取和最终 99.9% 公式准确率。
+
+2026-05-28 追加状态：当天性能修复尝试没有完成验收。`TODO.md` 顶部已写入完整复盘。
+当前最高优先级临时调整为先修复阅读体验 P0：Napkin 极大缩放/快速滚动/跳页时，大页面 tile-only
+路径会在首次瓦片未命中时显示黑底/空白页。后续任何性能优化都必须以“滚动中间页始终可见”为硬门槛：
+旧整页 pixmap、低清整页 fallback 或最近 snapshot 必须先显示，tile 只能做渐进清晰化替换。
+在该问题修复前，不应继续以更高 stress multiplier 证明性能。
+
+同一复盘还确认两个必须补测的 P1 风险：首屏解析拆成前 8 页后，后台补页、知识库、公式入队必须
+保持全文一致；翻译服务共享 `TextPreprocessor`，并发流式翻译可能污染公式占位映射，后续主攻
+翻译时要先做独立 protection session。
 
 2026-05-27 全软件验收补充：
 
@@ -189,7 +199,7 @@
 
 要做：
 
-- 已建立 accepted/rejected audit 表、store acceptance API、命令行入口、基础 UI 和手工 revision 输入；仍需证据预览、PDF 跳转和批量审核体验。
+- 已建立 accepted/rejected audit 表、store acceptance API、命令行入口、基础 UI、手工 revision 输入、证据预览和 PDF bbox 跳转；仍需批量审核体验。
 - accepted 变化已能触发 r5 增量 upsert，并同步 GraphRAG accepted artifact；仍需强化 r4/r5 语义路径证据。
 - 对 accepted precision 做单独统计，和候选 recall 分开报告。
 - E2E 覆盖二次打开跳过、缩放、双击翻译、隐藏/再显示、问答证据、日志审计。
@@ -250,7 +260,7 @@
 - r2：本地高精度多工具复核，独立 worker，只写候选。
 - r3：DeepSeek 等分析模型语义复核，写候选 JSON，不覆盖正文。
 - r4：公式/章节/定理/引用/概念关系异步写 GraphRAG。
-- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，并同步 accepted 公式 GraphRAG artifact。已新增基础公式候选审核对话框和手工 revision 输入；仍需证据预览、PDF bbox 跳转和更高质量的 r4 语义图谱。
+- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，并同步 accepted 公式 GraphRAG artifact。已新增基础公式候选审核对话框、手工 revision 输入、证据预览和 PDF bbox 跳转；仍需批量审核和更高质量的 r4 语义图谱。
 
 最新实现状态：
 

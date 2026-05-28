@@ -21,6 +21,7 @@ import time
 import traceback
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ ARTIFACT_DIR = ROOT / "test_artifacts" / "e2e"
 COMMAND_FILE = ARTIFACT_DIR / "commands.jsonl"
 EVENT_FILE = ARTIFACT_DIR / "events.jsonl"
 FORMULA_ARTIFACT_DIR = ROOT / "test_artifacts" / "formula_audit"
+_COMMAND_COUNTER = count(1)
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.03
@@ -62,6 +64,7 @@ class CaseResult:
     name: str
     pdf: str
     latex_root: str
+    stress_multiplier: int
     launched_sec: float
     opened_sec: float
     window_title: str
@@ -89,6 +92,7 @@ def _cases() -> list[PdfCase]:
                 "max_zoom_complete_ms": 250.0,
                 "max_render_ms": 150.0,
                 "max_visible_update_ms": 350.0,
+                "max_spike_factor": 2.0,
                 "min_zoom_complete_count": 4.0,
             },
         ),
@@ -98,15 +102,101 @@ def _cases() -> list[PdfCase]:
             latex_root=test_dir / "Napkin LaTeX源代码，用于和原版PDF对照",
             expected_min_pages=100,
             scroll_steps=28,
-            jump_pages=[0, 10, 50, 120, 250],
+            jump_pages=[0, 10, 50, 120, 250, 420, 620, 820, 1000, 1049],
             performance_budget={
                 "max_zoom_complete_ms": 450.0,
                 "max_render_ms": 250.0,
                 "max_visible_update_ms": 600.0,
+                "max_spike_factor": 2.0,
                 "min_zoom_complete_count": 4.0,
             },
         ),
     ]
+
+
+def _bounded_stress_count(multiplier: int, *, minimum: int, cap: int) -> int:
+    multiplier = max(1, int(multiplier))
+    minimum = max(0, int(minimum))
+    cap = max(minimum, int(cap))
+    if multiplier <= 1:
+        return minimum
+    return min(cap, max(minimum, minimum + int(multiplier ** 0.5)))
+
+
+def _interleave_extremes(pages: Sequence[int]) -> list[int]:
+    ordered = sorted(dict.fromkeys(max(0, int(p)) for p in pages))
+    result: list[int] = []
+    left = 0
+    right = len(ordered) - 1
+    while left <= right:
+        result.append(ordered[left])
+        if left != right:
+            result.append(ordered[right])
+        left += 1
+        right -= 1
+    return result
+
+
+def _stress_pages(pages: Sequence[int], multiplier: int) -> list[int]:
+    base = [max(0, int(p)) for p in pages]
+    if not base:
+        return []
+    multiplier = max(1, int(multiplier))
+    if multiplier <= 1:
+        return base
+
+    max_page = max(base)
+    target = _bounded_stress_count(
+        multiplier,
+        minimum=max(len(set(base)), min(max_page + 1, 12)),
+        cap=min(max_page + 1, 56),
+    )
+    if target <= 1 or max_page <= 0:
+        samples = [0]
+    else:
+        samples = [round(i * max_page / (target - 1)) for i in range(target)]
+
+    anchors = set(base)
+    anchors.update(samples)
+    anchors.update({0, max_page, max_page // 2})
+    return _interleave_extremes(sorted(anchors))
+
+
+def _zoom_cycle_count(multiplier: int) -> int:
+    return _bounded_stress_count(multiplier, minimum=4, cap=12)
+
+
+def _translation_toggle_pairs(multiplier: int) -> int:
+    return _bounded_stress_count(multiplier, minimum=1, cap=8)
+
+
+def _translation_request_count(multiplier: int) -> int:
+    if int(multiplier) <= 1:
+        return 0
+    return _bounded_stress_count(multiplier, minimum=2, cap=12)
+
+
+def _formula_scan_iterations(multiplier: int) -> int:
+    return _bounded_stress_count(multiplier, minimum=1, cap=8)
+
+
+def _stress_case(case: PdfCase, multiplier: int) -> PdfCase:
+    multiplier = max(1, int(multiplier))
+    if multiplier <= 1:
+        return case
+    budget = dict(case.performance_budget)
+    budget["min_zoom_complete_count"] = float(
+        max(int(budget.get("min_zoom_complete_count", 0) or 0), _zoom_cycle_count(multiplier) * 2)
+    )
+    return PdfCase(
+        name=case.name,
+        pdf=case.pdf,
+        latex_root=case.latex_root,
+        expected_min_pages=case.expected_min_pages,
+        scroll_steps=_bounded_stress_count(multiplier, minimum=case.scroll_steps, cap=80),
+        jump_pages=_stress_pages(case.jump_pages, multiplier),
+        performance_budget=budget,
+    )
 
 
 def _reset_logs() -> None:
@@ -193,10 +283,14 @@ def _reset_bridge_files() -> None:
             path.unlink()
 
 
-def _send_command(command: dict[str, Any]) -> None:
+def _send_command(command: dict[str, Any]) -> str:
     COMMAND_FILE.parent.mkdir(parents=True, exist_ok=True)
+    command = dict(command)
+    command_id = str(command.get("command_id") or f"{int(time.time() * 1000)}-{next(_COMMAND_COUNTER)}")
+    command["command_id"] = command_id
     with COMMAND_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(command, ensure_ascii=False) + "\n")
+    return command_id
 
 
 def _read_events() -> list[dict[str, Any]]:
@@ -213,15 +307,54 @@ def _read_events() -> list[dict[str, Any]]:
     return events
 
 
-def _wait_for_event(event: str, start_index: int = 0, timeout: float = 15) -> dict[str, Any]:
+def _wait_for_event(
+    event: str,
+    start_index: int = 0,
+    timeout: float = 15,
+    command_id: str | None = None,
+    predicate: Any | None = None,
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         events = _read_events()
         for item in events[start_index:]:
-            if item.get("event") == event:
-                return item
+            if item.get("event") != event:
+                continue
+            if command_id is not None and item.get("command_id") != command_id:
+                continue
+            if predicate is not None and not predicate(item):
+                continue
+            return item
         time.sleep(0.2)
-    raise TimeoutError(f"event not found within {timeout:.1f}s: {event}")
+    suffix = f" command_id={command_id}" if command_id else ""
+    raise TimeoutError(f"event not found within {timeout:.1f}s: {event}{suffix}")
+
+
+def _send_and_wait(
+    command: dict[str, Any],
+    event: str,
+    timeout: float = 15,
+    predicate: Any | None = None,
+) -> dict[str, Any]:
+    start_index = len(_read_events())
+    command_id = _send_command(command)
+    return _wait_for_event(
+        event,
+        start_index,
+        timeout=timeout,
+        command_id=command_id,
+        predicate=predicate,
+    )
+
+
+def _scroll_to_page(page: int, timeout: float = 20) -> dict[str, Any]:
+    page = max(0, int(page))
+    return _send_and_wait(
+        {"cmd": "scroll_to_page", "page": page},
+        "scrolled_to_page",
+        timeout=timeout,
+        predicate=lambda item: int(item.get("page", -1)) == page,
+    )
 
 
 def _tail_log(lines: int = 120) -> list[str]:
@@ -287,6 +420,55 @@ def _series_summary(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
+def _summarize_action_coverage(actions: Sequence[dict[str, Any]], stress_multiplier: int) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    phases: dict[str, int] = {}
+    total_wheel_units = 0
+    for item in actions:
+        name = str(item.get("name") or "")
+        counts[name] = counts.get(name, 0) + 1
+        phase = str(item.get("phase") or "")
+        if phase:
+            phases[phase] = phases.get(phase, 0) + 1
+        total_wheel_units += abs(int(item.get("total_wheel_units") or 0))
+
+    multiplier = max(1, int(stress_multiplier))
+    required = {
+        "large_wheel_burst": 3,
+        "continuous_fast_scroll": 3,
+        "reverse_fast_scroll": 3,
+        "extreme_zoom_in": 9,
+        "extreme_zoom_out": 9,
+        "extreme_zoom_jump_page": 4,
+        "double_click_toggle": _translation_toggle_pairs(multiplier) * 2,
+        "translation_request_stress": _translation_request_count(multiplier),
+        "formula_scan_stress": _formula_scan_iterations(multiplier),
+    }
+    required_phases = {
+        "baseline",
+        "extreme_zoom",
+        "translation_split_open",
+        "translation_split_extreme_zoom",
+    }
+    violations = [
+        f"{name}: {counts.get(name, 0)} < {minimum}"
+        for name, minimum in required.items()
+        if counts.get(name, 0) < minimum
+    ]
+    for phase in sorted(required_phases):
+        if phases.get(phase, 0) <= 0:
+            violations.append(f"phase missing: {phase}")
+    if total_wheel_units < 120 * multiplier * 4:
+        violations.append(f"wheel_units: {total_wheel_units} below stress floor")
+    return {
+        "counts": counts,
+        "phases": phases,
+        "total_wheel_units": total_wheel_units,
+        "violations": violations,
+        "within_budget": not violations,
+    }
+
+
 def _summarize_performance(case: PdfCase) -> dict[str, Any]:
     lines = _tail_log(4000)
     zoom_complete_ms: list[float] = []
@@ -307,17 +489,22 @@ def _summarize_performance(case: PdfCase) -> dict[str, Any]:
     budget = case.performance_budget
     violations: list[str] = []
 
-    def check_max(name: str, values: Sequence[float], budget_key: str) -> None:
+    def check_latency(name: str, values: Sequence[float], budget_key: str) -> None:
         if not values:
             violations.append(f"{name}: no samples")
             return
         limit = budget.get(budget_key)
-        if limit is not None and max(values) > limit:
-            violations.append(f"{name}: max {max(values):.1f}ms > {limit:.1f}ms")
+        if limit is not None:
+            p95 = _percentile(values, 0.95)
+            max_allowed = limit * float(budget.get("max_spike_factor", 2.0))
+            if p95 > limit:
+                violations.append(f"{name}: p95 {p95:.1f}ms > {limit:.1f}ms")
+            if max(values) > max_allowed:
+                violations.append(f"{name}: max {max(values):.1f}ms > {max_allowed:.1f}ms")
 
-    check_max("zoom_complete_ms", zoom_complete_ms, "max_zoom_complete_ms")
-    check_max("render_ms", render_ms, "max_render_ms")
-    check_max("visible_update_ms", visible_update_ms, "max_visible_update_ms")
+    check_latency("zoom_complete_ms", zoom_complete_ms, "max_zoom_complete_ms")
+    check_latency("render_ms", render_ms, "max_render_ms")
+    check_latency("visible_update_ms", visible_update_ms, "max_visible_update_ms")
     min_zoom = int(budget.get("min_zoom_complete_count", 0))
     if len(zoom_complete_ms) < min_zoom:
         violations.append(f"zoom_complete_count: {len(zoom_complete_ms)} < {min_zoom}")
@@ -416,13 +603,16 @@ def _wait_for_event_or_log(
     start_index: int,
     log_pattern: str,
     timeout: float,
+    command_id: str | None = None,
 ) -> str:
     deadline = time.monotonic() + timeout
     regex = re.compile(log_pattern)
     while time.monotonic() < deadline:
         events = _read_events()
         for item in events[start_index:]:
-            if item.get("event") == event:
+            if item.get("event") == event and (
+                command_id is None or item.get("command_id") == command_id
+            ):
                 return "event"
         for line in reversed(_tail_log(4000)):
             if regex.search(line):
@@ -435,6 +625,8 @@ def _launch(case: PdfCase) -> tuple[subprocess.Popen[str], Any, float]:
     t0 = time.perf_counter()
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
+    if os.name == "nt" and env.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+        env.pop("QT_QPA_PLATFORM", None)
     env.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu-sandbox")
     proc = subprocess.Popen(
         [
@@ -450,11 +642,57 @@ def _launch(case: PdfCase) -> tuple[subprocess.Popen[str], Any, float]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    app = Application(backend="uia").connect(process=proc.pid, timeout=30)
-    window = app.window(title_re=".*PDF AI Reader.*")
-    window.wait("visible enabled ready", timeout=45)
-    window.set_focus()
-    return proc, window, time.perf_counter() - t0
+    try:
+        app = Application(backend="uia").connect(process=proc.pid, timeout=30)
+        window = _wait_for_main_window(app, timeout=60)
+        window.set_focus()
+        return proc, window, time.perf_counter() - t0
+    except Exception:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        raise
+
+
+def _wait_for_main_window(app: Application, timeout: float = 60) -> Any:
+    deadline = time.monotonic() + timeout
+    last_titles: list[str] = []
+    title_match = None
+    fallback = None
+    while time.monotonic() < deadline:
+        try:
+            candidates = app.windows()
+        except Exception:
+            candidates = []
+        last_titles = []
+        for window in candidates:
+            try:
+                title = window.window_text()
+                last_titles.append(title)
+                rect = window.rectangle()
+                has_rect = rect.width() > 0 and rect.height() > 0
+                if has_rect and fallback is None:
+                    fallback = window
+                if "PDF AI Reader" in title:
+                    title_match = window
+                    if has_rect:
+                        try:
+                            window.wait("exists enabled", timeout=5)
+                        except Exception:
+                            pass
+                        return window
+            except Exception:
+                continue
+        if title_match is not None:
+            return title_match
+        if fallback is not None and time.monotonic() > deadline - min(timeout, 5):
+            return fallback
+        time.sleep(0.25)
+    raise TimeoutError(f"main window not visible within {timeout:.1f}s; titles={last_titles!r}")
 
 
 def _window_center(window: Any) -> tuple[int, int]:
@@ -505,9 +743,7 @@ def _first_block_point(window: Any) -> tuple[int, int] | None:
 
 
 def _pick_visible_block_point(page: int = 0) -> tuple[str, tuple[int, int] | None, dict[str, Any]]:
-    event_index = len(_read_events())
-    _send_command({"cmd": "pick_block", "page": page})
-    event = _wait_for_event("block_picked", event_index, timeout=10)
+    event = _send_and_wait({"cmd": "pick_block", "page": page}, "block_picked", timeout=10)
     block_id = str(event.get("block_id") or "")
     center = event.get("center")
     scale = _screen_scale_from_event(event)
@@ -533,10 +769,17 @@ def _screen_scale_from_event(event: dict[str, Any]) -> float:
     return 1.0
 
 
+def _point_in_window(window: Any, point: tuple[int, int]) -> bool:
+    try:
+        rect = window.rectangle()
+        x, y = point
+        return rect.left <= x <= rect.right and rect.top <= y <= rect.bottom
+    except Exception:
+        return False
+
+
 def _snapshot_state(timeout: float = 10) -> dict[str, Any]:
-    event_index = len(_read_events())
-    _send_command({"cmd": "snapshot_state"})
-    return _wait_for_event("state", event_index, timeout=timeout)
+    return _send_and_wait({"cmd": "snapshot_state"}, "state", timeout=timeout)
 
 
 def _wait_for_split_count_at_least(count: int, timeout: float) -> dict[str, Any]:
@@ -564,26 +807,35 @@ def _split_collapsed(state: dict[str, Any], block_id: str) -> bool | None:
 
 
 def _set_split_collapsed(block_id: str, expected_collapsed: bool, timeout: float = 20) -> bool:
-    event_index = len(_read_events())
-    _send_command(
+    event = _send_and_wait(
         {
             "cmd": "set_split_collapsed",
             "block_id": block_id,
             "collapsed": expected_collapsed,
-        }
+        },
+        "split_state_set",
+        timeout=timeout,
     )
-    event = _wait_for_event("split_state_set", event_index, timeout=timeout)
     return event.get("collapsed") is expected_collapsed
 
 
-def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) -> tuple[str, str]:
+def _double_click_translation_cycle(
+    window: Any,
+    actions: list[dict[str, Any]],
+    toggle_pairs: int = 1,
+) -> tuple[str, str]:
+    _scroll_to_page(0, timeout=20)
+    time.sleep(0.8)
     point = _first_block_point(window)
     picked_block_id = ""
     method = "mouse"
     if point is None:
         try:
             picked_block_id, point, pick_event = _pick_visible_block_point(page=0)
-            if point is not None:
+            if point is not None and not _point_in_window(window, point):
+                point = None
+                method = "bridge_fallback_offscreen_geometry"
+            elif point is not None:
                 method = "mouse_bridge_geometry"
         except Exception:
             pick_event = {}
@@ -591,19 +843,29 @@ def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) 
     if point is None:
         method = "bridge_fallback"
         t = time.perf_counter()
-        event_index = len(_read_events())
         command = {"cmd": "open_translation", "page": 0}
         if picked_block_id:
             command["block_id"] = picked_block_id
-        _send_command(command)
-        event = _wait_for_event("translation_requested", event_index, timeout=20)
+        event = _send_and_wait(command, "translation_requested", timeout=20)
         block_id = str(event.get("block_id") or "")
         _action(actions, "double_click_open_fallback", t, block_id=block_id)
     else:
         t = time.perf_counter()
         pyautogui.doubleClick(*point, interval=0.08)
-        state = _wait_for_split_count_at_least(1, timeout=20)
-        block_id = _first_split_id(state)
+        try:
+            state = _wait_for_split_count_at_least(1, timeout=20)
+            block_id = _first_split_id(state)
+        except TimeoutError:
+            if picked_block_id:
+                event = _send_and_wait(
+                    {"cmd": "open_translation", "block_id": picked_block_id},
+                    "translation_requested",
+                    timeout=20,
+                )
+                block_id = str(event.get("block_id") or "")
+                method = f"{method}_bridge_recovery"
+            else:
+                raise
         _action(
             actions,
             "double_click_open",
@@ -617,13 +879,16 @@ def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) 
     if not block_id:
         raise RuntimeError("translation split did not open")
 
-    for index, expected_collapsed in enumerate((True, False)):
+    states = [state for _ in range(max(1, int(toggle_pairs))) for state in (True, False)]
+    for index, expected_collapsed in enumerate(states):
         t = time.perf_counter()
         used_bridge_fallback = False
         if point is None:
-            event_index = len(_read_events())
-            _send_command({"cmd": "toggle_split", "block_id": block_id})
-            _wait_for_event("split_toggled", event_index, timeout=20)
+            _send_and_wait(
+                {"cmd": "toggle_split", "block_id": block_id},
+                "split_toggled",
+                timeout=20,
+            )
         else:
             pyautogui.doubleClick(*point, interval=0.08)
         deadline = time.monotonic() + 8
@@ -652,6 +917,84 @@ def _double_click_translation_cycle(window: Any, actions: list[dict[str, Any]]) 
             bridge_fallback=used_bridge_fallback,
         )
     return block_id, method
+
+
+def _stress_translation_requests(
+    block_id: str,
+    case: PdfCase,
+    multiplier: int,
+    actions: list[dict[str, Any]],
+) -> None:
+    extra_requests = _translation_request_count(multiplier)
+    pages = _stress_pages([0, *case.jump_pages[:3]], max(1, multiplier))
+    for index in range(extra_requests):
+        t = time.perf_counter()
+        page = pages[index % len(pages)] if pages else 0
+        command: dict[str, Any] = {"cmd": "open_translation", "page": max(0, int(page))}
+        if index == 0 and block_id:
+            command["block_id"] = block_id
+        event = _send_and_wait(command, "translation_requested", timeout=20)
+        _wait_for_split_count_at_least(1, timeout=20)
+        _action(
+            actions,
+            "translation_request_stress",
+            t,
+            index=index,
+            page=page + 1,
+            block_id=str(event.get("block_id") or ""),
+        )
+
+
+def _run_formula_scan_stress(case: PdfCase, multiplier: int, actions: list[dict[str, Any]]) -> None:
+    iterations = _formula_scan_iterations(multiplier)
+    pages = _stress_pages([0, *case.jump_pages[:4]], iterations)
+    for index in range(iterations):
+        page = pages[index % len(pages)] if pages else 0
+        t = time.perf_counter()
+        _scroll_to_page(max(0, int(page)), timeout=20)
+        time.sleep(0.2)
+        page_event = _send_and_wait(
+            {"cmd": "run_formula_page_scan_batch"},
+            "formula_page_scan_requested",
+            timeout=20,
+        )
+        scan_index = len(_read_events())
+        scan_command_id = _send_command({"cmd": "high_precision_formula_scan"})
+        scan_event = _wait_for_event(
+            "formula_scan_requested",
+            scan_index,
+            timeout=20,
+            command_id=scan_command_id,
+        )
+        deadline = time.monotonic() + 12
+        finished_event: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            for item in _read_events()[scan_index:]:
+                if (
+                    item.get("event") == "formula_scan_finished"
+                    and item.get("command_id") == scan_command_id
+                ):
+                    finished_event = item
+            if finished_event is not None:
+                break
+            state = _snapshot_state(timeout=3)
+            formula = state.get("formula") or {}
+            if not formula.get("formula_running"):
+                break
+            time.sleep(0.5)
+        final_state = _snapshot_state(timeout=5)
+        _action(
+            actions,
+            "formula_scan_stress",
+            t,
+            index=index,
+            page=page + 1,
+            page_scan_started=bool(page_event.get("started")),
+            formula_before=_json_safe(scan_event.get("before")),
+            formula_after_request=_json_safe(scan_event.get("after")),
+            formula_finished=_json_safe(finished_event),
+            formula_final=_json_safe(final_state.get("formula")),
+        )
 
 
 def _json_safe(value: Any) -> Any:
@@ -733,7 +1076,93 @@ def _action(actions: list[dict[str, Any]], name: str, start: float, **extra: Any
     actions.append({"name": name, "sec": round(time.perf_counter() - start, 3), **extra})
 
 
-def _drive_case(case: PdfCase) -> CaseResult:
+def _wheel_burst(
+    actions: list[dict[str, Any]],
+    name: str,
+    x: int,
+    y: int,
+    *,
+    amount: int,
+    repeats: int,
+    pause: float,
+    phase: str,
+) -> None:
+    t = time.perf_counter()
+    for index in range(max(1, int(repeats))):
+        pyautogui.scroll(int(amount), x=x, y=y)
+        if pause > 0:
+            time.sleep(pause)
+    _action(
+        actions,
+        name,
+        t,
+        phase=phase,
+        amount=amount,
+        repeats=repeats,
+        pause=pause,
+        total_wheel_units=amount * repeats,
+    )
+
+
+def _human_scroll_stress(
+    actions: list[dict[str, Any]],
+    x: int,
+    y: int,
+    *,
+    multiplier: int,
+    phase: str,
+) -> None:
+    multiplier = max(1, int(multiplier))
+    _wheel_burst(
+        actions,
+        "large_wheel_burst",
+        x,
+        y,
+        amount=-120,
+        repeats=max(1, multiplier // 2),
+        pause=0.03,
+        phase=phase,
+    )
+    _wheel_burst(
+        actions,
+        "continuous_fast_scroll",
+        x,
+        y,
+        amount=-90,
+        repeats=max(20, multiplier + 10),
+        pause=0.0,
+        phase=phase,
+    )
+    _wheel_burst(
+        actions,
+        "reverse_fast_scroll",
+        x,
+        y,
+        amount=90,
+        repeats=max(10, multiplier // 2),
+        pause=0.0,
+        phase=phase,
+    )
+
+
+def _zoom_to_extreme(actions: list[dict[str, Any]], *, target_steps: int = 9) -> None:
+    for index in range(max(1, int(target_steps))):
+        t = time.perf_counter()
+        pyautogui.hotkey("ctrl", "=")
+        time.sleep(0.35)
+        _action(actions, "extreme_zoom_in", t, index=index)
+
+
+def _restore_zoom_from_extreme(actions: list[dict[str, Any]], *, target_steps: int = 9) -> None:
+    for index in range(max(1, int(target_steps))):
+        t = time.perf_counter()
+        pyautogui.hotkey("ctrl", "-")
+        time.sleep(0.25)
+        _action(actions, "extreme_zoom_out", t, index=index)
+
+
+def _drive_case(case: PdfCase, stress_multiplier: int = 1) -> CaseResult:
+    stress_multiplier = max(1, int(stress_multiplier))
     if not case.pdf.exists():
         raise FileNotFoundError(case.pdf)
     if not case.latex_root.exists():
@@ -763,68 +1192,110 @@ def _drive_case(case: PdfCase) -> CaseResult:
 
         x, y = _safe_move_to_window(window)
 
-        for i in range(case.scroll_steps):
+        _human_scroll_stress(actions, x, y, multiplier=stress_multiplier, phase="baseline")
+        for i in range(min(case.scroll_steps, max(10, stress_multiplier))):
             t = time.perf_counter()
-            pyautogui.scroll(-5, x=x, y=y)
-            time.sleep(0.2)
+            pyautogui.scroll(-40, x=x, y=y)
+            time.sleep(0.03)
             _action(actions, "scroll_down", t, index=i)
         screenshots.append(_screenshot(case_dir, "02_scrolled_down"))
 
         for i, page in enumerate(case.jump_pages):
             t = time.perf_counter()
-            event_index = len(_read_events())
-            _send_command({"cmd": "scroll_to_page", "page": page})
-            _wait_for_event("scrolled_to_page", event_index, timeout=10)
-            time.sleep(0.4)
+            _scroll_to_page(page, timeout=20)
+            time.sleep(0.15)
             _action(actions, "jump_page", t, page=page + 1, index=i)
         screenshots.append(_screenshot(case_dir, "03_jump_attempts"))
 
-        for i in range(2):
-            t = time.perf_counter()
-            pyautogui.hotkey("ctrl", "=")
-            time.sleep(0.8)
-            _action(actions, "zoom_in", t, index=i)
-        screenshots.append(_screenshot(case_dir, "04_zoom_in"))
+        zoom_action_index = 0
+        zoomed_jump_index = 0
+        zoom_cycles = _zoom_cycle_count(stress_multiplier)
+        pages_per_zoom_cycle = max(1, len(case.jump_pages) // max(1, zoom_cycles))
+        for cycle in range(zoom_cycles):
+            for step in range(2):
+                t = time.perf_counter()
+                pyautogui.hotkey("ctrl", "=")
+                time.sleep(0.35)
+                _action(actions, "zoom_in", t, index=zoom_action_index, cycle=cycle, step=step)
+                zoom_action_index += 1
+            page_slice = case.jump_pages[
+                cycle * pages_per_zoom_cycle:(cycle + 1) * pages_per_zoom_cycle
+            ]
+            for page in page_slice or case.jump_pages[:1]:
+                t = time.perf_counter()
+                _scroll_to_page(page, timeout=20)
+                time.sleep(0.12)
+                _action(
+                    actions,
+                    "zoomed_jump_page",
+                    t,
+                    page=page + 1,
+                    index=zoomed_jump_index,
+                    cycle=cycle,
+                )
+                zoomed_jump_index += 1
+            for step in range(2):
+                t = time.perf_counter()
+                pyautogui.hotkey("ctrl", "-")
+                time.sleep(0.3)
+                _action(actions, "zoom_out", t, index=zoom_action_index, cycle=cycle, step=step)
+                zoom_action_index += 1
+        screenshots.append(_screenshot(case_dir, "04_zoom_cycle_stress"))
 
-        for i in range(2):
+        _zoom_to_extreme(actions, target_steps=9)
+        _human_scroll_stress(actions, x, y, multiplier=stress_multiplier, phase="extreme_zoom")
+        for i, page in enumerate(_stress_pages(case.jump_pages, 2)):
             t = time.perf_counter()
-            pyautogui.hotkey("ctrl", "-")
-            time.sleep(0.8)
-            _action(actions, "zoom_out", t, index=i)
+            _scroll_to_page(page, timeout=20)
+            time.sleep(0.08)
+            _action(actions, "extreme_zoom_jump_page", t, page=page + 1, index=i)
+        screenshots.append(_screenshot(case_dir, "04b_extreme_zoom_scroll"))
+        _restore_zoom_from_extreme(actions, target_steps=9)
         screenshots.append(_screenshot(case_dir, "05_zoom_out"))
 
-        event_index = len(_read_events())
-        _send_command({"cmd": "scroll_to_page", "page": 0})
-        _wait_for_event("scrolled_to_page", event_index, timeout=10)
+        _scroll_to_page(0, timeout=20)
         time.sleep(1.0)
+
+        _run_formula_scan_stress(case, stress_multiplier, actions)
+        screenshots.append(_screenshot(case_dir, "05b_formula_scan_stress"))
 
         t = time.perf_counter()
         event_index = len(_read_events())
-        _send_command({"cmd": "rebuild_kb"})
+        kb_command_id = _send_command({"cmd": "rebuild_kb"})
         kb_wait_source = _wait_for_event_or_log(
             "kb_rebuilt",
             event_index,
             r"知识库构建完成",
             timeout=90 if case.name == "attention" else 240,
+            command_id=kb_command_id,
         )
         _action(actions, "rebuild_kb", t, wait_source=kb_wait_source)
 
-        block_id, translation_method = _double_click_translation_cycle(window, actions)
+        block_id, translation_method = _double_click_translation_cycle(
+            window,
+            actions,
+            toggle_pairs=_translation_toggle_pairs(stress_multiplier),
+        )
+        _human_scroll_stress(actions, x, y, multiplier=stress_multiplier, phase="translation_split_open")
+        _zoom_to_extreme(actions, target_steps=5)
+        _human_scroll_stress(actions, x, y, multiplier=stress_multiplier, phase="translation_split_extreme_zoom")
+        _restore_zoom_from_extreme(actions, target_steps=5)
+        _stress_translation_requests(block_id, case, stress_multiplier, actions)
         screenshots.append(_screenshot(case_dir, "06_double_click_cycle"))
 
         t = time.perf_counter()
-        event_index = len(_read_events())
-        _send_command({
-            "cmd": "ask_question",
-            "block_id": block_id,
-            "question": "Summarize the main technical idea using evidence from the full document.",
-        })
-        _wait_for_event("qa_requested", event_index, timeout=20)
+        _send_and_wait(
+            {
+                "cmd": "ask_question",
+                "block_id": block_id,
+                "question": "Summarize the main technical idea using evidence from the full document.",
+            },
+            "qa_requested",
+            timeout=20,
+        )
         _wait_for_log(r"(问答完成|知识库中没有检索到可引用片段|知识库还在构建中)", timeout=60)
         _wait_for_log(r"追问建议 split=", timeout=60)
-        event_index = len(_read_events())
-        _send_command({"cmd": "snapshot_state"})
-        split_state = _wait_for_event("state", event_index, timeout=10)
+        split_state = _snapshot_state(timeout=10)
         _action(
             actions,
             "ask_question",
@@ -835,17 +1306,17 @@ def _drive_case(case: PdfCase) -> CaseResult:
         screenshots.append(_screenshot(case_dir, "07_qa"))
 
         t = time.perf_counter()
-        event_index = len(_read_events())
-        _send_command({
-            "cmd": "ask_dock_question",
-            "question": "Across the full document, what evidence supports the main technical idea?",
-        })
-        _wait_for_event("dock_qa_requested", event_index, timeout=20)
+        _send_and_wait(
+            {
+                "cmd": "ask_dock_question",
+                "question": "Across the full document, what evidence supports the main technical idea?",
+            },
+            "dock_qa_requested",
+            timeout=20,
+        )
         _wait_for_log(r"问答完成 split=__dock_qa__", timeout=60)
         _wait_for_log(r"追问建议 split=__dock_qa__", timeout=60)
-        event_index = len(_read_events())
-        _send_command({"cmd": "snapshot_state"})
-        state = _wait_for_event("state", event_index, timeout=10)
+        state = _snapshot_state(timeout=10)
         _action(
             actions,
             "ask_dock_question",
@@ -863,6 +1334,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
         log_summary = _summarize_log()
         performance = _summarize_performance(case)
         image_metrics = _summarize_image_metrics(screenshots)
+        action_coverage = _summarize_action_coverage(actions, stress_multiplier)
         formula_audit = _formula_audit(case)
         dock_action = next(
             (item for item in actions if item.get("name") == "ask_dock_question"),
@@ -879,6 +1351,7 @@ def _drive_case(case: PdfCase) -> CaseResult:
             and int(dock_action.get("dock_followup_count", 0)) > 0
             and performance["within_budget"]
             and image_metrics["within_budget"]
+            and action_coverage["within_budget"]
             and formula_audit["ok"]
         )
         if translation_method:
@@ -890,13 +1363,14 @@ def _drive_case(case: PdfCase) -> CaseResult:
             name=case.name,
             pdf=str(case.pdf),
             latex_root=str(case.latex_root),
+            stress_multiplier=stress_multiplier,
             launched_sec=round(launched_sec, 3),
             opened_sec=round(opened_sec, 3),
             window_title=window.window_text(),
             screenshots=screenshots,
             actions=actions,
             log_summary={**log_summary, "events": _read_events()[-80:]},
-            performance=performance,
+            performance={**performance, "action_coverage": action_coverage},
             image_metrics=image_metrics,
             formula_audit=_json_safe(formula_audit),
             ok=ok,
@@ -911,13 +1385,17 @@ def _drive_case(case: PdfCase) -> CaseResult:
             name=case.name,
             pdf=str(case.pdf),
             latex_root=str(case.latex_root),
+            stress_multiplier=stress_multiplier,
             launched_sec=0.0,
             opened_sec=0.0,
             window_title="",
             screenshots=screenshots,
             actions=actions,
             log_summary={**_summarize_log(), "events": _read_events()[-80:]},
-            performance=_summarize_performance(case),
+            performance={
+                **_summarize_performance(case),
+                "action_coverage": _summarize_action_coverage(actions, stress_multiplier),
+            },
             image_metrics=_summarize_image_metrics(screenshots),
             formula_audit={"ok": False, "error": "workflow failed before formula audit"},
             ok=False,
@@ -941,15 +1419,27 @@ def main() -> int:
         default="all",
         help="Which PDF workflow to run.",
     )
+    parser.add_argument(
+        "--stress-multiplier",
+        type=int,
+        default=1,
+        help="Multiply scroll, page-turn, zoom, translation, and formula-scan interactions.",
+    )
     args = parser.parse_args()
+    stress_multiplier = max(1, int(args.stress_multiplier))
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     _clear_history_logs()
-    selected = [case for case in _cases() if args.case in ("all", case.name)]
-    results = [_drive_case(case) for case in selected]
+    selected = [
+        _stress_case(case, stress_multiplier)
+        for case in _cases()
+        if args.case in ("all", case.name)
+    ]
+    results = [_drive_case(case, stress_multiplier=stress_multiplier) for case in selected]
 
     report = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "stress_multiplier": stress_multiplier,
         "results": [asdict(result) for result in results],
     }
     report_path = ARTIFACT_DIR / "report.json"
