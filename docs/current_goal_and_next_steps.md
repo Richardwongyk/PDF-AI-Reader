@@ -189,8 +189,8 @@
 
 要做：
 
-- 已建立 accepted/rejected audit 表、store acceptance API 和命令行入口；仍需产品级 UI。
-- accepted 变化已能触发 r5 增量 upsert；仍需同步 GraphRAG accepted artifact。
+- 已建立 accepted/rejected audit 表、store acceptance API、命令行入口、基础 UI 和手工 revision 输入；仍需证据预览、PDF 跳转和批量审核体验。
+- accepted 变化已能触发 r5 增量 upsert，并同步 GraphRAG accepted artifact；仍需强化 r4/r5 语义路径证据。
 - 对 accepted precision 做单独统计，和候选 recall 分开报告。
 - E2E 覆盖二次打开跳过、缩放、双击翻译、隐藏/再显示、问答证据、日志审计。
 
@@ -250,7 +250,7 @@
 - r2：本地高精度多工具复核，独立 worker，只写候选。
 - r3：DeepSeek 等分析模型语义复核，写候选 JSON，不覆盖正文。
 - r4：公式/章节/定理/引用/概念关系异步写 GraphRAG。
-- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，并同步 accepted 公式 GraphRAG artifact。已新增基础公式候选审核对话框；仍需更完整的 revision 体验和更高质量的 r4 语义图谱。
+- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，并同步 accepted 公式 GraphRAG artifact。已新增基础公式候选审核对话框和手工 revision 输入；仍需证据预览、PDF bbox 跳转和更高质量的 r4 语义图谱。
 
 最新实现状态：
 

@@ -157,7 +157,7 @@ PDF 导入
 - `result_id`
 - `candidate_id`
 - `doc_hash`
-- `stage`: `pdf_structure` / `local_fast` / `local_precise` / `cloud_semantic`
+- `stage`: `pdf_structure` / `local_fast` / `local_precise` / `cloud_semantic` / `manual_revision`
 - `model`
 - `model_version`
 - `preprocess_version`
@@ -204,6 +204,9 @@ PDF 导入
 - 接受 fusion record 时，若 best result 已在 `formula_recognition_results` 中存在，直接接受该
   result；否则从 fusion payload 生成 `manual_fusion_acceptance` synthetic result，再进入同一
   acceptance 流程。
+- 手工 revision 通过 `revise` / `revise-fusion` 写入 `stage=manual_revision`、
+  `model=human_review` 的候选，再进入同一 acceptance/r5 流程；它只保存审核者输入，
+  不能变成自动硬编码修正规则。
 - r5 payload 必须带 `acceptance_decision_id`、`acceptance_source`、`best_result_id`、
   `accepted_latex`、page/bbox 和稳定 input hash。当前 blocks 列表里没有对应候选块时，
   r5 service 可从 payload 恢复一个公式块并增量 upsert。
@@ -212,8 +215,10 @@ PDF 导入
   - `ready` 列出 `ready_for_manual_accept` fusion records。
   - `accept` 接受单个 recognition result。
   - `reject` 拒绝单个 recognition result。
+  - `revise` 用审核者提供的 LaTeX 修订单个 recognition result，并接受该 revision。
   - `accept-fusion` 接受单个 fusion record，默认只允许 `ready_for_manual_accept` /
     `auto_accept_allowed`，强制覆盖必须显式 `--allow-not-ready` 并留下 reason。
+  - `revise-fusion` 用审核者提供的 LaTeX 修订单个 fusion record，并接受该 revision。
   - `decisions` 列出 audit events。
 
 ### 任务队列

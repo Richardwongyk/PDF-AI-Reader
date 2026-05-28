@@ -12,9 +12,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTabWidget,
+    QLineEdit,
+    QTextEdit,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -47,10 +48,14 @@ class FormulaAcceptanceDialog(QDialog):
         self._ready_table = _table(["candidate", "decision", "similarity", "fusion_id", "latex"])
         self._result_table = _table(["candidate", "stage", "score", "accepted", "result_id", "latex"])
         self._decision_table = _table(["time", "action", "candidate", "source", "reason", "result_id"])
-        self._tabs.addTab(self._ready_table, "待接受")
+        self._tabs.addTab(self._ready_table, "融合记录")
         self._tabs.addTab(self._result_table, "候选结果")
         self._tabs.addTab(self._decision_table, "审核记录")
         layout.addWidget(self._tabs, 1)
+
+        self._revision_latex = QLineEdit()
+        self._revision_latex.setPlaceholderText("修订 LaTeX")
+        layout.addWidget(self._revision_latex)
 
         self._reason = QTextEdit()
         self._reason.setPlaceholderText("审核原因")
@@ -61,12 +66,16 @@ class FormulaAcceptanceDialog(QDialog):
         self._refresh_button = QPushButton("刷新")
         self._accept_fusion_button = QPushButton("接受选中融合")
         self._accept_result_button = QPushButton("接受选中结果")
+        self._revise_fusion_button = QPushButton("修订融合")
+        self._revise_result_button = QPushButton("修订结果")
         self._reject_result_button = QPushButton("拒绝选中结果")
         self._close_button = QPushButton("关闭")
         buttons.addWidget(self._refresh_button)
         buttons.addStretch(1)
         buttons.addWidget(self._accept_fusion_button)
         buttons.addWidget(self._accept_result_button)
+        buttons.addWidget(self._revise_fusion_button)
+        buttons.addWidget(self._revise_result_button)
         buttons.addWidget(self._reject_result_button)
         buttons.addWidget(self._close_button)
         layout.addLayout(buttons)
@@ -74,19 +83,69 @@ class FormulaAcceptanceDialog(QDialog):
         self._refresh_button.clicked.connect(self.refresh)
         self._accept_fusion_button.clicked.connect(self._accept_selected_fusion)
         self._accept_result_button.clicked.connect(self._accept_selected_result)
+        self._revise_fusion_button.clicked.connect(self._revise_selected_fusion)
+        self._revise_result_button.clicked.connect(self._revise_selected_result)
         self._reject_result_button.clicked.connect(self._reject_selected_result)
         self._close_button.clicked.connect(self.accept)
         self.refresh()
 
+    def _revise_selected_fusion(self) -> None:
+        fusion_id = _selected_id(self._ready_table, 3)
+        if not fusion_id:
+            QMessageBox.information(self, "公式审核", "请先选择一条待修订融合记录。")
+            return
+        revised_latex = self._revision_latex.text().strip()
+        if not revised_latex:
+            QMessageBox.information(self, "公式审核", "请先输入修订 LaTeX。")
+            return
+        try:
+            self._service.revise_fusion(
+                self._doc_hash,
+                fusion_id=fusion_id,
+                revised_latex=revised_latex,
+                filepath=self._filepath,
+                source="manual_ui_revision_fusion",
+                reason=self._reason.toPlainText().strip(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "公式审核失败", str(exc))
+            return
+        self._revision_latex.clear()
+        self.refresh()
+
+    def _revise_selected_result(self) -> None:
+        result_id = _selected_id(self._result_table, 4)
+        if not result_id:
+            QMessageBox.information(self, "公式审核", "请先选择一条待修订候选结果。")
+            return
+        revised_latex = self._revision_latex.text().strip()
+        if not revised_latex:
+            QMessageBox.information(self, "公式审核", "请先输入修订 LaTeX。")
+            return
+        try:
+            self._service.revise_result(
+                self._doc_hash,
+                result_id=result_id,
+                revised_latex=revised_latex,
+                filepath=self._filepath,
+                source="manual_ui_revision",
+                reason=self._reason.toPlainText().strip(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "公式审核失败", str(exc))
+            return
+        self._revision_latex.clear()
+        self.refresh()
+
     def refresh(self) -> None:
-        ready = self._service.list_ready_fusion(self._doc_hash, limit=100)
+        ready = self._service.list_ready_fusion(self._doc_hash, decision="", limit=100)
         results = self._service.list_results(self._doc_hash, limit=200)
         decisions = self._service.list_decisions(self._doc_hash, limit=100)
         _fill_ready_table(self._ready_table, ready.get("fusion_records", []))
         _fill_result_table(self._result_table, results.get("results", []))
         _fill_decision_table(self._decision_table, decisions.get("decisions", []))
         self._status.setText(
-            f"待接受 {ready.get('count', 0)}，候选 {results.get('count', 0)}，审核记录 {decisions.get('count', 0)}"
+            f"融合 {ready.get('count', 0)}，候选 {results.get('count', 0)}，审核记录 {decisions.get('count', 0)}"
         )
 
     def _accept_selected_fusion(self) -> None:

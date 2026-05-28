@@ -57,6 +57,37 @@ def test_formula_acceptance_dialog_accepts_and_rejects_result(tmp_path) -> None:
     assert records[0].result_json["best_result_id"] == result_id
 
 
+def test_formula_acceptance_dialog_revises_result(tmp_path) -> None:
+    _app()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake-tool",
+        input_hash="image-input",
+        latex=r"\alpha+\beta",
+        score=0.81,
+        evidence={"page_num": 0, "bbox": list(block.bbox)},
+    )
+    service = FormulaAcceptanceReviewService(store)
+    dialog = FormulaAcceptanceDialog(service, "doc-1", "paper.pdf")
+
+    dialog._result_table.selectRow(0)
+    dialog._revision_latex.setText(r"\alpha+\gamma")
+    dialog._reason.setPlainText("manual correction")
+    dialog._revise_selected_result()
+
+    accepted = store.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert accepted[0].stage == "manual_revision"
+    assert accepted[0].latex == r"\alpha+\gamma"
+    decision = store.list_acceptance_decisions("doc-1", candidate_id=block.id)[0]
+    assert decision.payload["manual_revision"] is True
+    assert decision.payload["source_result_id"] == result_id
+    assert store.round_pending_count("doc-1", FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE) == 1
+
+
 def test_formula_acceptance_dialog_accepts_ready_fusion(tmp_path) -> None:
     _app()
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
@@ -95,3 +126,49 @@ def test_formula_acceptance_dialog_accepts_ready_fusion(tmp_path) -> None:
     assert store.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
     assert store.round_pending_count("doc-1", FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE) == 1
     assert store.list_acceptance_decisions("doc-1", candidate_id=block.id)[0].payload["fusion_id"] == fusion_id
+
+
+def test_formula_acceptance_dialog_revises_not_ready_fusion(tmp_path) -> None:
+    _app()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    fusion_id = store.put_fusion_record(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        fusion_version="fusion-v1",
+        input_hash="fusion-input",
+        best_result_id="",
+        ranked_result_ids=[],
+        coverage=0.7,
+        agreement_score=0.6,
+        source_similarity=0.5,
+        syntax_valid=False,
+        risk_flags=["needs_more_evidence"],
+        accepted_gate={"passed": False, "reasons": ["needs_more_evidence"]},
+        decision="needs_more_evidence",
+        result_json={
+            "best_latex": r"\theta+\phi",
+            "ranked_candidates": [
+                {
+                    "latex": r"\theta+\phi",
+                    "evidence": {"page_num": 0, "bbox": list(block.bbox)},
+                }
+            ],
+        },
+    )
+    service = FormulaAcceptanceReviewService(store)
+    dialog = FormulaAcceptanceDialog(service, "doc-1", str(Path("paper.pdf")))
+
+    assert dialog._ready_table.rowCount() == 1
+    dialog._ready_table.selectRow(0)
+    dialog._revision_latex.setText(r"\theta-\phi")
+    dialog._reason.setPlainText("manual fusion correction")
+    dialog._revise_selected_fusion()
+
+    accepted = store.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert accepted[0].stage == "manual_revision"
+    assert accepted[0].latex == r"\theta-\phi"
+    assert accepted[0].warnings == ("needs_more_evidence",)
+    decision = store.list_acceptance_decisions("doc-1", candidate_id=block.id)[0]
+    assert decision.payload["fusion_id"] == fusion_id
+    assert decision.payload["manual_revision"] is True

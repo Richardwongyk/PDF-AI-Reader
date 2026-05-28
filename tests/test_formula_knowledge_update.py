@@ -169,6 +169,93 @@ def test_acceptance_review_service_lists_accepts_and_rejects(tmp_path) -> None:
     assert [item["action"] for item in decisions["decisions"]] == ["reject", "accept"]
 
 
+def test_acceptance_review_service_revises_result_and_queues_r5(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake-tool",
+        input_hash="image-input",
+        latex=r"\alpha+\beta",
+        score=0.72,
+        evidence={"page_num": 0, "bbox": list(block.bbox)},
+    )
+    service = FormulaAcceptanceReviewService(store)
+
+    revised = service.revise_result(
+        "doc-1",
+        result_id=result_id,
+        revised_latex=r"\alpha+\gamma",
+        filepath="paper.pdf",
+        source="unit_revision",
+        reason="manual correction",
+    )
+
+    accepted = store.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert len(accepted) == 1
+    assert accepted[0].result_id == revised["revision_result_id"]
+    assert accepted[0].stage == "manual_revision"
+    assert accepted[0].latex == r"\alpha+\gamma"
+    decision = store.list_acceptance_decisions("doc-1", candidate_id=block.id)[0]
+    assert decision.payload["manual_revision"] is True
+    assert decision.payload["source_result_id"] == result_id
+    records = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+    )
+    assert len(records) == 1
+    assert records[0].result_json["accepted_latex"] == "$$\n\\alpha+\\gamma\n$$"
+
+
+def test_acceptance_review_service_revises_fusion_and_queues_r5(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    fusion_id = store.put_fusion_record(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        fusion_version="fusion-v1",
+        input_hash="fusion-input",
+        best_result_id="",
+        ranked_result_ids=[],
+        coverage=1.0,
+        agreement_score=0.8,
+        source_similarity=0.7,
+        syntax_valid=True,
+        risk_flags=["needs_revision"],
+        accepted_gate={"passed": False},
+        decision="needs_more_evidence",
+        result_json={
+            "best_latex": r"\theta+\phi",
+            "ranked_candidates": [
+                {
+                    "latex": r"\theta+\phi",
+                    "evidence": {"page_num": 0, "bbox": list(block.bbox)},
+                }
+            ],
+        },
+    )
+    service = FormulaAcceptanceReviewService(store)
+
+    revised = service.revise_fusion(
+        "doc-1",
+        fusion_id=fusion_id,
+        revised_latex=r"\theta-\phi",
+        filepath="paper.pdf",
+        source="unit_revision_fusion",
+        reason="manual correction",
+    )
+
+    accepted = store.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert accepted[0].result_id == revised["revision_result_id"]
+    assert accepted[0].latex == r"\theta-\phi"
+    assert accepted[0].warnings == ("needs_revision",)
+    decision = store.list_acceptance_decisions("doc-1", candidate_id=block.id)[0]
+    assert decision.payload["fusion_id"] == fusion_id
+    assert decision.payload["manual_revision"] is True
+
+
 def test_acceptance_r5_update_upserts_manual_decision_metadata(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula()
@@ -401,6 +488,52 @@ def test_formula_acceptance_review_cli_lists_and_accepts(tmp_path, capsys) -> No
     assert check.round_pending_count("doc-1", FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE) == 1
 
 
+def test_formula_acceptance_review_cli_revises_result(tmp_path, capsys) -> None:
+    db_path = tmp_path / "formula_jobs.db"
+    store = FormulaIndexStore(str(db_path))
+    block = _formula()
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake-tool",
+        input_hash="image-input",
+        latex=r"\alpha+\beta",
+        evidence={"page_num": 0, "bbox": list(block.bbox)},
+    )
+    store.close()
+
+    rc = formula_acceptance_review.main(
+        [
+            "--db",
+            str(db_path),
+            "--doc-hash",
+            "doc-1",
+            "revise",
+            "--result-id",
+            result_id,
+            "--latex",
+            r"\alpha+\gamma",
+            "--filepath",
+            "paper.pdf",
+            "--reason",
+            "manual correction",
+        ]
+    )
+
+    assert rc == 0
+    revised = json.loads(capsys.readouterr().out)
+    check = FormulaIndexStore(str(db_path))
+    accepted = check.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert accepted[0].result_id == revised["revision_result_id"]
+    assert accepted[0].stage == "manual_revision"
+    assert accepted[0].latex == r"\alpha+\gamma"
+    decision = check.list_acceptance_decisions("doc-1", candidate_id=block.id)[0]
+    assert decision.payload["manual_revision"] is True
+    assert decision.payload["source_result_id"] == result_id
+    assert check.round_pending_count("doc-1", FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE) == 1
+
+
 def test_accept_fusion_record_creates_audited_result_and_queues_r5(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula()
@@ -538,6 +671,65 @@ def test_formula_acceptance_review_cli_ready_and_accept_fusion(tmp_path, capsys)
 
     check = FormulaIndexStore(str(db_path))
     assert check.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert check.round_pending_count("doc-1", FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE) == 1
+
+
+def test_formula_acceptance_review_cli_revises_fusion(tmp_path, capsys) -> None:
+    db_path = tmp_path / "formula_jobs.db"
+    store = FormulaIndexStore(str(db_path))
+    block = _formula()
+    fusion_id = store.put_fusion_record(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        fusion_version="fusion-test-v1",
+        input_hash="fusion-input",
+        best_result_id="synthetic-best",
+        ranked_result_ids=["synthetic-best"],
+        source_similarity=0.41,
+        risk_flags=["needs_revision"],
+        decision="needs_more_evidence",
+        result_json={
+            "best_latex": r"\alpha+\beta",
+            "ranked_candidates": [
+                {
+                    "result_id": "synthetic-best",
+                    "latex": r"\alpha+\beta",
+                    "evidence": {"page_num": 0, "bbox": list(block.bbox)},
+                }
+            ],
+        },
+    )
+    store.close()
+
+    rc = formula_acceptance_review.main(
+        [
+            "--db",
+            str(db_path),
+            "--doc-hash",
+            "doc-1",
+            "revise-fusion",
+            "--fusion-id",
+            fusion_id,
+            "--latex",
+            r"\alpha-\beta",
+            "--filepath",
+            "paper.pdf",
+            "--reason",
+            "manual fusion correction",
+        ]
+    )
+
+    assert rc == 0
+    revised = json.loads(capsys.readouterr().out)
+    check = FormulaIndexStore(str(db_path))
+    accepted = check.list_recognition_results("doc-1", candidate_id=block.id, accepted=True)
+    assert accepted[0].result_id == revised["revision_result_id"]
+    assert accepted[0].stage == "manual_revision"
+    assert accepted[0].latex == r"\alpha-\beta"
+    assert accepted[0].warnings == ("needs_revision",)
+    decision = check.list_acceptance_decisions("doc-1", candidate_id=block.id)[0]
+    assert decision.payload["fusion_id"] == fusion_id
+    assert decision.payload["manual_revision"] is True
     assert check.round_pending_count("doc-1", FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE) == 1
 
 

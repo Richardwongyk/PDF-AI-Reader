@@ -76,6 +76,14 @@ def _build_parser() -> argparse.ArgumentParser:
     reject_parser.add_argument("--decider", default="", help="Person or process making the decision.")
     reject_parser.add_argument("--reason", default="", help="Short audit reason.")
 
+    revise_parser = subparsers.add_parser("revise", help="Accept a manual LaTeX revision for one result.")
+    revise_parser.add_argument("--result-id", required=True)
+    revise_parser.add_argument("--latex", required=True, help="Reviewer supplied LaTeX.")
+    revise_parser.add_argument("--filepath", default="", help="Source PDF path used for the r5 round record.")
+    revise_parser.add_argument("--source", default="manual_cli_revision", help="Decision source label.")
+    revise_parser.add_argument("--decider", default="", help="Person or process making the decision.")
+    revise_parser.add_argument("--reason", default="", help="Short audit reason.")
+
     accept_fusion_parser = subparsers.add_parser(
         "accept-fusion",
         help="Accept one persisted fusion record and queue r5 when filepath is known.",
@@ -90,6 +98,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow accepting fusion records whose decision is not ready_for_manual_accept.",
     )
+
+    revise_fusion_parser = subparsers.add_parser(
+        "revise-fusion",
+        help="Accept a manual LaTeX revision for one fusion record.",
+    )
+    revise_fusion_parser.add_argument("--fusion-id", required=True)
+    revise_fusion_parser.add_argument("--latex", required=True, help="Reviewer supplied LaTeX.")
+    revise_fusion_parser.add_argument("--filepath", default="", help="Source PDF path used for the r5 round record.")
+    revise_fusion_parser.add_argument("--source", default="manual_cli_revision_fusion", help="Decision source label.")
+    revise_fusion_parser.add_argument("--decider", default="", help="Person or process making the decision.")
+    revise_fusion_parser.add_argument("--reason", default="", help="Short audit reason.")
 
     decisions_parser = subparsers.add_parser("decisions", help="List acceptance audit events.")
     decisions_parser.add_argument("--candidate-id", default="", help="Optional candidate/block id.")
@@ -161,6 +180,36 @@ def main(argv: list[str] | None = None) -> int:
                     decider=args.decider,
                     reason=args.reason,
                     allow_not_ready=args.allow_not_ready,
+                ),
+                args.output,
+            )
+            return 0
+
+        if args.command == "revise":
+            _write_json(
+                service.revise_result(
+                    args.doc_hash,
+                    result_id=args.result_id,
+                    revised_latex=args.latex,
+                    filepath=args.filepath,
+                    source=args.source,
+                    decider=args.decider,
+                    reason=args.reason,
+                ),
+                args.output,
+            )
+            return 0
+
+        if args.command == "revise-fusion":
+            _write_json(
+                service.revise_fusion(
+                    args.doc_hash,
+                    fusion_id=args.fusion_id,
+                    revised_latex=args.latex,
+                    filepath=args.filepath,
+                    source=args.source,
+                    decider=args.decider,
+                    reason=args.reason,
                 ),
                 args.output,
             )

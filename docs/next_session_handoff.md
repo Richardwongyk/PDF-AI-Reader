@@ -165,6 +165,7 @@
 - 新增 `docs/formula_multitool_fusion_design.md`：明确下一步不是手写公式解析规则，而是统一 evidence/candidate/fusion schema、源码准确率复核、候选融合、accepted 门禁和 r5 增量写回。
 - `FormulaSemanticReviewService` 和 `FormulaSemanticReviewFlow` 已接入候选/fusion 证据：批量调用分析模型，写回 JSON 候选，不覆盖正文。
 - `FormulaKnowledgeUpdateService` 已接入 r5：只有 accepted 结果变化才按 input hash 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文；同一批 accepted 公式会同步写入 `GraphIndexStore` artifact，并在 r5 result JSON 记录 `graph_synced/graph_failed`。
+- `tools/formula_acceptance_review.py` 和基础公式审核对话框已支持 accept/reject、accept-fusion 以及审核者输入的 manual revision；revision 写成 `manual_revision/human_review` 候选后再走同一 audit/r5 流程，不是自动修正规则。
 - UI 空闲时可小批量调度公式索引/语义复核，避免导入热路径同步等待。
 - 日志改为轮转并增加清理工具，避免日志无限膨胀。
 

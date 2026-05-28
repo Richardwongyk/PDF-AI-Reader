@@ -270,10 +270,13 @@ r5：
 ```powershell
 python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> ready
 python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> accept-fusion --fusion-id <id> --filepath <pdf> --reason "source/audit match"
+python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> revise --result-id <id> --latex "\alpha+\beta" --filepath <pdf> --reason "human source audit"
+python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> revise-fusion --fusion-id <id> --latex "\alpha+\beta" --filepath <pdf> --reason "human source audit"
 python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-hash <hash> decisions
 ```
 
-`--allow-not-ready` 只用于显式人工覆盖，必须留下 reason。
+`revise` / `revise-fusion` 只接收审核者提供的 LaTeX，写入 `manual_revision` 候选并走同一
+accepted audit/r5 流程；它不是自动修公式规则。`--allow-not-ready` 只用于显式人工覆盖，必须留下 reason。
 
 ## accepted 门禁
 
@@ -344,13 +347,13 @@ python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-
    - 知识库未就绪时保持 queued。
    - 2026-05-28 已新增 `formula_acceptance_decisions` audit 表、store acceptance API、
      `tools/formula_acceptance_review.py` 命令行审核入口和 fusion -> synthetic accepted result
-     路径；r5 accepted 变化会同步 GraphRAG artifact，并记录 graph sync 状态；已有基础审核对话框，仍需完整 revision 体验。
+     路径；r5 accepted 变化会同步 GraphRAG artifact，并记录 graph sync 状态；已有基础审核对话框和手工 revision 输入。
 5. 行内公式已纳入候选与质量门禁：
    - `inline_spans:document_chunker` 参与 accuracy/fusion。
    - 纯脚注/装饰符号不再包成公式。
    - 纯 inline 候选默认不进入 OCR/MFR，只进入审计和 r3 复核。
 6. 下一步仍必须完成：
-   - 完善 accepted/rejected/revision 产品级体验，尤其是手工 revision 输入、证据预览和跳转。
+   - 完善 accepted/rejected/revision 产品级体验，尤其是证据预览、PDF bbox 跳转和批量审核。
    - 强化 r4/r5 GraphRAG 语义级抽取与路径证据。
    - 用 Attention/Napkin 大样本跑质量门禁和性能门禁。
    - 优化 r2 常驻 worker/批处理，降低多工具冷启动。
