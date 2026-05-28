@@ -2,8 +2,10 @@ import json
 
 from tools import formula_acceptance_review
 
+from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.app.formula_knowledge_update import FormulaKnowledgeUpdateService
+from src.app.graph_index_store import GraphIndexStore
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -17,6 +19,13 @@ class _KnowledgeEngine:
 
     def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
         self.upserts.append((doc_hash, [block.model_copy(deep=True) for block in blocks]))
+
+
+class _FailingExtractor:
+    name = "failing_extractor"
+
+    def extract(self, doc_hash: str, block: DocumentBlock):  # noqa: ANN001
+        raise RuntimeError("graph unavailable")
 
 
 def _formula(block_id: str = "p0_b1", content: str = r"$$old$$") -> DocumentBlock:
@@ -121,6 +130,45 @@ def test_acceptance_decision_switches_accepted_result_and_queues_r5(tmp_path) ->
     assert first_decision.accepted_latex == "$$\n\\alpha+\\beta\n$$"
 
 
+def test_acceptance_review_service_lists_accepts_and_rejects(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    result_id = store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id=block.id,
+        stage="local_precise",
+        model="fake-tool",
+        input_hash="image-input",
+        latex=r"\alpha+\beta",
+        score=0.99,
+        evidence={"page_num": 0, "bbox": list(block.bbox)},
+    )
+    service = FormulaAcceptanceReviewService(store)
+
+    listed = service.list_results("doc-1", limit=10)
+    accepted = service.accept_result(
+        "doc-1",
+        result_id=result_id,
+        filepath="paper.pdf",
+        source="unit_test",
+        reason="source aligned",
+    )
+    rejected = service.reject_result(
+        "doc-1",
+        result_id=result_id,
+        source="unit_test",
+        reason="manual rollback",
+    )
+    decisions = service.list_decisions("doc-1", candidate_id=block.id)
+
+    assert listed["count"] == 1
+    assert listed["results"][0]["result_id"] == result_id
+    assert accepted["decision"]["action"] == "accept"
+    assert rejected["decision"]["action"] == "reject"
+    assert decisions["count"] == 2
+    assert [item["action"] for item in decisions["decisions"]] == ["reject", "accept"]
+
+
 def test_acceptance_r5_update_upserts_manual_decision_metadata(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula()
@@ -153,6 +201,83 @@ def test_acceptance_r5_update_upserts_manual_decision_metadata(tmp_path) -> None
     assert metadata["formula_r5_accepted"] is True
     assert metadata["formula_r5_acceptance_decision_id"] == decision.decision_id
     assert metadata["formula_r5_acceptance_source"] == "manual_cli"
+
+
+def test_acceptance_r5_update_syncs_graph_artifact(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    graph_store = GraphIndexStore(str(tmp_path / "graph_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+        "block",
+        [block],
+        result_json_by_target={
+            block.id: {
+                "input_hash": "manual-accept-input",
+                "accepted_latex": r"$$\alpha+\beta$$",
+                "acceptance_decision_id": "decision-1",
+                "acceptance_source": "manual_cli",
+            }
+        },
+    )
+    engine = _KnowledgeEngine(exists=True)
+    service = FormulaKnowledgeUpdateService(store, engine, graph_store=graph_store)
+
+    result = service.run_batch("doc-1", [block], limit=1)
+
+    assert result.done == 1
+    assert result.graph_synced == 1
+    artifact = graph_store.artifacts("doc-1", block.id)[0]
+    assert artifact["extractor"] == "structural_v1"
+    assert any(node.get("type") == "formula" for node in artifact["nodes"])
+    assert not any(node.get("type") == "formula_candidate" for node in artifact["nodes"])
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+    )[0]
+    assert record.result_json["graph_synced"] is True
+    assert record.result_json["graph_artifact_key"]["block_id"] == block.id
+
+
+def test_acceptance_r5_update_keeps_kb_upsert_when_graph_sync_fails(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    graph_store = GraphIndexStore(str(tmp_path / "graph_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+        "block",
+        [block],
+        result_json_by_target={
+            block.id: {
+                "input_hash": "manual-accept-input",
+                "accepted_latex": r"$$\alpha+\beta$$",
+            }
+        },
+    )
+    engine = _KnowledgeEngine(exists=True)
+    service = FormulaKnowledgeUpdateService(
+        store,
+        engine,
+        graph_store=graph_store,
+        graph_extractor=_FailingExtractor(),
+    )
+
+    result = service.run_batch("doc-1", [block], limit=1)
+
+    assert result.done == 1
+    assert result.graph_failed == 1
+    assert engine.upserts[0][1][0].content == r"$$\alpha+\beta$$"
+    record = store.list_round_records(
+        "doc-1",
+        scan_round=FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+    )[0]
+    assert record.status == "done"
+    assert record.result_json["graph_failed"] is True
+    assert "graph unavailable" in record.result_json["graph_error"]
 
 
 def test_formula_knowledge_update_rebuilds_missing_block_from_acceptance_payload(tmp_path) -> None:

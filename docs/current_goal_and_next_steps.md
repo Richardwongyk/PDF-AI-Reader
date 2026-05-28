@@ -250,7 +250,7 @@
 - r2：本地高精度多工具复核，独立 worker，只写候选。
 - r3：DeepSeek 等分析模型语义复核，写候选 JSON，不覆盖正文。
 - r4：公式/章节/定理/引用/概念关系异步写 GraphRAG。
-- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued。仍缺产品级 accepted/rejected/revision UI 和 GraphRAG 同步更新。
+- r5：`FormulaKnowledgeUpdateService` 已能消费 `r5_knowledge_incremental_update` 任务；只有 accepted 结果变化才按 input hash 把 `accepted_latex` 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，并同步 accepted 公式 GraphRAG artifact。已新增基础公式候选审核对话框；仍需更完整的 revision 体验和更高质量的 r4 语义图谱。
 
 最新实现状态：
 

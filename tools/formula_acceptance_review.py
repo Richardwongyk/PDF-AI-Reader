@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 from src.app.formula_index_store import FormulaIndexStore
-
-
-def _record_json(record: Any) -> dict[str, Any]:
-    return asdict(record)
 
 
 def _write_json(payload: dict[str, Any], output: str = "") -> None:
@@ -106,6 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     store = FormulaIndexStore(str(args.db))
+    service = FormulaAcceptanceReviewService(store)
     try:
         if args.command == "list":
             accepted: bool | None = None
@@ -115,91 +112,82 @@ def main(argv: list[str] | None = None) -> int:
                 accepted = True
             elif args.unaccepted_only:
                 accepted = False
-            records = store.list_recognition_results(
-                args.doc_hash,
-                candidate_id=args.candidate_id or None,
-                stage=args.stage or None,
-                accepted=accepted,
-                limit=args.limit,
-            )
             _write_json(
-                {
-                    "doc_hash": args.doc_hash,
-                    "count": len(records),
-                    "results": [_record_json(record) for record in records],
-                },
+                service.list_results(
+                    args.doc_hash,
+                    candidate_id=args.candidate_id,
+                    stage=args.stage,
+                    accepted=accepted,
+                    limit=args.limit,
+                ),
                 args.output,
             )
             return 0
 
         if args.command == "ready":
-            records = store.list_fusion_records(
-                args.doc_hash,
-                candidate_id=args.candidate_id or None,
-                decision=args.decision or None,
-                limit=args.limit,
-            )
             _write_json(
-                {
-                    "doc_hash": args.doc_hash,
-                    "count": len(records),
-                    "fusion_records": [_record_json(record) for record in records],
-                },
+                service.list_ready_fusion(
+                    args.doc_hash,
+                    candidate_id=args.candidate_id,
+                    decision=args.decision,
+                    limit=args.limit,
+                ),
                 args.output,
             )
             return 0
 
         if args.command == "accept":
-            decision = store.accept_recognition_result(
-                doc_hash=args.doc_hash,
-                result_id=args.result_id,
-                filepath=args.filepath,
-                decision_source=args.source,
-                decider=args.decider,
-                reason=args.reason,
-                payload={"cli": "tools/formula_acceptance_review.py"},
+            _write_json(
+                service.accept_result(
+                    args.doc_hash,
+                    result_id=args.result_id,
+                    filepath=args.filepath,
+                    source=args.source,
+                    decider=args.decider,
+                    reason=args.reason,
+                    payload={"cli": "tools/formula_acceptance_review.py"},
+                ),
+                args.output,
             )
-            _write_json({"decision": _record_json(decision)}, args.output)
             return 0
 
         if args.command == "accept-fusion":
-            decision = store.accept_fusion_record(
-                doc_hash=args.doc_hash,
-                fusion_id=args.fusion_id,
-                filepath=args.filepath,
-                decision_source=args.source,
-                decider=args.decider,
-                reason=args.reason,
-                allow_not_ready=args.allow_not_ready,
+            _write_json(
+                service.accept_fusion(
+                    args.doc_hash,
+                    fusion_id=args.fusion_id,
+                    filepath=args.filepath,
+                    source=args.source,
+                    decider=args.decider,
+                    reason=args.reason,
+                    allow_not_ready=args.allow_not_ready,
+                ),
+                args.output,
             )
-            _write_json({"decision": _record_json(decision)}, args.output)
             return 0
 
         if args.command == "reject":
-            decision = store.reject_recognition_result(
-                doc_hash=args.doc_hash,
-                result_id=args.result_id,
-                decision_source=args.source,
-                decider=args.decider,
-                reason=args.reason,
-                payload={"cli": "tools/formula_acceptance_review.py"},
+            _write_json(
+                service.reject_result(
+                    args.doc_hash,
+                    result_id=args.result_id,
+                    source=args.source,
+                    decider=args.decider,
+                    reason=args.reason,
+                    payload={"cli": "tools/formula_acceptance_review.py"},
+                ),
+                args.output,
             )
-            _write_json({"decision": _record_json(decision)}, args.output)
             return 0
 
         if args.command == "decisions":
-            decisions = store.list_acceptance_decisions(
-                args.doc_hash,
-                candidate_id=args.candidate_id or None,
-                result_id=args.result_id or None,
-                limit=args.limit,
-            )
             _write_json(
-                {
-                    "doc_hash": args.doc_hash,
-                    "count": len(decisions),
-                    "decisions": [_record_json(decision) for decision in decisions],
-                },
+                service.list_decisions(
+                    args.doc_hash,
+                    candidate_id=args.candidate_id,
+                    result_id=args.result_id,
+                    limit=args.limit,
+                ),
                 args.output,
             )
             return 0

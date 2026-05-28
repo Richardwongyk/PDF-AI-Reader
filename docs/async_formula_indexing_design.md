@@ -99,8 +99,9 @@ PDF 导入
 - r3 done 结果会合并原始排队 payload，保留 `review_candidate`、`queued_input_hash`、`review_input_hash`、优先级和优先级原因，保证审计时能复原云端审了哪个候选、基于哪个 fusion input。
 - 行内公式候选额外携带 `inline_pdf_evidence`：原 PDF math-font span 的 text/font/size/bbox、候选 bbox、字体列表、字号范围和脚本字号证据。它用于 r3/工具复核和审计，不是默认 LaTeX 重建器，也不能绕过 accepted 门禁。
 - 真实 DeepSeek r3 单条 smoke 已跑通。2026-05-28 已补上 accepted/rejected audit 表、
-  命令行审核入口和 accepted 变化触发 r5 知识库 upsert 的闭环；后续仍需产品级 UI、
-  GraphRAG accepted 同步和更高质量的 r4 语义图谱。
+  命令行审核入口和 accepted 变化触发 r5 知识库 upsert 的闭环；r5 已同步 accepted
+  公式 GraphRAG artifact 并记录 graph sync 状态。后续仍需产品级 UI 和更高质量的
+  r4 语义图谱。
 
 ### 文档块
 

@@ -1216,6 +1216,51 @@ def test_formula_fusion_queues_r5_only_for_accepted_results(tmp_path) -> None:
     assert records[0].result_json["input_hash"] == row["fusion_input_hash"]
 
 
+def test_pipeline_r5_syncs_accepted_formula_graph_artifact(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+    from src.app.graph_index_store import GraphIndexStore
+
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    graph_store = GraphIndexStore(str(tmp_path / "graph_jobs.db"))
+    block = DocumentBlock(
+        id="accepted",
+        page_num=0,
+        block_type=BlockType.FORMULA,
+        content=r"$$old$$",
+        bbox=(0, 0, 10, 10),
+    )
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
+        "block",
+        [block],
+        result_json_by_target={
+            block.id: {
+                "input_hash": "accepted-input",
+                "accepted_latex": r"$$\alpha+\beta$$",
+                "acceptance_decision_id": "decision-1",
+            }
+        },
+    )
+
+    report = pipe._run_r5(
+        store,
+        graph_store,
+        "paper.pdf",
+        "doc-1",
+        [block],
+        limit=1,
+    )
+
+    assert report.status == "done"
+    assert report.details["graph_synced"] == 1
+    assert report.details["graph_failed"] == 0
+    artifact = graph_store.artifacts("doc-1", block.id)[0]
+    assert any(node.get("type") == "formula" for node in artifact["nodes"])
+    assert not any(node.get("type") == "formula_candidate" for node in artifact["nodes"])
+
+
 def test_formula_fusion_report_merges_same_bbox_candidates(tmp_path) -> None:
     from tools import formula_multiround_pipeline as pipe
     from src.app.formula_index_store import FormulaIndexStore

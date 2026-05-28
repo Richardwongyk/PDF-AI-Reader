@@ -283,7 +283,17 @@ def run_pipeline_case(
             drain=drain_r4,
         )
     )
-    rounds.append(_run_r5(formula_store, filepath, doc_hash, formula_blocks, limit=r5_limit, drain=drain_r5))
+    rounds.append(
+        _run_r5(
+            formula_store,
+            graph_store,
+            filepath,
+            doc_hash,
+            formula_blocks,
+            limit=r5_limit,
+            drain=drain_r5,
+        )
+    )
     recognition_results = _recognition_result_counts(formula_store, doc_hash)
     formula_accuracy = _formula_accuracy_report(
         case,
@@ -796,6 +806,7 @@ def _run_r4(
 
 def _run_r5(
     store: FormulaIndexStore,
+    graph_store: GraphIndexStore,
     filepath: str,
     doc_hash: str,
     formula_blocks: list[DocumentBlock],
@@ -806,9 +817,18 @@ def _run_r5(
     service = FormulaKnowledgeUpdateService(
         store,
         _PipelineKnowledgeStub(exists=True),
+        graph_store=graph_store,
         batch_size=max(1, limit),
     )
-    totals = {"done": 0, "failed": 0, "skipped": 0, "deferred": 0, "pending": service.pending_count(doc_hash)}
+    totals = {
+        "done": 0,
+        "failed": 0,
+        "skipped": 0,
+        "deferred": 0,
+        "pending": service.pending_count(doc_hash),
+        "graph_synced": 0,
+        "graph_failed": 0,
+    }
     batches = 0
     while True:
         result = service.run_batch(doc_hash, formula_blocks, limit=max(0, limit))
@@ -820,6 +840,8 @@ def _run_r5(
         totals["failed"] += result.failed
         totals["skipped"] += result.skipped
         totals["deferred"] += result.deferred
+        totals["graph_synced"] += result.graph_synced
+        totals["graph_failed"] += result.graph_failed
         totals["pending"] = result.pending
         if not drain or result.deferred or result.pending <= 0:
             break
@@ -834,7 +856,8 @@ def _run_r5(
             "batches": batches,
             "drained": drain and service.pending_count(doc_hash) == 0,
             "filepath": filepath,
-            "note": "Pipeline uses a synchronous stub; the application wires r5 to KnowledgeEngine.upsert_blocks.",
+            "graph_jobs": graph_store.counts(doc_hash),
+            "note": "Pipeline uses a synchronous KB stub; the application wires r5 to KnowledgeEngine.upsert_blocks.",
         },
     )
 

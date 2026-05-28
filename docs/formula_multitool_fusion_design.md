@@ -344,13 +344,13 @@ python tools/formula_acceptance_review.py --db data/formula_index_jobs.db --doc-
    - 知识库未就绪时保持 queued。
    - 2026-05-28 已新增 `formula_acceptance_decisions` audit 表、store acceptance API、
      `tools/formula_acceptance_review.py` 命令行审核入口和 fusion -> synthetic accepted result
-     路径；当前仍缺产品级审核 UI 和 GraphRAG accepted 同步更新。
+     路径；r5 accepted 变化会同步 GraphRAG artifact，并记录 graph sync 状态；已有基础审核对话框，仍需完整 revision 体验。
 5. 行内公式已纳入候选与质量门禁：
    - `inline_spans:document_chunker` 参与 accuracy/fusion。
    - 纯脚注/装饰符号不再包成公式。
    - 纯 inline 候选默认不进入 OCR/MFR，只进入审计和 r3 复核。
 6. 下一步仍必须完成：
-   - 建立 accepted/rejected/revision 产品级 UI。
-   - r5 accepted 变化后同步 GraphRAG artifact。
+   - 完善 accepted/rejected/revision 产品级体验，尤其是手工 revision 输入、证据预览和跳转。
+   - 强化 r4/r5 GraphRAG 语义级抽取与路径证据。
    - 用 Attention/Napkin 大样本跑质量门禁和性能门禁。
    - 优化 r2 常驻 worker/批处理，降低多工具冷启动。

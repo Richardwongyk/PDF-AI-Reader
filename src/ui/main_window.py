@@ -48,6 +48,7 @@ from src.core.knowledge_engine import KnowledgeEngine
 from src.core.glossary_manager import GlossaryManager
 from src.core.navigator import Navigator
 from src.core.service_container import ServiceContainer
+from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget
 from src.ui.theme import apply_theme
@@ -120,12 +121,13 @@ class MainWindow(QMainWindow):
             lambda: services.get("formula_semantic_review"),
             self,
         )
+        graph_flow = services.get("graph_index_flow")
+        graph_store = getattr(graph_flow, "_store", None)
         self._formula_knowledge_update_service = FormulaKnowledgeUpdateService(
             self._formula_index_flow.store,
             self._knowledge_engine,
+            graph_store,
         )
-        graph_flow = services.get("graph_index_flow")
-        graph_store = getattr(graph_flow, "_store", None)
         self._formula_knowledge_graph_service = FormulaKnowledgeGraphService(
             self._formula_index_flow.store,
             graph_store,
@@ -217,6 +219,10 @@ class MainWindow(QMainWindow):
         high_precision_formula_action.setObjectName("high_precision_formula_action")
         high_precision_formula_action.triggered.connect(self._on_high_precision_formula_scan)
         tools_menu.addAction(high_precision_formula_action)
+        formula_review_action = QAction("公式候选审核(&R)", self)
+        formula_review_action.setObjectName("formula_acceptance_review_action")
+        formula_review_action.triggered.connect(self._on_open_formula_acceptance_review)
+        tools_menu.addAction(formula_review_action)
         tools_menu.addSeparator()
         glossary_action = QAction("术语表管理器(&G)", self)
         glossary_action.triggered.connect(self._on_open_glossary_editor)
@@ -792,6 +798,20 @@ class MainWindow(QMainWindow):
             f"公式精扫已启动\n本批 {min(len(plan.blocks), plan.batch_budget)} / 待扫 {len(plan.blocks)}"
         )
 
+    def _on_open_formula_acceptance_review(self) -> None:
+        """Open the audited formula acceptance review dialog."""
+        if not self._viewer_document_loaded or not self._current_doc_hash:
+            QMessageBox.information(self, "公式审核", "请先打开一个 PDF 文件。")
+            return
+        from src.ui.formula_acceptance_dialog import FormulaAcceptanceDialog
+
+        filepath = getattr(self._doc_engine, "_filepath", "")
+        service = FormulaAcceptanceReviewService(self._formula_index_flow.store)
+        dlg = FormulaAcceptanceDialog(service, self._current_doc_hash, filepath, self)
+        dlg.exec()
+        if self._formula_knowledge_update_service.pending_count(self._current_doc_hash) > 0:
+            self._formula_idle_timer.start(1000)
+
     def _schedule_evidence_formula_scan(self, evidence: list[dict[str, Any]]) -> None:
         if not evidence or not self._current_doc_hash:
             return
@@ -940,10 +960,12 @@ class MainWindow(QMainWindow):
             return False
         if result.done or result.failed or result.skipped:
             self.logger.info(
-                "公式 r5 增量知识更新: done=%d failed=%d skipped=%d pending=%d",
+                "公式 r5 增量知识更新: done=%d failed=%d skipped=%d graph_synced=%d graph_failed=%d pending=%d",
                 result.done,
                 result.failed,
                 result.skipped,
+                result.graph_synced,
+                result.graph_failed,
                 result.pending,
             )
             return True

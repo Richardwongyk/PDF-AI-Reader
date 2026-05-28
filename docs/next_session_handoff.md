@@ -98,7 +98,7 @@
 | r2 | `r2_local_high_precision` | 本地高精度/多工具复核，处理低置信、复杂矩阵、对齐环境、用户显式精扫 | 用户触发或后台空闲 | round jobs、recognition results | 独立 worker；可暂停；结果先做候选 |
 | r3 | `r3_cloud_semantic_review` | DeepSeek 等分析模型基于上下文和候选公式做语义校对建议 | 所有已解析公式块可入队，按批消费 | `formula_round_jobs.result_json` | 不直接覆盖正文；必须保留 `suggested_latex/confidence/reason/risks/raw_response` |
 | r4 | `r4_knowledge_graph` | 将公式、章节、定理、概念、引用关系写入 GraphRAG artifact | 基础索引就绪后异步 | graph artifact、关系边、证据节点 | GraphRAG 不阻塞基础问答和阅读 |
-| r5 | `r5_knowledge_incremental_update` | 把高置信修正增量写回全文 RAG/FTS/向量库 | accepted 结果变化时 | knowledge index、block revision | 枚举已存在；增量 upsert 接线未完成，必须按 block/content hash 跳过未变内容 |
+| r5 | `r5_knowledge_incremental_update` | 把高置信修正增量写回全文 RAG/FTS/向量库，并同步 accepted 公式 GraphRAG artifact | accepted 结果变化时 | knowledge index、block revision、graph artifact | 只消费 accepted；低置信候选不能污染正文/RAG/GraphRAG |
 
 硬要求：
 
@@ -164,7 +164,7 @@
 - `tools/formula_multiround_pipeline.py` 已把 r0/r1/r2/r3/r4/r5 串到同一条可审计命令行流水线：每轮输出状态、耗时、任务统计、结果表统计；`--reuse-db` 可证明二次打开跳过已完成 r0/r2/fusion 输入；`--run-targeted-r2-after-fusion` 可在 fusion 后立即消费一批定向 r2；`--r2-sample-formulas` 是显式高精度精扫，不是默认 OCR。
 - 新增 `docs/formula_multitool_fusion_design.md`：明确下一步不是手写公式解析规则，而是统一 evidence/candidate/fusion schema、源码准确率复核、候选融合、accepted 门禁和 r5 增量写回。
 - `FormulaSemanticReviewService` 和 `FormulaSemanticReviewFlow` 已接入候选/fusion 证据：批量调用分析模型，写回 JSON 候选，不覆盖正文。
-- `FormulaKnowledgeUpdateService` 已接入 r5：只有 accepted 结果变化才按 input hash 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文。
+- `FormulaKnowledgeUpdateService` 已接入 r5：只有 accepted 结果变化才按 input hash 增量 upsert 到 `KnowledgeEngine`，知识库未就绪时保持 queued，不重建全文；同一批 accepted 公式会同步写入 `GraphIndexStore` artifact，并在 r5 result JSON 记录 `graph_synced/graph_failed`。
 - UI 空闲时可小批量调度公式索引/语义复核，避免导入热路径同步等待。
 - 日志改为轮转并增加清理工具，避免日志无限膨胀。
 

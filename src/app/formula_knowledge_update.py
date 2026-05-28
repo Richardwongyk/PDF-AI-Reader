@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
+from src.app.graph_index_flow import StructuralGraphExtractor
+from src.app.graph_index_store import GraphIndexStore
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -29,6 +31,8 @@ class FormulaKnowledgeUpdateResult:
     skipped: int
     deferred: int
     pending: int
+    graph_synced: int = 0
+    graph_failed: int = 0
 
     def to_json(self) -> dict[str, int]:
         return {
@@ -37,6 +41,8 @@ class FormulaKnowledgeUpdateResult:
             "skipped": self.skipped,
             "deferred": self.deferred,
             "pending": self.pending,
+            "graph_synced": self.graph_synced,
+            "graph_failed": self.graph_failed,
         }
 
 
@@ -47,10 +53,16 @@ class FormulaKnowledgeUpdateService:
         self,
         store: FormulaIndexStore,
         knowledge_engine: FormulaKnowledgeEngine,
+        graph_store: GraphIndexStore | None = None,
+        graph_extractor: StructuralGraphExtractor | None = None,
         batch_size: int = 8,
     ) -> None:
         self._store = store
         self._knowledge_engine = knowledge_engine
+        self._graph_store = graph_store
+        self._graph_extractor = graph_extractor or (
+            StructuralGraphExtractor() if graph_store is not None else None
+        )
         self._batch_size = max(1, int(batch_size))
 
     def pending_count(self, doc_hash: str) -> int:
@@ -91,8 +103,11 @@ class FormulaKnowledgeUpdateService:
         done = 0
         failed = 0
         skipped = 0
+        graph_synced = 0
+        graph_failed = 0
         upsert_blocks: list[DocumentBlock] = []
         started_by_target: dict[str, float] = {}
+        record_by_target = {record.target_id: record for record in records}
         for record in records:
             started_by_target[record.target_id] = time.perf_counter()
             block = block_map.get(record.target_id)
@@ -128,14 +143,21 @@ class FormulaKnowledgeUpdateService:
             else:
                 for block in upsert_blocks:
                     elapsed_ms = int((time.perf_counter() - started_by_target.get(block.id, time.perf_counter())) * 1000)
-                    record_payload = next(
-                        (
-                            record.result_json
-                            for record in records
-                            if record.target_id == block.id
-                        ),
-                        {},
+                    record = record_by_target.get(block.id)
+                    record_payload = dict(record.result_json if record else {})
+                    graph_result = (
+                        self._sync_graph_artifact(
+                            doc_hash,
+                            record.filepath if record else "",
+                            block,
+                        )
+                        if block.metadata.get("formula_r5_accepted") is True
+                        else _empty_graph_sync_result()
                     )
+                    if graph_result["graph_synced"]:
+                        graph_synced += 1
+                    if graph_result["graph_failed"]:
+                        graph_failed += 1
                     self._store.mark_round_done(
                         doc_hash,
                         FormulaScanRound.KNOWLEDGE_INCREMENTAL_UPDATE,
@@ -146,6 +168,7 @@ class FormulaKnowledgeUpdateService:
                             "stage": "knowledge_incremental_update",
                             "block_id": block.id,
                             "content_hash": FormulaIndexStore.content_hash(block),
+                            **graph_result,
                         },
                         elapsed_ms=elapsed_ms,
                     )
@@ -156,7 +179,60 @@ class FormulaKnowledgeUpdateService:
             skipped=skipped,
             deferred=0,
             pending=self.pending_count(doc_hash),
+            graph_synced=graph_synced,
+            graph_failed=graph_failed,
         )
+
+    def _sync_graph_artifact(
+        self,
+        doc_hash: str,
+        filepath: str,
+        block: DocumentBlock,
+    ) -> dict[str, object]:
+        if self._graph_store is None or self._graph_extractor is None:
+            return {
+                "graph_synced": False,
+                "graph_failed": False,
+                "graph_error": "",
+            }
+        try:
+            extraction = self._graph_extractor.extract(doc_hash, block)
+            if not extraction.nodes and not extraction.edges:
+                return {
+                    "graph_synced": False,
+                    "graph_failed": False,
+                    "graph_error": "no_graph_facts",
+                    "graph_extractor": self._graph_extractor.name,
+                }
+            self._graph_store.enqueue_blocks(doc_hash, filepath, [block])
+            self._graph_store.mark_running(doc_hash, [block.id])
+            self._graph_store.mark_done(
+                doc_hash,
+                block.id,
+                extractor=self._graph_extractor.name,
+                nodes=extraction.nodes,
+                edges=extraction.edges,
+            )
+            return {
+                "graph_synced": True,
+                "graph_failed": False,
+                "graph_error": "",
+                "graph_extractor": self._graph_extractor.name,
+                "graph_node_count": len(extraction.nodes),
+                "graph_edge_count": len(extraction.edges),
+                "graph_artifact_key": {
+                    "doc_hash": doc_hash,
+                    "block_id": block.id,
+                    "extractor": self._graph_extractor.name,
+                },
+            }
+        except Exception as exc:
+            return {
+                "graph_synced": False,
+                "graph_failed": True,
+                "graph_error": str(exc)[:500],
+                "graph_extractor": self._graph_extractor.name,
+            }
 
 
 def _block_for_record(block: DocumentBlock, payload: dict[str, object]) -> DocumentBlock:
@@ -171,6 +247,7 @@ def _block_for_record(block: DocumentBlock, payload: dict[str, object]) -> Docum
     }
     if accepted_latex:
         metadata["formula_r5_accepted"] = True
+        metadata["candidate_only"] = False
         return block.model_copy(
             update={
                 "content": accepted_latex,
@@ -211,5 +288,14 @@ def _block_from_record_payload(
             "source": "formula_r5_payload",
             "formula_r5_payload_block": True,
             "formula_r5_candidate_id": str(payload.get("candidate_id", block_id) or block_id),
+            "candidate_only": False,
         },
     )
+
+
+def _empty_graph_sync_result() -> dict[str, object]:
+    return {
+        "graph_synced": False,
+        "graph_failed": False,
+        "graph_error": "",
+    }
