@@ -108,11 +108,8 @@ class LegacyChromaBackend(KnowledgeIndexBackend):
         if self.exists(doc_hash) and self.index_matches(blocks, doc_hash):
             emit_progress(len(blocks), len(blocks))
             return
-        if not force_rebuild and self.exists(doc_hash):
-            emit_progress(len(blocks), len(blocks))
-            return
 
-        if force_rebuild:
+        if force_rebuild or self.exists(doc_hash):
             self.delete(doc_hash)
 
         total = len(blocks)
@@ -236,11 +233,8 @@ class LlamaIndexChromaBackend(KnowledgeIndexBackend):
         if self.exists(doc_hash) and self.index_matches(blocks, doc_hash):
             emit_progress(len(blocks), len(blocks))
             return
-        if not force_rebuild and self.exists(doc_hash):
-            emit_progress(len(blocks), len(blocks))
-            return
 
-        if force_rebuild:
+        if force_rebuild or self.exists(doc_hash):
             self.delete(doc_hash)
 
         total = len(blocks)
@@ -431,11 +425,6 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
         if self.exists(doc_hash) and self.index_matches(blocks, doc_hash):
             emit_progress(len(blocks), len(blocks))
             return
-        if not force_rebuild and self.exists(doc_hash):
-            emit_progress(len(blocks), len(blocks))
-            return
-        if force_rebuild:
-            self.delete(doc_hash)
 
         total = len(blocks)
         emit_progress(0, total)
@@ -544,6 +533,8 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
             entries.append(self._row_to_entry(row, distance=0.0))
             if len(entries) >= top_k:
                 break
+        if not entries and self._should_use_recent_fallback(query):
+            return self._recent_blocks(doc_hash, top_k, exclude_ids)
         return entries
 
     def upsert_blocks(self, blocks: list[DocumentBlock], doc_hash: str) -> None:
@@ -604,8 +595,10 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
         try:
             with sqlite3.connect(path) as conn:
                 count = conn.execute("SELECT COUNT(*) FROM blocks").fetchone()[0]
-            return int(count) > 0
-        except sqlite3.DatabaseError:
+                rows = conn.execute("SELECT key, value FROM meta").fetchall()
+            metadata = {str(key): str(value) for key, value in rows}
+            return self._has_complete_index_metadata(int(count), metadata)
+        except (sqlite3.DatabaseError, TypeError, ValueError):
             return False
 
     def index_matches(self, blocks: list[DocumentBlock], doc_hash: str) -> bool:
@@ -614,13 +607,22 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
 
     def status(self, doc_hash: str) -> KnowledgeStatus:
         total = 0
-        if self.exists(doc_hash):
-            with sqlite3.connect(self._db_path(doc_hash)) as conn:
-                total = int(conn.execute("SELECT COUNT(*) FROM blocks").fetchone()[0])
+        ready = False
+        path = self._db_path(doc_hash)
+        if path.exists():
+            try:
+                with sqlite3.connect(path) as conn:
+                    total = int(conn.execute("SELECT COUNT(*) FROM blocks").fetchone()[0])
+                    rows = conn.execute("SELECT key, value FROM meta").fetchall()
+                metadata = {str(key): str(value) for key, value in rows}
+                ready = self._has_complete_index_metadata(total, metadata)
+            except (sqlite3.DatabaseError, TypeError, ValueError):
+                total = 0
+                ready = False
         return KnowledgeStatus(
             doc_hash=doc_hash,
             collection_name=f"sqlite_fts_{doc_hash}",
-            is_ready=total > 0,
+            is_ready=ready,
             total_blocks=total,
             embedded_blocks=total,
         )
@@ -721,6 +723,27 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
         tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", str(query or "").lower())
         cleaned = [token for token in tokens if token]
         return " OR ".join(cleaned[:32])
+
+    @staticmethod
+    def _should_use_recent_fallback(query: str) -> bool:
+        text = str(query or "")
+        has_cjk = re.search(r"[\u4e00-\u9fff]", text) is not None
+        has_ascii_word = re.search(r"[A-Za-z0-9_]+", text) is not None
+        return has_cjk and not has_ascii_word
+
+    def _has_complete_index_metadata(self, block_count: int, metadata: dict[str, Any]) -> bool:
+        if block_count <= 0:
+            return False
+        try:
+            indexed_blocks = int(metadata.get("index_block_count", "0"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            str(metadata.get("schema")) == self._SCHEMA_VERSION
+            and str(metadata.get("index_backend")) == self.name
+            and str(metadata.get("index_schema")) == "blocks_v1"
+            and indexed_blocks > 0
+        )
 
     @staticmethod
     def _row_to_entry(row: sqlite3.Row, distance: float) -> dict[str, Any]:

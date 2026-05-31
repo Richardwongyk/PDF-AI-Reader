@@ -325,6 +325,49 @@ def test_sqlite_fts_backend_skips_matching_rebuild(tmp_path) -> None:
     assert backend.status("doc-fts").total_blocks == 2
 
 
+def test_sqlite_fts_backend_rebuilds_stale_existing_index(tmp_path) -> None:
+    backend = SQLiteFtsBackend(tmp_path)
+    stale_blocks = [_block("p0_b0")]
+    full_blocks = [_block("p0_b0"), _block("p0_b1"), _block("p0_b2")]
+
+    backend.build(stale_blocks, "doc-fts", True, lambda _c, _t: None)
+    backend.build(full_blocks, "doc-fts", False, lambda _c, _t: None)
+
+    assert backend.status("doc-fts").total_blocks == 3
+    results = backend.retrieve("attention keys", [], "doc-fts", top_k=5)
+    assert {result["id"] for result in results} >= {"p0_b0", "p0_b1", "p0_b2"}
+
+
+def test_sqlite_fts_backend_upsert_only_is_not_ready(tmp_path) -> None:
+    backend = SQLiteFtsBackend(tmp_path)
+
+    backend.upsert_blocks([_block("p0_b0")], "doc-fts")
+
+    assert backend.exists("doc-fts") is False
+    status = backend.status("doc-fts")
+    assert status.is_ready is False
+    assert status.total_blocks == 1
+
+
+def test_sqlite_fts_backend_uses_recent_fallback_for_cjk_query_without_match(tmp_path) -> None:
+    backend = SQLiteFtsBackend(tmp_path)
+    blocks = [
+        DocumentBlock(
+            id="p0_b0",
+            page_num=0,
+            block_type=BlockType.PARAGRAPH,
+            content="Scaled dot-product attention uses queries, keys, and values.",
+            bbox=(0, 0, 1, 1),
+            section_title="Attention",
+        )
+    ]
+
+    backend.build(blocks, "doc-fts", True, lambda _c, _t: None)
+    results = backend.retrieve("自注意力是什么", [], "doc-fts", top_k=1)
+
+    assert results[0]["id"] == "p0_b0"
+
+
 def test_backend_factory_creates_sqlite_fts_backend(tmp_path) -> None:
     backend = create_knowledge_backend(
         "sqlite_fts",

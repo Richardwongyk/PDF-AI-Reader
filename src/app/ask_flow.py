@@ -13,10 +13,11 @@ Usage:
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
-from src.core.models import DocumentBlock
+from src.core.models import BlockType, DocumentBlock
 
 _logger = logging.getLogger(__name__)
 
@@ -84,7 +85,12 @@ class AskQuestionFlow(QObject):
                 retrieved = []
                 evidence = []
                 for result in retrieved_raw:
-                    found = find_block_cb(result["id"])
+                    result_id = str(result.get("id") or "")
+                    if not result_id:
+                        continue
+                    found = find_block_cb(result_id)
+                    if not found:
+                        found = self._block_from_retrieval_result(result)
                     if not found:
                         continue
                     retrieved.append(found)
@@ -116,3 +122,56 @@ class AskQuestionFlow(QObject):
             chat_history=chat_history,
             split_id=block_id,
         )
+
+    @staticmethod
+    def _block_from_retrieval_result(result: dict[str, Any]) -> DocumentBlock | None:
+        content = str(result.get("document") or result.get("content") or "").strip()
+        block_id = str(result.get("id") or "").strip()
+        if not block_id or not content:
+            return None
+
+        raw_metadata = result.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        page_num = AskQuestionFlow._int_metadata(metadata.get("page"), default=0)
+        block_type = AskQuestionFlow._block_type(metadata.get("type"))
+        bbox = AskQuestionFlow._bbox_metadata(metadata.get("bbox"))
+        section_title = str(metadata.get("section") or "")
+        return DocumentBlock(
+            id=block_id,
+            page_num=page_num,
+            block_type=block_type,
+            content=content,
+            bbox=bbox,
+            section_title=section_title,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _int_metadata(value: object, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _block_type(value: object) -> BlockType:
+        try:
+            return BlockType(str(value))
+        except ValueError:
+            return BlockType.PARAGRAPH
+
+    @staticmethod
+    def _bbox_metadata(value: object) -> tuple[float, float, float, float]:
+        if isinstance(value, (list, tuple)) and len(value) == 4:
+            try:
+                return tuple(float(item) for item in value)  # type: ignore[return-value]
+            except (TypeError, ValueError):
+                return (0.0, 0.0, 0.0, 0.0)
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",")]
+            if len(parts) == 4:
+                try:
+                    return tuple(float(part) for part in parts)  # type: ignore[return-value]
+                except ValueError:
+                    return (0.0, 0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0)

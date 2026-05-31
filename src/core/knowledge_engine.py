@@ -194,7 +194,11 @@ class KnowledgeEngine(BaseService):
             doc_hash: 文件 SHA256 哈希（前 16 位）。
             force_rebuild: True 时即使已存在也重新构建。
         """
-        if not force_rebuild and self._backend.exists(doc_hash):
+        if (
+            not force_rebuild
+            and self._backend.exists(doc_hash)
+            and self._backend.index_matches(blocks, doc_hash)
+        ):
             self.build_finished.emit(doc_hash)
             return
 
