@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -403,12 +403,54 @@ class MainWindow(QMainWindow):
 
     def _set_dock_answer_theme(self, theme: str) -> None:
         """同步右侧问答 WebView 主题。"""
-        safe_theme = json.dumps(theme)
-        js_code = f"setTheme({safe_theme});"
+        dock_widget = self._right_dock.widget() or self._right_dock
+        palette = dock_widget.palette()
+        bg = palette.color(QPalette.ColorRole.Window)
+        if not bg.isValid():
+            bg = palette.color(QPalette.ColorRole.Base)
+        fg = palette.color(QPalette.ColorRole.Text)
+        if not fg.isValid():
+            fg = palette.color(QPalette.ColorRole.WindowText)
+        if self._contrast_ratio(bg, fg) < 4.5:
+            fg = QColor("#f8fafc") if bg.lightness() < 128 else QColor("#111827")
+        link = QColor("#93c5fd") if bg.lightness() < 128 else QColor("#2563eb")
+        blockquote = QColor("#e5e7eb") if bg.lightness() < 128 else QColor("#4b5563")
+        html_theme = "dark" if bg.lightness() < 128 else "light"
+        safe_theme = json.dumps(html_theme)
+        safe_bg = json.dumps(bg.name())
+        safe_fg = json.dumps(fg.name())
+        safe_link = json.dumps(link.name())
+        safe_blockquote = json.dumps(blockquote.name())
+        js_code = (
+            f"setTheme({safe_theme});"
+            f"document.body.style.setProperty('--bg-color', {safe_bg});"
+            f"document.body.style.setProperty('--text-color', {safe_fg});"
+            f"document.body.style.setProperty('--blockquote-color', {safe_blockquote});"
+            f"document.body.style.setProperty('--link-color', {safe_link});"
+            f"document.body.style.background = {safe_bg};"
+            f"document.body.style.color = {safe_fg};"
+        )
         if self._dock_answer_page_ready:
             self._ai_answer_view.page().runJavaScript(js_code)
         else:
             self._dock_answer_pending_theme = js_code
+
+    def _contrast_ratio(self, bg: QColor, fg: QColor) -> float:
+        """WCAG contrast ratio for picking readable dock-answer colors."""
+        def luminance(color: QColor) -> float:
+            channels = []
+            for value in (color.redF(), color.greenF(), color.blueF()):
+                channels.append(
+                    value / 12.92 if value <= 0.03928
+                    else ((value + 0.055) / 1.055) ** 2.4
+                )
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+        l1 = luminance(bg)
+        l2 = luminance(fg)
+        lighter = max(l1, l2)
+        darker = min(l1, l2)
+        return (lighter + 0.05) / (darker + 0.05)
 
     def _on_dock_answer_page_loaded(self, ok: bool) -> None:
         """右侧问答 WebView 模板加载完成。"""
