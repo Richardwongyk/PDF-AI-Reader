@@ -90,6 +90,14 @@
 修复方案高确定、变更范围小且有针对性回归测试时，才允许继续动代码；否则只做状态说明并等待用户
 明确指令。
 
+2026-05-31 补记上一轮小范围 bug fix：当前 `PdfViewer` 仍是虚拟布局、QWidget layout、
+普通页 widget 池、裂缝页 segments/splits 和异步渲染队列混合架构。上一轮修复的具体问题是：
+缩放时离屏裂缝页也会进入清晰重渲染请求，抢占当前 layout 中可见裂缝页。现在通过
+`_is_split_page_in_layout()` 区分可见/离屏裂缝页，缩放时只优先请求可见裂缝页重渲染，
+离屏页只标记 stale pending；延迟恢复滚动位置也增加 Qt 对象存活检查。对应回归测试为
+`test_pdf_viewer_zoom_prioritizes_visible_split_pages`。这不是 Napkin 大页面 tile-only 黑底
+P0 的完整闭环。
+
 同一复盘还确认两个必须补测的 P1 风险：首屏解析拆成前 8 页后，后台补页、知识库、公式入队必须
 保持全文一致；翻译服务共享 `TextPreprocessor`，并发流式翻译可能污染公式占位映射，后续主攻
 翻译时要先做独立 protection session。

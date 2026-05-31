@@ -16,6 +16,58 @@
 - 段落点击、裂缝插入、翻译框显示/隐藏和问答入口。
 - 渲染完成回调、后台 tile 回调和缩放 debounce。
 
+### 2026-05-31 当前实现架构快照
+
+上一轮 bug fix 前后重新梳理了一遍当前 `PdfViewer` 架构。它还不是本文目标里的
+`ViewportDocumentLayout + PageSurface + RenderScheduler + SplitLayer` 分层，而是一个过渡中的
+混合实现：
+
+- `_VirtualPageLayout` 是纯 Python 布局模型，保存每页基础高度、split 额外高度、start/end offset，
+  并用二分定位回答 `page_at_y()` 和 `page_range_for_viewport()`。它决定滚动条总高度和可见页范围，
+  但不拥有任何页面图像或 split widget 状态。
+- QWidget layout 仍是实际挂载层。顶部/底部 spacer 撑出整篇文档高度，视口附近页面才插入真实
+  widget；`_active_pages` 表示当前挂载/活动页，`_widget_pool` 和 `_page_containers` 复用普通页
+  `_LazyPageWidget`。
+- 普通页走 `_LazyPageWidget`。它可以画整页 pixmap，也可以在大页面路径下消费 tile cache；
+  `_precise_render_pending` 和 `_request_precise_renders()` 负责缩放后的普通页清晰重渲染。
+- 裂缝页没有独立 SplitLayer。当前状态分散在 `_page_segments[page_num]`、`_splits[split_id]`、
+  `_split_pages`、`_pending_split_rerenders` 和 QWidget layout 中。一个裂缝页通常由上段 PDF widget、
+  中间 `SplitWidget`、下段 PDF widget 三类 segment 共同组成。
+- `_hide_split_page_from_layout()` 会把离屏裂缝页的 segment/split widget 从 QWidget layout 移除并隐藏，
+  但保留 `_page_segments`、`_splits` 和 `_split_pages`，以便滚回视口时恢复。
+- `_show_split_page_in_layout()` 如果发现该页在 `_pending_split_rerenders` 中，会先用
+  `_fallback_pixmap_for_page()` 重建 segment，再把 segment 和 split widget 插回 layout。
+- 当前“裂缝页是否可见/应优先渲染”的可靠判断不是 `page_num in _split_pages`，而是至少一个对应
+  segment/split widget 仍在 QWidget layout 中。
+
+这就是上一轮 bug 的架构背景：split 状态已经持久保存，但 split 渲染优先级仍混在缩放流程里，
+如果只按 `_split_pages` 遍历，会把离屏裂缝页和当前可见裂缝页同等对待。
+
+### 2026-05-31 上一轮 bug fix 定位
+
+已修 bug：缩放时离屏裂缝页也会参与即时段内缩放和异步清晰重渲染，抢占当前 layout 中可见裂缝页
+的渲染队列。长文档中打开多个裂缝翻译框后，这会放大缩放卡顿和可见页清晰化延迟。
+
+修复方式：
+
+- 新增 `_is_split_page_in_layout(page_num)`，遍历该页 segments 和 split widget，只有 widget 仍挂在
+  QWidget layout 中时才认为该裂缝页当前可见/应优先处理。
+- `_set_zoom()` 遍历 `_split_pages` 时，所有裂缝页仍加入 `_pending_split_rerenders`，保证状态不会丢；
+  但只有 `_is_split_page_in_layout()` 为真的页会做即时 QLabel 缩放和立刻请求
+  `request_page_render_async()`。
+- 离屏裂缝页保持 stale pending，等 `_show_split_page_in_layout()` 恢复进 layout 时再用 fallback
+  pixmap 重建并清除 pending。
+- 裂缝段旧图即时缩放从 `SmoothTransformation` 改成 `FastTransformation`，连续缩放时降低 UI 线程成本。
+- 缩放后恢复滚动位置的延迟回调改走 `_set_scroll_value_if_valid()`，防止 viewer 或 scrollbar 已销毁时
+  callback 访问无效 Qt 对象。
+
+新增回归测试：
+
+- `tests/test_pdf_viewer_navigation.py::test_pdf_viewer_zoom_prioritizes_visible_split_pages` 构造一个当前
+  layout 中的裂缝页和一个离屏裂缝页，验证缩放时只请求可见页渲染，同时两个页都保留 pending stale。
+
+该修复只解决“离屏 split 抢当前页重渲染”这个确定 bug，不是大页面 tile-only 首帧黑底的完整止血。
+
 这些状态互相穿插，导致几个直接后果：
 
 - 大页进入 tile-only 路径时，首帧依赖 TileCache 命中；快速滚动、跳页或极大缩放下，tile miss 会让用户看到黑底/空白页。
@@ -204,4 +256,3 @@ Napkin 验收必须包含：
 - 不让 OCR/MFR、公式索引、GraphRAG 或云端模型进入阅读热路径。
 - 不用更高 stress multiplier 掩盖 P0 可见性问题。
 - 不在没有合同测试的情况下继续拆 `PdfViewer` 大块逻辑。
-

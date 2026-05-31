@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
 > 基于 git 日志 93 次提交 + 12 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-28 (今日性能/渲染/翻译改动复盘、Napkin 400x 退化记录、文档状态修订)
+> 最后更新：2026-05-31 (补记上一轮 PDF viewer 缩放裂缝页重渲染 bug fix 与当前架构理解)
 
 ---
 
@@ -20,6 +20,40 @@
 4. 防休眠脚本在仓库 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`，新会话必须先检查是否仍在运行。
 5. 外部工具（MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR、magic-pdf）要按独立 worker 环境矩阵验证，不得混装到主环境。
 6. 所有提交不得带额外署名、来源标记或生成工具署名；不要提交 `测试资料/`、日志、缓存、临时 benchmark 输出。
+
+## 2026-05-31 上一轮未提交 bug fix 补记：缩放时离屏裂缝页不再抢占可见页重渲染
+
+上一轮 Codex 会话留下的未提交改动范围很小，只涉及 `src/ui/pdf_viewer.py` 和
+`tests/test_pdf_viewer_navigation.py`。这轮补记时已重新梳理当前 viewer 架构，详见
+`docs/pdf_viewer_rendering_refactor_plan.md` 的“2026-05-31 当前实现架构快照”和
+“上一轮 bug fix 定位”。
+
+当前 `PdfViewer` 仍是混合架构：`_VirtualPageLayout` 负责页面 y 坐标和 split 额外高度，
+QWidget layout + 顶底 spacer 负责实际挂载；普通页走 `_LazyPageWidget` 池和瓦片/整页渲染，
+裂缝页走 `_page_segments`、`_splits`、`_split_pages` 和 `_pending_split_rerenders`。
+因此“裂缝页是否可见”不能只看它是否在 `_split_pages` 中，而要看对应 segment/split widget
+是否仍挂在当前 layout。
+
+实际修复点：
+
+1. 新增 `_is_split_page_in_layout(page_num)`，用 QWidget layout membership 判断裂缝页是否当前挂载。
+2. `_set_zoom()` 缩放时只对当前 layout 中的裂缝页做即时段内 QLabel 缩放和优先异步清晰重渲染；
+   离屏裂缝页只保留 `_pending_split_rerenders` stale 标记，避免抢占当前可见页渲染队列。
+3. 裂缝页旧图即时缩放从 `SmoothTransformation` 改为 `FastTransformation`，降低连续缩放期间 UI 线程成本。
+4. 新增 `_request_split_rerenders(page_nums)`，让缩放流程可以只请求可见裂缝页；原 pending timer
+   也只消费重新进入 layout 的裂缝页。
+5. 缩放后恢复视口位置的延迟回调改走 `_set_scroll_value_if_valid()`，避免 Qt 对象销毁后访问无效 scroll bar。
+
+新增回归测试：
+
+- `test_pdf_viewer_zoom_prioritizes_visible_split_pages` 构造一个可见裂缝页和一个离屏裂缝页，
+  验证缩放时只请求可见页重渲染，同时两页仍都保留 pending stale 状态，后续回到视口时可恢复。
+
+边界说明：
+
+- 这是针对“缩放时离屏裂缝页抢占可见裂缝页重渲染”的确定 bug fix。
+- 它不是 Napkin 极大缩放大页面 tile-only 首帧黑底/空白 P0 的完整修复；P0 仍要求大页面滚动时
+  先显示旧整页 pixmap、低清 fallback 或最近 snapshot，再由 tile 渐进清晰化。
 
 ## 2026-05-28 今日性能修复复盘：相对最初基线改了什么、优化了什么、搞坏了什么
 

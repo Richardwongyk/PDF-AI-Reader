@@ -1038,6 +1038,17 @@ class PdfViewer(QScrollArea):
         self._page_containers.pop(page_num, None)
         self._precise_render_pending.discard(page_num)
 
+    def _is_split_page_in_layout(self, page_num: int) -> bool:
+        """Return whether any widget for a split page is currently mounted."""
+        for seg in self._page_segments.get(page_num, []):
+            if "split_id" in seg:
+                widget = self._splits.get(seg["split_id"])
+            else:
+                widget = seg.get("widget")
+            if widget is not None and self._layout.indexOf(widget) >= 0:
+                return True
+        return False
+
     def _show_split_page_in_layout(self, page_num: int) -> None:
         """Restore a previously hidden split page into the QWidget layout."""
         if page_num in self._pending_split_rerenders:
@@ -1784,14 +1795,19 @@ class PdfViewer(QScrollArea):
         # 连续缩放期间只更新布局和旧图即时显示，等用户停顿后再合并请求清晰渲染。
         self._precise_render_timer.start(180)
 
-        # 处理裂缝页面：缩放段内 QLabel 即时显示 + 异步渲染完成后重建
+        # 处理裂缝页面：仅当前 layout 中的裂缝页做即时占位缩放和优先重建。
+        # 离屏裂缝页只标记 stale，避免抢当前页 UI 和渲染队列。
+        visible_split_rerenders: set[int] = set()
         for pn in list(self._split_pages):
+            split_in_layout = self._is_split_page_in_layout(pn)
             segs = self._page_segments.get(pn, [])
             for i, seg in enumerate(segs):
                 if "split_id" in seg:
                     split = self._splits.get(seg["split_id"])
                     if split:
                         split.setFixedWidth(self._page_metas[pn]["width"])
+                    continue
+                if not split_in_layout:
                     continue
                 old_w = seg.get("widget")
                 if old_w is None:
@@ -1804,7 +1820,7 @@ class PdfViewer(QScrollArea):
                             self._page_metas[pn]["width"],
                             seg_h,
                             Qt.AspectRatioMode.IgnoreAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
+                            Qt.TransformationMode.FastTransformation,
                         )
                         scaled.setDevicePixelRatio(self._screen_dpr)
                         label.setPixmap(scaled)
@@ -1813,8 +1829,10 @@ class PdfViewer(QScrollArea):
                 self._refresh_segment_overlays(old_w, seg.get("blocks", []), seg["y0"], seg_h)
             # 异步渲染 → 完成后在 _on_page_rendered_async 中重建段
             self._pending_split_rerenders.add(pn)
-        if self._pending_split_rerenders:
-            self._split_rerender_timer.start(180)
+            if split_in_layout:
+                visible_split_rerenders.add(pn)
+        if visible_split_rerenders:
+            self._request_split_rerenders(visible_split_rerenders)
 
         # 调整 spacer 高度
         self._adjust_spacers(self._active_pages)
@@ -1822,12 +1840,20 @@ class PdfViewer(QScrollArea):
         # 恢复视口位置：保持缩放前视口中心的内容在同一位置（借鉴 SumatraPDF fixPt）
         if center_page is not None:
             new_center_y = int(self._vlayout.page_y(center_page) + center_offset)
-            QTimer.singleShot(50, lambda cy=new_center_y: sb.setValue(
-                max(0, cy - viewport_h // 2)))
+            target_y = max(0, new_center_y - viewport_h // 2)
+            QTimer.singleShot(50, lambda y=target_y: self._set_scroll_value_if_valid(y))
 
         elapsed = (time.perf_counter() - t0) * 1000
         _logger.info("PdfViewer: 缩放完成 (%.1fms, 即时显示 %d 页, 后台渲染 %d 页)",
                      elapsed, rerender_count, rerender_count)
+
+    def _set_scroll_value_if_valid(self, value: int) -> None:
+        """Set scrollbar value from delayed callbacks only while Qt objects are alive."""
+        if not _isValid(self):
+            return
+        sb = self.verticalScrollBar()
+        if sb is not None and _isValid(sb):
+            sb.setValue(value)
 
     def _request_precise_renders(self) -> None:
         """为缩放后标记的页面请求精确 DPI 渲染（延迟执行，不阻塞主线程）。"""
@@ -1842,8 +1868,19 @@ class PdfViewer(QScrollArea):
         """为裂缝页请求最终清晰渲染；连续缩放期间自动合并请求。"""
         if not self._pending_split_rerenders:
             return
+        visible_pages = {
+            pn for pn in self._pending_split_rerenders
+            if self._is_split_page_in_layout(pn)
+        }
+        self._request_split_rerenders(visible_pages)
+
+    def _request_split_rerenders(self, page_nums: set[int]) -> None:
+        if not page_nums:
+            return
         self._tile_renderer.set_dpi(self._dpi)
-        for pn in list(self._pending_split_rerenders):
+        for pn in sorted(page_nums):
+            if pn not in self._pending_split_rerenders:
+                continue
             self._doc_engine.request_page_render_async(pn, dpi=self._dpi)
 
     # ── 主题 ──

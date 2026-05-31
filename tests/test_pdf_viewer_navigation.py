@@ -284,6 +284,57 @@ def test_pdf_viewer_restores_offscreen_split_page_after_zoom_rerender() -> None:
     assert restored_top.height() == 240
 
 
+def test_pdf_viewer_zoom_prioritizes_visible_split_pages() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=8, blocks=[]))
+
+    visible_top = QWidget()
+    visible_split = QWidget()
+    visible_bottom = QWidget()
+    for widget in (visible_top, visible_split, visible_bottom):
+        widget.setFixedSize(400, 80)
+        widget.show()
+        viewer._remember_widget_page(widget, 0)
+    viewer._layout.insertWidget(1, visible_top)
+    viewer._layout.insertWidget(2, visible_split)
+    viewer._layout.insertWidget(3, visible_bottom)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 120, "blocks": [], "widget": visible_top},
+        {"split_id": "p0_b0"},
+        {"y0": 120, "y1": 240, "blocks": [], "widget": visible_bottom},
+    ]
+    viewer._splits["p0_b0"] = visible_split  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+
+    hidden_top = QWidget()
+    hidden_split = QWidget()
+    hidden_bottom = QWidget()
+    for widget in (hidden_top, hidden_split, hidden_bottom):
+        widget.setFixedSize(400, 80)
+        widget.hide()
+        viewer._remember_widget_page(widget, 5)
+    viewer._page_segments[5] = [
+        {"y0": 0, "y1": 120, "blocks": [], "widget": hidden_top},
+        {"split_id": "p5_b0"},
+        {"y0": 120, "y1": 240, "blocks": [], "widget": hidden_bottom},
+    ]
+    viewer._splits["p5_b0"] = hidden_split  # type: ignore[assignment]
+    viewer._split_pages.add(5)
+    assert viewer._vlayout is not None
+    viewer._vlayout.register_split(0, 80.0)
+    viewer._vlayout.register_split(5, 80.0)
+
+    viewer._set_zoom(1.2)
+
+    assert 0 in engine.rendered_pages
+    assert 5 not in engine.rendered_pages
+    assert {0, 5}.issubset(viewer._pending_split_rerenders)
+
+
 def test_pdf_viewer_restores_scroll_anchor_when_split_above_changes_height() -> None:
     _app()
     engine = _DocEngine()
