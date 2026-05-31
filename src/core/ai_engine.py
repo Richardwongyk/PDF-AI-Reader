@@ -10,6 +10,7 @@ QAService: 基于知识库的文档问答服务
 AIEngine: AI 引擎顶层协调器（信号驱动）
 """
 
+import logging
 import re
 import time
 from abc import ABC, abstractmethod
@@ -437,6 +438,11 @@ class HybridModelRouter:
         """云端模型是否可用。"""
         return self._available(self._cloud)
 
+    @property
+    def fallback_client(self) -> BaseLLMClient | None:
+        """最终降级客户端。"""
+        return self._fallback
+
 
 # =============================================================================
 # TranslationService —— 翻译服务
@@ -748,9 +754,28 @@ class QAService:
         client = self._router.route(TaskType.QA)
 
         if stream:
-            return client.generate_stream(messages, temperature=0.3, max_tokens=8192)
-        else:
+            try:
+                return client.generate_stream(messages, temperature=0.3, max_tokens=8192)
+            except Exception as exc:
+                fallback = self._router.fallback_client
+                if fallback is not None and fallback is not client:
+                    logging.getLogger("QAService").warning(
+                        "QA 流式调用失败，降级到 fallback: %s",
+                        _short_error(exc),
+                    )
+                    return fallback.generate_stream(messages, temperature=0.3, max_tokens=8192)
+                raise
+        try:
             return client.generate(messages, temperature=0.3, max_tokens=8192)
+        except Exception as exc:
+            fallback = self._router.fallback_client
+            if fallback is not None and fallback is not client:
+                logging.getLogger("QAService").warning(
+                    "QA 调用失败，降级到 fallback: %s",
+                    _short_error(exc),
+                )
+                return fallback.generate(messages, temperature=0.3, max_tokens=8192)
+            raise
 
     def generate_followup_questions(self, question: str, answer: str) -> list[str]:
         """基于问答对话生成 3 个追问建议。
@@ -1324,5 +1349,17 @@ class _QAThread(QThread):
                 followups = []
             self.followup_signal.emit(followups)
         except Exception as e:
-            import traceback
-            self.error_signal.emit(f"{e}\n{traceback.format_exc()}")
+            self.error_signal.emit(_user_facing_error(e))
+
+
+def _short_error(exc: BaseException) -> str:
+    text = str(exc).strip().replace("\n", " ")
+    return text[:240] + ("..." if len(text) > 240 else "")
+
+
+def _user_facing_error(exc: BaseException) -> str:
+    text = _short_error(exc)
+    lower = text.lower()
+    if "ssl" in lower or "unexpected_eof" in lower or "connecterror" in lower or "timeout" in lower:
+        return f"云端模型连接失败：{text}"
+    return text

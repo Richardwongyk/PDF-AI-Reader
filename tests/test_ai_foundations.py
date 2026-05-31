@@ -1,6 +1,13 @@
 import pytest
 
-from src.core.ai_engine import HashingEmbeddingClient, HybridModelRouter, MockLLMClient, QAService, _QAThread
+from src.core.ai_engine import (
+    HashingEmbeddingClient,
+    HybridModelRouter,
+    MockLLMClient,
+    QAService,
+    _QAThread,
+    _user_facing_error,
+)
 from src.core.knowledge_engine import KnowledgeEngine
 from src.core.model_providers import normalize_litellm_model
 from src.core.models import AppConfig, DocumentBlock, BlockType, TaskType
@@ -312,3 +319,41 @@ def test_qa_thread_falls_back_to_non_streaming_answer() -> None:
     assert tokens == ["fallback answer"]
     assert finished == ["fallback answer"]
     assert errors == []
+
+
+class _FailingClient(MockLLMClient):
+    @property
+    def model_name(self) -> str:
+        return "failing"
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: object) -> str:
+        raise RuntimeError("cloud ssl failed")
+
+    def generate_stream(self, messages: list[dict[str, str]], **kwargs: object):
+        raise RuntimeError("cloud ssl failed")
+
+
+def test_qa_service_falls_back_when_selected_client_fails() -> None:
+    cfg = AppConfig()
+    cfg.routing.qa = "cloud_only"
+    router = HybridModelRouter(
+        local_client=None,
+        cloud_client=None,
+        fallback_client=MockLLMClient(),
+        config=cfg,
+        reasoning_client=_FailingClient(),
+    )
+    service = QAService(router)
+
+    answer = service.answer("what is attention?", None, [], None, stream=False)
+
+    assert isinstance(answer, str)
+    assert answer.strip()
+
+
+def test_user_facing_error_summarizes_network_traceback() -> None:
+    message = _user_facing_error(RuntimeError("SSL: UNEXPECTED_EOF_WHILE_READING\nTraceback detail"))
+
+    assert message.startswith("云端模型连接失败")
+    assert "\n" not in message
+    assert len(message) < 300
