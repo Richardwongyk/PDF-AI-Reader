@@ -1040,6 +1040,12 @@ class PdfViewer(QScrollArea):
 
     def _show_split_page_in_layout(self, page_num: int) -> None:
         """Restore a previously hidden split page into the QWidget layout."""
+        if page_num in self._pending_split_rerenders:
+            pixmap = self._fallback_pixmap_for_page(page_num)
+            if pixmap is not None and not pixmap.isNull():
+                self._rebuild_split_segments_from_pixmap(
+                    page_num, pixmap, only_if_in_layout=False)
+                self._pending_split_rerenders.discard(page_num)
         segs = self._page_segments.get(page_num, [])
         if not segs:
             return
@@ -1241,6 +1247,45 @@ class PdfViewer(QScrollArea):
             _logger.debug("PdfViewer: p%d fallback pixmap 获取失败", page_num, exc_info=True)
             return None
 
+    def _rebuild_split_segments_from_pixmap(
+        self,
+        page_num: int,
+        pixmap: QPixmap,
+        *,
+        only_if_in_layout: bool,
+    ) -> int:
+        """Rebuild split page image segments for the current zoom, preserving split widgets."""
+        segs = self._page_segments.get(page_num, [])
+        pixmap.setDevicePixelRatio(self._screen_dpr)
+        rebuilt = 0
+        for seg in segs:
+            if "split_id" in seg:
+                continue
+            old_w = seg.get("widget")
+            if old_w is None:
+                continue
+            idx = self._layout.indexOf(old_w)
+            if idx < 0 and only_if_in_layout:
+                continue
+            for child in old_w.findChildren(BlockOverlay):
+                self._overlays.pop(child.block_id, None)
+                if _isValid(child):
+                    child.deleteLater()
+            self._forget_widget_page(old_w)
+            old_w.hide()
+            if idx >= 0:
+                self._layout.removeWidget(old_w)
+            old_w.deleteLater()
+            new_w = self._build_segment_widget(
+                pixmap, seg["y0"], seg["y1"], seg["blocks"], page_num=page_num)
+            if idx >= 0:
+                self._layout.insertWidget(idx, new_w)
+            else:
+                new_w.hide()
+            seg["widget"] = new_w
+            rebuilt += 1
+        return rebuilt
+
     def _on_tile_ready(self, key: TileKey, pixmap: QPixmap) -> None:
         """瓦片渲染完成 → 触发对应页面重绘（借鉴 qpageview callback 模式）。"""
         container = self._page_containers.get(key.page_num)
@@ -1293,31 +1338,10 @@ class PdfViewer(QScrollArea):
 
     def _rebuild_split_segments(self, page_num: int, pixmap: QPixmap) -> None:
         """缩放后异步重建裂缝页面的段 widget。"""
-        segs = self._page_segments.get(page_num, [])
-        pixmap.setDevicePixelRatio(self._screen_dpr)
-        for i, seg in enumerate(segs):
-            if "split_id" in seg:
-                continue
-            old_w = seg.get("widget")
-            if old_w is None:
-                continue
-            idx = self._layout.indexOf(old_w)
-            if idx < 0:
-                continue
-            for child in old_w.findChildren(BlockOverlay):
-                self._overlays.pop(child.block_id, None)
-                if _isValid(child):
-                    child.deleteLater()
-            self._forget_widget_page(old_w)
-            old_w.hide()
-            self._layout.removeWidget(old_w)
-            old_w.deleteLater()
-            new_w = self._build_segment_widget(
-                pixmap, seg["y0"], seg["y1"], seg["blocks"], page_num=page_num)
-            self._layout.insertWidget(idx, new_w)
-            seg["widget"] = new_w
-        _logger.info("PdfViewer: p%d 裂缝段异步重建完成 (%dx%d)",
-                     page_num, pixmap.width(), pixmap.height())
+        rebuilt = self._rebuild_split_segments_from_pixmap(
+            page_num, pixmap, only_if_in_layout=False)
+        _logger.info("PdfViewer: p%d 裂缝段异步重建完成 (%dx%d, segments=%d)",
+                     page_num, pixmap.width(), pixmap.height(), rebuilt)
 
     # ── 翻译指示器 ──
 

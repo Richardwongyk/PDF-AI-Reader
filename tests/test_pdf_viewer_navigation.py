@@ -17,12 +17,16 @@ class _DocEngine:
         self.page_rendered = _Signal()
         self.requested_pages: list[int] = []
         self.rendered_pages: list[int] = []
+        self.pixmaps: dict[int, QPixmap] = {}
 
     def request_page_blocks_async(self, page_num: int) -> None:
         self.requested_pages.append(page_num)
 
     def request_page_render_async(self, _page_num: int, *, dpi: int) -> None:
         self.rendered_pages.append(_page_num)
+
+    def get_page_pixmap(self, page_num: int, *, dpi: int) -> QPixmap | None:
+        return self.pixmaps.get(page_num)
 
 
 class _Config:
@@ -221,6 +225,63 @@ def test_pdf_viewer_hides_offscreen_split_page_without_dropping_state() -> None:
     assert 0 in viewer._active_pages
     assert viewer._layout.indexOf(split) >= 0
     assert not split.isHidden()
+
+
+def test_pdf_viewer_restores_offscreen_split_page_after_zoom_rerender() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=12, blocks=[]))
+
+    top = QWidget()
+    split = QWidget()
+    bottom = QWidget()
+    for widget in (top, split, bottom):
+        widget.setFixedSize(400, 80)
+        widget.show()
+        viewer._remember_widget_page(widget, 0)
+    viewer._layout.insertWidget(1, top)
+    viewer._layout.insertWidget(2, split)
+    viewer._layout.insertWidget(3, bottom)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 120, "blocks": [], "widget": top},
+        {"split_id": "p0_b0"},
+        {"y0": 120, "y1": 240, "blocks": [], "widget": bottom},
+    ]
+    viewer._splits["p0_b0"] = split  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+    assert viewer._vlayout is not None
+    viewer._vlayout.register_split(0, 80.0)
+
+    viewer._hide_split_page_from_layout(0)
+    assert viewer._layout.indexOf(top) < 0
+
+    new_pixmap = QPixmap(600, 900)
+    new_pixmap.fill()
+    engine.pixmaps[0] = new_pixmap
+    viewer._scale = 2.0
+    for seg in viewer._page_segments[0]:
+        if "split_id" not in seg:
+            seg["y0_pt"] = seg["y0"] / 1.0
+            seg["y1_pt"] = seg["y1"] / 1.0
+            seg["y0"] = int(seg["y0_pt"] * viewer._scale)
+            seg["y1"] = int(seg["y1_pt"] * viewer._scale)
+    viewer._pending_split_rerenders.add(0)
+
+    viewer._show_split_page_in_layout(0)
+
+    restored_top = viewer._page_segments[0][0]["widget"]
+    restored_bottom = viewer._page_segments[0][2]["widget"]
+    assert restored_top is not top
+    assert restored_bottom is not bottom
+    assert viewer._layout.indexOf(restored_top) >= 0
+    assert viewer._layout.indexOf(split) >= 0
+    assert viewer._layout.indexOf(restored_bottom) >= 0
+    assert "p0_b0" in viewer._splits
+    assert 0 not in viewer._pending_split_rerenders
+    assert restored_top.height() == 240
 
 
 def test_pdf_viewer_restores_scroll_anchor_when_split_above_changes_height() -> None:
