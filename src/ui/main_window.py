@@ -1290,8 +1290,9 @@ class MainWindow(QMainWindow):
             self._set_dock_answer_text("请先打开 PDF。", finished=True)
             return
         self._dock_last_question = question
+        self._dock_answer_text = ""
         self._dock_followup_questions = []
-        self._set_dock_answer_text("正在检索全文知识库...", finished=False)
+        self._render_dock_answer("正在检索全文知识库...", finished=False)
         self._ai_evidence_tree.clear()
         self._clear_dock_followups()
         self._ask_flow.request_answer(
