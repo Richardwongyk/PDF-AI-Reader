@@ -1180,6 +1180,7 @@ class MainWindow(QMainWindow):
             block_id=block_id,
             chat_history=chat_history,
             find_block_cb=self._find_block,
+            all_blocks=self._current_blocks,
         )
 
     def _on_dock_question_submitted(self) -> None:
@@ -1202,6 +1203,7 @@ class MainWindow(QMainWindow):
             block_id=self._dock_answer_split_id,
             chat_history=None,
             find_block_cb=self._find_block,
+            all_blocks=self._current_blocks,
         )
 
     def _on_retrieval_ready(self, block_id: str, evidence: list[dict[str, Any]]) -> None:

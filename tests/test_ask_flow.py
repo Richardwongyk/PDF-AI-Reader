@@ -136,3 +136,85 @@ def test_full_document_question_uses_retrieval_payload_when_block_not_loaded() -
     assert retrieved[0].content == "Scaled dot-product attention uses queries, keys, and values."
     assert emitted[0][1][0]["id"] == "p4_b2"
     assert emitted[0][1][0]["content"] == retrieved[0].content
+
+
+def test_full_document_question_uses_fulltext_context_when_retrieval_has_no_hits() -> None:
+    class EmptyKnowledgeEngine(_KnowledgeEngine):
+        def retrieve(
+            self,
+            question: str,
+            doc_hash: str,
+            top_k: int,
+            exclude_ids: list[str] | None = None,
+        ) -> list[dict[str, object]]:
+            self.top_k = top_k
+            return []
+
+    knowledge = EmptyKnowledgeEngine()
+    ai_engine = _AIEngine()
+    flow = AskQuestionFlow(ai_engine, knowledge)
+    flow.set_doc_hash("doc-1")
+
+    unavailable: list[tuple[str, str]] = []
+    emitted: list[tuple[str, list[dict[str, object]]]] = []
+    flow.answer_unavailable.connect(lambda message, split_id: unavailable.append((message, split_id)))
+    flow.retrieval_ready.connect(lambda split_id, evidence: emitted.append((split_id, evidence)))
+
+    flow.request_answer(
+        question="what is attention?",
+        block=None,
+        block_id="__dock_qa__",
+        chat_history=None,
+        find_block_cb=lambda _block_id: None,
+        all_blocks=[
+            DocumentBlock(
+                id=f"p{i}_b0",
+                page_num=i,
+                block_type=BlockType.PARAGRAPH,
+                content=f"Paper context page {i}",
+                bbox=(0, 0, 100, 20),
+            )
+            for i in range(10)
+        ],
+    )
+
+    assert unavailable == []
+    assert len(emitted) == 1
+    assert emitted[0][0] == "__dock_qa__"
+    assert len(emitted[0][1]) == 8
+    assert knowledge.top_k == 8
+    assert ai_engine.request is not None
+    retrieved = ai_engine.request["retrieved_blocks"]
+    assert isinstance(retrieved, list)
+    assert len(retrieved) == 8
+    assert retrieved[0].content == "Paper context page 0"
+    assert retrieved[-1].content == "Paper context page 9"
+    assert ai_engine.request["current_block"] is None
+
+
+def test_full_document_question_falls_back_when_knowledge_base_not_ready() -> None:
+    knowledge = _KnowledgeEngine()
+    ai_engine = _AIEngine()
+    flow = AskQuestionFlow(ai_engine, knowledge)
+    flow.set_doc_hash("missing-doc")
+
+    flow.request_answer(
+        question="what is attention?",
+        block=None,
+        block_id="__dock_qa__",
+        chat_history=None,
+        find_block_cb=lambda _block_id: None,
+        all_blocks=[
+            DocumentBlock(
+                id="p0_b0",
+                page_num=0,
+                block_type=BlockType.PARAGRAPH,
+                content="Original PDF context is still available.",
+                bbox=(0, 0, 100, 20),
+            )
+        ],
+    )
+
+    assert knowledge.top_k is None
+    assert ai_engine.request is not None
+    assert ai_engine.request["retrieved_blocks"][0].content == "Original PDF context is still available."

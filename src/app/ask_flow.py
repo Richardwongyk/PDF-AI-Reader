@@ -32,6 +32,7 @@ class AskQuestionFlow(QObject):
 
     answer_unavailable = Signal(str, str)  # (message, block_id)
     retrieval_ready = Signal(str, list)  # (block_id, evidence list[dict])
+    _FULLTEXT_FALLBACK_LIMIT = 8
 
     def __init__(
         self,
@@ -56,6 +57,7 @@ class AskQuestionFlow(QObject):
         block_id: str,
         chat_history: list[dict[str, str]] | None,
         find_block_cb: Callable[[str], DocumentBlock | None],
+        all_blocks: list[DocumentBlock] | None = None,
     ) -> None:
         """执行知识库检索 + 委托 AIEngine 生成答案。
 
@@ -65,17 +67,15 @@ class AskQuestionFlow(QObject):
             block_id: 段落 ID。
             chat_history: 多轮对话历史。
             find_block_cb: 根据 block_id 查找 DocumentBlock 的回调。
+            all_blocks: 当前 PDF 已解析出的全文块，用作知识库无命中时的原文兜底。
         """
         retrieved: list[DocumentBlock] = []
-        if not self._current_doc_hash:
+        evidence: list[dict[str, object]] = []
+        if not self._current_doc_hash and not all_blocks:
             self.answer_unavailable.emit("当前文档尚未建立知识库上下文，请等待解析完成后再提问。", block_id)
             return
 
-        if not self._knowledge_engine.check_exists(self._current_doc_hash):
-            self.answer_unavailable.emit("知识库还在构建中，稍后再问才能基于全文回答。", block_id)
-            return
-
-        if self._current_doc_hash:
+        if self._current_doc_hash and self._knowledge_engine.check_exists(self._current_doc_hash):
             try:
                 top_k = 8 if block is None else 3
                 retrieved_raw = self._knowledge_engine.retrieve(
@@ -94,25 +94,40 @@ class AskQuestionFlow(QObject):
                     if not found:
                         continue
                     retrieved.append(found)
-                    evidence.append({
-                        "id": found.id,
-                        "page": found.page_num + 1,
-                        "type": found.block_type.value,
-                        "source_id": f"S{len(evidence) + 1}",
-                        "distance": float(result.get("distance", 0.0)),
-                        "retrieval_score": float(result.get("retrieval_score", 0.0)),
-                        "lexical_score": float(result.get("lexical_score", 0.0)),
-                        "vector_score": float(result.get("vector_score", 0.0)),
-                        "content": found.content,
-                        "section": found.section_title,
-                    })
-                self.retrieval_ready.emit(block_id, evidence)
+                    evidence.append(
+                        self._evidence_from_block(
+                            found,
+                            source_id=f"S{len(evidence) + 1}",
+                            distance=float(result.get("distance", 0.0)),
+                            retrieval_score=float(result.get("retrieval_score", 0.0)),
+                            lexical_score=float(result.get("lexical_score", 0.0)),
+                            vector_score=float(result.get("vector_score", 0.0)),
+                        )
+                    )
                 _logger.info("AskQuestionFlow: 检索到 %d 个相关块", len(retrieved))
             except Exception:
                 _logger.warning("AskQuestionFlow: 检索失败", exc_info=True)
 
+        if not retrieved and all_blocks:
+            retrieved = self._fulltext_fallback_blocks(all_blocks, current_block=block)
+            evidence = [
+                self._evidence_from_block(
+                    found,
+                    source_id=f"S{index}",
+                    distance=1.0,
+                    retrieval_score=0.0,
+                    lexical_score=0.0,
+                    vector_score=0.0,
+                )
+                for index, found in enumerate(retrieved, 1)
+            ]
+            self.retrieval_ready.emit(block_id, evidence)
+            _logger.info("AskQuestionFlow: 使用全文原文兜底 %d 个块", len(retrieved))
+        elif self._current_doc_hash:
+            self.retrieval_ready.emit(block_id, evidence)
+
         if block is None and not retrieved:
-            self.answer_unavailable.emit("知识库中没有检索到可引用片段，无法按文档依据回答这个问题。", block_id)
+            self.answer_unavailable.emit("当前还没有可用的原文上下文，请等待 PDF 解析完成后再提问。", block_id)
             return
 
         self._ai_engine.request_answer(
@@ -122,6 +137,54 @@ class AskQuestionFlow(QObject):
             chat_history=chat_history,
             split_id=block_id,
         )
+
+    @classmethod
+    def _fulltext_fallback_blocks(
+        cls,
+        all_blocks: list[DocumentBlock],
+        current_block: object | None,
+    ) -> list[DocumentBlock]:
+        candidates = [
+            block for block in all_blocks
+            if isinstance(block, DocumentBlock)
+            and block.content.strip()
+            and block is not current_block
+        ]
+        if len(candidates) <= cls._FULLTEXT_FALLBACK_LIMIT:
+            return candidates
+        step = (len(candidates) - 1) / float(cls._FULLTEXT_FALLBACK_LIMIT - 1)
+        selected: list[DocumentBlock] = []
+        seen: set[str] = set()
+        for index in range(cls._FULLTEXT_FALLBACK_LIMIT):
+            block = candidates[round(index * step)]
+            if block.id in seen:
+                continue
+            selected.append(block)
+            seen.add(block.id)
+        return selected
+
+    @staticmethod
+    def _evidence_from_block(
+        found: DocumentBlock,
+        *,
+        source_id: str,
+        distance: float,
+        retrieval_score: float,
+        lexical_score: float,
+        vector_score: float,
+    ) -> dict[str, object]:
+        return {
+            "id": found.id,
+            "page": found.page_num + 1,
+            "type": found.block_type.value,
+            "source_id": source_id,
+            "distance": distance,
+            "retrieval_score": retrieval_score,
+            "lexical_score": lexical_score,
+            "vector_score": vector_score,
+            "content": found.content,
+            "section": found.section_title,
+        }
 
     @staticmethod
     def _block_from_retrieval_result(result: dict[str, Any]) -> DocumentBlock | None:

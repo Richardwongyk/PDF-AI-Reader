@@ -195,15 +195,16 @@ def test_translation_preprocessor_does_not_protect_bare_math_without_evidence() 
     assert preprocessor.restore_formulas(protected) == "the statement Π 1 is absolute"
 
 
-def test_qa_without_context_does_not_invite_free_answering() -> None:
+def test_qa_without_context_allows_labeled_background_supplement() -> None:
     cfg = AppConfig()
     router = HybridModelRouter(None, None, MockLLMClient(), cfg)
     service = QAService(router)
 
     messages = service._build_qa_messages("what is the theorem?", None, [], None)
 
-    assert "无法基于本文档给出可靠答案" in messages[-1]["content"]
-    assert "请根据你的知识回答" not in messages[-1]["content"]
+    assert "未检索到足够的本文档证据" in messages[-1]["content"]
+    assert "背景补充" in messages[0]["content"]
+    assert "不得把背景知识说成论文原文内容" in messages[0]["content"]
 
 
 def test_qa_with_context_includes_page_reference() -> None:
