@@ -1,242 +1,100 @@
 # PDF AI Reader
 
-面向学术论文的 AI 辅助 PDF 阅读器。项目使用 PySide6 + PyMuPDF 构建桌面阅读体验，并在后台逐步构建翻译、全文检索、公式候选、RAG/GraphRAG 和可审计知识系统。
+> Attention is all you need.  
+> 但读论文时，你还需要翻译、提问、公式、证据和一个不打断思路的阅读空间。
 
-> 当前项目处于活跃研发阶段。基础阅读、翻译、知识库、公式多轮流水线、人工审核入口和大量审计工具已经落地；born-digital PDF 公式的最终高精度自动还原、批量 accepted 审核体验和完整 GraphRAG 体验仍在推进中。
+PDF AI Reader 是一个面向学术论文的智能 PDF 阅读器。它希望把论文从一份静态文件，变成一个可以边读、边问、边理解的工作台。
 
-> 2026-05-28 状态提醒：当天性能修复尝试在 Napkin 前台 400x 压测中暴露 P0 退化。极大缩放和快速滚动/跳页时，大页面 tile-only 首帧可能没有 fallback，用户看到黑底或空白页。继续优化前必须先恢复“滚动时中间页始终可见”的阅读体验；详细复盘见 `TODO.md` 顶部。
+你可以像普通 PDF 阅读器一样打开论文、滚动、缩放和跳转；也可以直接双击段落翻译，围绕全文提问，让 AI 帮你解释概念、梳理公式和定位依据。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.14.4-blue?logo=python" alt="Python">
-  <img src="https://img.shields.io/badge/PySide-6.11-green?logo=qt" alt="PySide6">
-  <img src="https://img.shields.io/badge/PyMuPDF-1.27+-orange" alt="PyMuPDF">
-  <img src="https://img.shields.io/badge/LLM-LiteLLM%20%7C%20Ollama-purple" alt="LLM">
-</p>
+## 它能做什么
 
-## 项目目标
+### 流畅读论文
 
-PDF AI Reader 的目标不是简单把 PDF 截图后 OCR 一遍，而是做一个能长期维护、可验证、可追溯的论文阅读工具：
+打开 PDF 后直接进入阅读状态。页面、目录、缩放、滚动和段落交互都围绕长篇论文阅读设计，重点是让你尽快回到正文，而不是先处理工具本身。
 
-- 快速打开和流畅阅读长 PDF。
-- 双击段落翻译，保留公式和数学表达。
-- 基于全文证据做问答，而不是脱离文档自由聊天。
-- 对 born-digital PDF 优先利用文本层、glyph、font、bbox、vector 等结构事实解析公式。
-- 图片、扫描、乱码或低置信区域才进入 OCR/MFR 兜底。
-- 所有重任务异步分批、结果落库、二次打开按 input hash 跳过。
+### 双击就翻译
 
-## 当前能力概览
+遇到难读的段落，双击即可翻译。翻译会尽量保留论文里的公式、符号和上下文，让你不必在阅读器、翻译网页和笔记软件之间来回切换。
 
-| 模块 | 当前状态 |
-| --- | --- |
-| PDF 阅读 | PyMuPDF 渲染、目录跳转、滚动、缩放、段落 overlay、翻译框交互 |
-| 翻译 | LiteLLM 云端/Ollama 本地路由、SQLite 缓存、段落级翻译、公式保护 |
-| 问答/RAG | 文档解析、知识库构建、检索问答、GraphRAG artifact 研发中 |
-| 公式 r0 | born-digital PDF 结构快扫，抽取 glyph/font/bbox/vector/image evidence |
-| 公式 r0.5 | 符号身份修复 MVP，支持 glyph name 映射、font+CID 锚点传播、资源自动发现 |
-| 公式 r1/r2 | 缓存优先 OCR/MFR 补救、本地多工具候选 worker，默认不覆盖正文 |
-| 公式 r3 | DeepSeek/分析模型语义复核候选，只写 JSON，不自动接受 |
-| 公式 r4/r5 | candidate-only 公式图谱、accepted 公式增量写回知识库、accepted GraphRAG artifact 同步 |
-| 公式审核 | 命令行审核、基础 UI、manual revision、evidence JSON 预览、PDF page/bbox 定位 |
-| TinyBDMath | born-digital 非 OCR 小模型路线已建数据、训练、候选服务主干 |
-| 测试工具 | Attention/Napkin 源码对照、公式质量审计、E2E 工作流、日志审计、性能基准 |
+### 对整篇论文提问
 
-已知 P0/P1 风险：
+你可以问：
 
-- 极大缩放下快速滚动不能出现黑底/空白页；tile 渲染必须有旧图或低清整页 fallback。
-- 首屏解析拆成前 8 页快速返回后，全文 blocks、知识库、公式任务的后台增量一致性必须继续验证。
-- 翻译服务当前存在共享公式占位状态的并发风险；后续修复应使用每个翻译请求独立的公式保护会话。
+- 这篇论文解决了什么问题？
+- Self-Attention 为什么能替代循环结构？
+- 这个公式里的每个符号是什么意思？
+- 作者在哪一页解释了实验设置？
 
-## 公式解析路线
+回答会尽量基于当前 PDF 的内容，而不是泛泛聊天。
 
-项目当前主攻 born-digital PDF 的非 OCR 公式解析。核心原则：
+### 带着证据回答
 
-- born-digital PDF 默认不走 OCR。
-- OCR/MFR 只用于图片、扫描、无文本层、乱码、低置信或用户显式精扫。
-- 低置信结果只能作为候选，不能覆盖正文或污染 RAG/GraphRAG。
-- LaTeX 源码只用于训练、测试和验收；真实用户路径不能假设有源码。
+论文阅读最怕“看起来很对”。PDF AI Reader 的目标是让回答能回到原文：页码、段落、公式和上下文都应该可以追溯，方便你确认 AI 没有偏离论文。
 
-多轮流水线：
+### 更认真地处理公式
 
-| 轮次 | 名称 | 作用 |
-| --- | --- | --- |
-| r0 | `r0_pdf_structure` | 快速抽取 PDF 文本层、glyph、font、bbox、vector、图片和候选区域 |
-| r0.5 | `r0_5_symbol_identity_repair` | 非视觉符号身份修复，补救缺失/断裂的 PDF 字符映射 |
-| r1 | `r1_cached_recognition` | 对图片/扫描/needs_ocr 候选做缓存优先识别 |
-| r2 | `r2_local_high_precision` | Pix2Text、Paddle、MinerU、PEK/UniMERNet 等本地工具候选复核 |
-| r2a | `r2a_tinybdmath_structural` | TinyBDMath born-digital 结构模型候选 |
-| r3 | `r3_cloud_semantic_review` | DeepSeek 等分析模型基于上下文和候选做语义校对建议 |
-| r4 | `r4_knowledge_graph` | 将公式、章节、定理、引用、概念写入 GraphRAG artifact |
-| r5 | `r5_knowledge_incremental_update` | accepted 结果变化后增量写回全文知识库 |
+很多论文的关键都藏在公式里。项目正在持续增强公式识别、公式审核和公式知识库能力，让数学内容不只是被当成普通文本处理。
 
-命令行流水线入口：
+### 为深度阅读而生
 
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_multiround_pipeline.py --case attention --max-pages 6
-```
+它适合阅读机器学习、数学、物理、计算机系统等公式密集、上下文复杂的论文。无论是快速扫读一篇 paper，还是反复研究一篇经典论文，都可以把阅读、翻译、问答和证据放在同一个界面里。
 
-## TinyBDMath 与训练数据
+## 当前状态
 
-TinyBDMath 是项目中的 born-digital 公式结构小模型路线。它不是视觉 OCR 模型，而是读取 r0/r0.5 之后的 glyph graph，学习符号之间的二维数学结构关系，例如：
+项目仍在活跃开发中，但核心阅读、段落翻译、全文问答、知识库检索、公式候选和基础审核流程已经可以运行。
 
-- baseline / 水平相邻
-- 上标、下标、上下标组合
-- 分数线、根号线、overline、large operator 上下限
-- alignment / matrix / cases 的行列关系
-- 数学字体和 glyph identity evidence
+接下来会继续打磨：
 
-当前最可靠的训练/评测资产来自源码插桩重编译：
+- 大文档和极端缩放下的阅读流畅度
+- 公式还原质量
+- 更清晰的证据展示
+- 更完整的论文知识图谱体验
 
-| 资料 | 结果 |
-| --- | --- |
-| Attention is All You Need | 138 / 138 verified exact rows |
-| Napkin | 29743 / 29743 verified exact rows |
+## 适合谁
 
-这些数据通过临时 LaTeX 副本给每个公式染唯一颜色，重编译后从 born-digital PDF 结构层读取精确 bbox。该路线用于训练和验收，不进入真实用户生产解析路径。
+- 经常读英文论文的学生和研究者
+- 想快速理解经典论文的开发者
+- 需要反复查证公式、定义和实验细节的读者
+- 希望把 AI 用在严肃阅读，而不是只做摘要的人
 
-当前重点：
+## 快速开始
 
-1. 把 `mathml_relation_hints` 升级为可对齐到 glyph graph 的 SLT/MathML hard labels。
-2. 训练更正式的 MLP/GNN edge baseline，并按 inline/display、上下标、分数线、根号、align、数学字体分项评测。
-3. 让 r2a structural candidate 进入真正 decoder/verifier，证明相对 r0/fusion baseline 有提升。
-4. 在 accepted/rejected/revision 基础闭环上补齐批量审核、accepted precision 统计和更清晰的 GraphRAG 路径证据。
-
-## 安装与运行
-
-### 环境要求
-
-- Windows 为主要开发/验证环境。
-- Python 3.14.4。
-- 推荐 conda 环境名：`pdf_ai_reader_314`。
-- 外部重工具不要混装进主环境；MinerU、Paddle、Pix2Text、PEK 等应使用独立 worker 环境。
-
-### 安装依赖
-
-```powershell
-git clone git@github.com:Richardwongyk/PDF-AI-Reader.git
-cd PDF-AI-Reader
-
-conda create -n pdf_ai_reader_314 python=3.14.4
-conda activate pdf_ai_reader_314
-python -m pip install -r requirements.txt
-```
-
-### 配置模型
-
-复制配置文件：
-
-```powershell
-Copy-Item config.example.yaml config.yaml
-```
-
-然后在 `config.yaml` 中填写 DeepSeek/OpenAI 等 LiteLLM 兼容 API Key。默认示例配置中：
-
-- 翻译、问答、总结使用云端路由。
-- embedding 默认保留本地路线。
-- Ollama 可作为可选本地后端。
-
-### 启动应用
+本项目主要在 Windows 环境开发和验证。准备好 Python 环境并安装依赖后，启动应用：
 
 ```powershell
 python src\main.py
 ```
 
-本机开发环境也可以使用：
+也可以使用仓库里的本地启动脚本：
 
 ```powershell
 .\run_py314.bat
 ```
 
-## 常用测试与审计命令
+第一次使用前，请根据 `config.example.yaml` 创建自己的 `config.yaml`，并填写可用的模型 API Key。
 
-全软件总验收：
+## 项目文档
 
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\full_software_validation.py --profile quick --case all --max-pages 2
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\full_software_validation.py --profile standard --case all
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\run_full_software_validation.ps1 -Profile standard -Case all
-```
+如果你想了解开发状态、下一步计划或接手继续开发，可以从这些文件开始：
 
-`quick` 用于短时间 smoke，`standard` 覆盖 core/RAG/GraphRAG、公式、TinyBDMath、Attention/Napkin 页段、多轮流水线、二次打开跳过和日志审计。默认不会启用云端或 OCR/MFR 工具；需要桌面交互闭环时显式加 `--include-desktop-e2e`，需要云端/本地工具候选时显式加 `--include-cloud` 或 `--include-local-tools`。
+- `AGENTS.md`
+- `TODO.md`
+- `docs/next_session_handoff.md`
+- `docs/current_goal_and_next_steps.md`
 
-轻量测试：
+详细的公式、知识库、测试和工程设计文档都在 `docs/` 目录中。
 
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_formula_multiround_pipeline.py tests/test_formula_index_flow.py tests/test_formula_semantic_review.py tests/test_graph_index_flow.py tests/test_graph_index_store.py tests/test_formula_tool_comparison.py tests/test_external_formula_tools.py tests/test_smoke.py -q
-```
+## 注意
 
-公式多轮流水线：
-
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_multiround_pipeline.py --case attention --max-pages 6 --r1-limit 4 --r2-limit 1 --r3-limit 2 --r4-limit 12
-```
-
-公式索引性能：
-
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_index_performance.py --case all
-```
-
-LaTeX 源码对照审计：
-
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_latex_audit.py --case attention --quality-gate
-```
-
-E2E 工作流：
-
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\e2e_pdf_workflow.py --case all
-```
-
-## 项目结构
-
-```text
-src/
-  app/       应用层流程：翻译、文档解析、公式索引、GraphRAG、知识库更新
-  core/      核心能力：PDF 引擎、AI 路由、公式识别、glyph graph、TinyBDMath
-  data/      配置、缓存、知识库和持久化数据接口
-  infra/     渲染缓存、后台任务和基础设施
-  ui/        PySide6 主窗口、PDF viewer、overlay、split widget
-tools/       公式审计、训练集构建、多轮 pipeline、E2E、benchmark、worker
-tests/       单元测试、流水线测试、GraphRAG/公式/外部工具测试
-docs/        设计文档、交接文档、公式路线、RAG/GraphRAG 计划
-```
-
-关键文档：
-
-- `AGENTS.md`：新会话和协作约束入口。
-- `TODO.md`：当前状态和路线图。
-- `docs/next_session_handoff.md`：详细交接。
-- `docs/current_goal_and_next_steps.md`：当前目标和下一步。
-- `docs/async_formula_indexing_design.md`：异步多轮公式索引设计。
-- `docs/formula_multitool_fusion_design.md`：多工具候选融合和 accepted 门禁。
-- `docs/tiny_born_digital_math_model_engineering.md`：TinyBDMath 小模型工程方案。
-- `docs/formula_quality_acceptance_plan.md`：质量门禁与验收计划。
-
-## 数据、缓存与版本控制边界
-
-不要提交：
+仓库不包含本地测试 PDF、日志、缓存、模型权重或个人配置文件。请不要提交：
 
 - `测试资料/`
-- `test_artifacts/`
 - `logs/`
+- `test_artifacts/`
 - `config.yaml`
-- 模型缓存、PDF、截图、临时 benchmark 结果
+- 临时 benchmark 输出
 
-`.gitignore` 已覆盖这些路径。测试资料只用于本地验收，公开仓库不包含 Attention/Napkin PDF 或 LaTeX 源码。
+## License
 
-## 开源借鉴
-
-本项目参考了多类开源 PDF 阅读器和文档处理工具的工程思路：
-
-| 项目 | 借鉴内容 |
-| --- | --- |
-| SumatraPDF | 快速 PDF 阅读体验、视口保持、轻量交互 |
-| qpageview | 页面缓存和按需渲染思路 |
-| Sioyek | 学术 PDF 阅读交互和跳转体验 |
-| PyMuPDF | PDF 文本层、glyph、bbox、vector 等结构事实抽取 |
-| LiteLLM / LlamaIndex / Chroma | LLM 路由、RAG 与向量检索组件 |
-
-## 许可证
-
-MIT License。详见 `LICENSE`。
+MIT License. See `LICENSE` for details.
