@@ -179,6 +179,69 @@ def test_pdf_viewer_reuses_page_overlays_on_zoom_refresh() -> None:
     assert first.width() > 0
 
 
+def test_pdf_viewer_hides_offscreen_split_page_without_dropping_state() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=12, blocks=[]))
+
+    top = QWidget()
+    split = QWidget()
+    bottom = QWidget()
+    for widget in (top, split, bottom):
+        widget.setFixedSize(400, 80)
+        widget.show()
+        viewer._remember_widget_page(widget, 0)
+    viewer._layout.insertWidget(1, top)
+    viewer._layout.insertWidget(2, split)
+    viewer._layout.insertWidget(3, bottom)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 100, "blocks": [], "widget": top},
+        {"split_id": "p0_b0"},
+        {"y0": 100, "y1": 200, "blocks": [], "widget": bottom},
+    ]
+    viewer._splits["p0_b0"] = split  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+    assert viewer._vlayout is not None
+    viewer._vlayout.register_split(0, 80.0)
+
+    viewer.scroll_to_page(8)
+
+    assert "p0_b0" in viewer._splits
+    assert 0 in viewer._split_pages
+    assert 0 not in viewer._active_pages
+    assert viewer._layout.indexOf(split) < 0
+    assert split.isHidden()
+
+    viewer.scroll_to_page(0)
+
+    assert "p0_b0" in viewer._splits
+    assert 0 in viewer._active_pages
+    assert viewer._layout.indexOf(split) >= 0
+    assert not split.isHidden()
+
+
+def test_pdf_viewer_restores_scroll_anchor_when_split_above_changes_height() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=4, blocks=[]))
+    assert viewer._vlayout is not None
+
+    viewer.scroll_to_page(3)
+    anchor = viewer._capture_scroll_anchor()
+
+    viewer._vlayout.register_split(0, 300.0)
+    viewer._adjust_spacers({3})
+    viewer._restore_scroll_anchor(anchor)
+
+    assert viewer._capture_scroll_anchor() == (3, 0.0)
+    assert viewer.verticalScrollBar().value() == int(viewer._vlayout.page_y(3))
+
+
 def test_virtual_page_layout_uses_binary_search_semantics() -> None:
     layout = _VirtualPageLayout({0: 100.0, 1: 200.0, 2: 150.0})
 

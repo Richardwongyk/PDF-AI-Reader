@@ -74,6 +74,9 @@
 - 后续修复必须保证滚动中间页始终可见：先显示旧整页 pixmap、低分辨率 fallback 或最近 snapshot，
   再由 tile 渐进替换为清晰内容。不能再用纯占位或黑底作为“性能优化”结果。
 
+PDF viewer 根治方案已写入 `docs/pdf_viewer_rendering_refactor_plan.md`。其中明确翻译框“裂开插入”
+是核心交互合同，重构只能把 SplitLayer 从渲染生命周期中拆出来，不能改成侧边栏或删除裂缝插入设计。
+
 同一复盘还记录两个 P1 风险：
 
 - 首屏解析被拆成前 8 页快速返回后，必须审计后台 `page_blocks_ready`、知识库构建、公式入队和
