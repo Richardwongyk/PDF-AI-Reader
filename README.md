@@ -82,6 +82,7 @@ python src\main.py
 - `TODO.md`
 - `docs/next_session_handoff.md`
 - `docs/current_goal_and_next_steps.md`
+- `docs/tiny_born_digital_math_model_engineering.md`
 - `docs/workspace_inventory.md`
 
 详细的公式、知识库、测试和工程设计文档都在 `docs/` 目录中。

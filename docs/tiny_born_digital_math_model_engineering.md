@@ -1,475 +1,821 @@
-# TinyBDMath 小模型研发工程方案
+# TinyBDMath 神经符号公式恢复计划
 
-日期：2026-05-25
+最后更新：2026-06-01
 
-本文件只讨论小模型研发工程。PDF 底层事实抽取、r0.5 符号身份修复、视觉工具兜底、云端复核和 RAG 写回不在本文展开。
+本文替换旧的 TinyBDMath 研发流水账。旧文档里关于 v0 边分类器、弱
+relation hint、直接 decoder 补丁、一次性性能脚本的内容只保留为历史
+baseline，不再作为下一步主路线。历史细节从 git 记录查看。
 
-相关标准和本地资料缓存见 `docs/local_standards_cache_index.md`。TinyBDMath 不能替代这些标准和补丁层：它的目标是学习 PDF glyph/vector graph 中的二维结构关系，而不是凭模型记忆覆盖完整 TeX/LaTeX 规则或修复所有 glyph identity。
+## 0. 当前结论
 
-2026-05-28 状态补充：TinyBDMath 之外另有 P0 UI 退化需要先修。Napkin 极大缩放快速滚动/跳页时
-出现黑底/空白页，属于 PDF viewer tile/fallback 渲染问题；不能把模型质量、公式候选或 OCR 工具优化
-当成该问题的解决方案。详细复盘见 `TODO.md` 顶部。
+TinyBDMath 不能继续被理解成“给每条候选边打分，然后 decoder 用几条规则
+拼 LaTeX”。这个方向已经证明只能得到一个速度可用、质量不达标的候选器。
 
-## 1. 小模型职责
+下一步应转为神经符号 inverse typesetting：
 
-TinyBDMath 的输入是 r0.5 之后的 Enriched Glyph Graph。图中每个节点已经尽力修复了符号身份，并保留身份置信度和候选。小模型的任务是预测这些符号之间的二维数学结构关系。
+1. 先从 PDF glyph/vector/font/bbox 事实中建立符号观测图。
+2. 用源码只在训练和审计阶段生成可验证的目标树，不进入真实推理路径。
+3. 用可审计的对齐器把 PDF 观测图对齐到目标 Symbol Layout Tree。
+4. 训练图到树的结构模型，输出父子关系、结构关系、组边界、符号身份和
+   非语义节点 mask。
+5. 用语法约束解码和 layout verifier 做 n-best 选择、置信校准和 abstain。
+6. 只有通过 accepted gate 的结果才能写正文、FTS、向量库或 GraphRAG。
+
+这不是硬编码规则路线。所有“谁是谁的上下标、根号主体、分数上下、矩阵
+单元、文本组、非语义空白/装饰 glyph”的判断，必须来自训练标签、模型
+输出、约束解码和 verifier。decoder 只允许执行通用树合法性约束和序列化，
+不能写样本特化补丁。
+
+## 1. 已知事实与失败诊断
+
+### 1.1 已完成的有效工程资产
+
+- 插桩训练行：Attention + Napkin 合计约 29881 条 verified rows。
+- PDF 图资产：`tinybdmath_graph_rows.jsonl` 保存 glyph/vector/font/bbox 等
+  结构事实。
+- relation label 资产：由 KaTeX/MathML hint 和 PDF 几何生成的弱监督边标签。
+- edge model 资产：已有 PyTorch edge softmax 模型，可导出主程序可读 JSON。
+- 性能路径：2026-06-01 已完成 batched/vectorized relation scoring、
+  compact score、direct structural decode、streaming eval。
+- 主线接入：r2a TinyBDMath 结果固定 candidate-only，能落库、跳过、进入
+  fusion/r3/r4/r5 但不会污染 accepted。
+
+这些资产不能丢。它们是下一阶段 alignment、训练、评测和回归的输入。
+
+### 1.2 当前量化基线
+
+2026-06-01 全量 direct eval，未继续训练：
+
+- rows = 29881。
+- elapsed 约 192.59s。
+- selected relations = 202364。
+- structural micro precision = 0.971798。
+- structural micro recall = 0.188380。
+- structural micro F1 = 0.315585。
+- decoded exact_match_rate = 0.523242。
+- decoded near_match_rate = 0.659550。
+- decoded avg_similarity = 0.839214。
+
+结论：
+
+- 性能链路已能支撑全量评测。
+- relation precision 高但 recall 低，说明候选选择过度保守。
+- decoded exact 只有约 52%，远不能作为公式恢复结果。
+- 质量瓶颈不在 JSONL 读写，不应继续只优化 fast score。
+
+### 1.3 刚验证过但不能作为终局的试验方向
+
+全局 parent forest 约束试验能改进一部分局部错误，例如把某些根号主体重新
+挂到 `RADICAL_BODY`，但它本质上仍然使用弱 relation 概率和后处理约束。
+
+在 200 行抽样上，它能把 decoded exact 从约 0.485 提到约 0.57，把 near
+从约 0.615 提到约 0.70。但它仍然无法稳定解决：
+
+- `h_{t-1}` 这类多 token 下标。
+- `d_{\text{model}}` 这类文本组。
+- PDF 图中空白 glyph、装饰 glyph、layout artifact 抢 root/parent。
+- 弱标签把很多 `subscript_zone` 直接变成 `SUB` 的训练噪声。
+- 概率饱和到 1.0 后，约束层无法知道哪个 1.0 是真结构。
+
+因此它只能作为 baseline 或 ablation，不能提交为“decoder bug 已修复”的最终
+路线。
+
+### 1.4 当前根因
+
+当前模型学到的是“局部几何位置很像某种关系”，不是“公式排版树”。核心缺口：
+
+1. 目标层不够强：只有弱边 hint，没有完整 SLT hard/soft label。
+2. 对齐层不够强：没有把源码 AST/MathML 节点稳定对齐到 PDF glyph 节点。
+3. 符号层不够强：PDF glyph 身份、math alphabet、文本组、非语义 glyph 没有
+   统一建模。
+4. 模型层不够强：pairwise edge classifier 缺少全局树、组边界和语法信息。
+5. 解码层不够强：只在散乱边上做局部选择，不能做 n-best 树搜索与 verifier
+   rerank。
+6. 评测层不够强：relation F1 不能代表 formula-level exact；必须以 canonical
+   tree / LaTeX / layout 三层一起验收。
+
+## 2. 不可违反的边界
+
+### 2.1 生产推理边界
+
+- born-digital PDF 默认不走 OCR/MFR。
+- 生产推理不能读取 LaTeX 源码。
+- 低置信结果只能 candidate-only。
+- TinyBDMath 不直接写 accepted，不直接污染正文、FTS、向量库或 GraphRAG。
+- 外部重工具只能走独立 worker 或可选后端，不进入 UI 热路径。
+
+### 2.2 算法边界
+
+禁止：
+
+- 为 Attention/Napkin 写样本特化正则。
+- 为 `\sqrt`、`\frac`、`h_t`、`\text{model}` 等单例写 decoder 补丁。
+- 用固定论文词表、固定命令表、输出字符串替换伪装识别能力。
+- 只调 canonicalizer 让评测变好，却不改善结构树。
+- 用 OCR 结果覆盖 born-digital 结构证据。
+
+允许：
+
+- 使用通用数学排版语法约束。
+- 使用数据驱动的符号映射资源，例如 Unicode Math、AGL、TeX glyph list、
+  OpenType MATH、font cmap。
+- 使用源码生成训练/审计标签。
+- 使用 verifier 对候选做可解释筛选。
+- 使用模型或统计校准决定 accepted/abstain。
+
+## 3. 目标表示
+
+### 3.1 统一目标：Canonical Symbol Layout Tree
+
+训练目标不应是作者源码字符串，而应是 canonical Symbol Layout Tree，简称
+CSLT。
+
+CSLT 节点类型：
+
+- `symbol`：数学符号、字母、数字、关系符、运算符。
+- `text_run`：`\text{...}`、`\operatorname{...}`、`\mathrm{...}` 中的连续文本。
+- `group`：普通数学组，通常对应 `{...}` 或隐式局部结构。
+- `script`：上标、下标、上下标组合。
+- `fraction`：分子、分母、fraction bar 证据。
+- `radical`：根号主体、可选指数、根号线/钩线证据。
+- `accent`：hat、bar、tilde、vec 等。
+- `under_over`：大型算子上下限、overline/underline、arrow label。
+- `fence`：括号/定界符组，包括 `\left...\right` 等价结构。
+- `matrix`：矩阵、cases、aligned、array，含 row/column/cell。
+- `equation_number`：公式编号，默认与数学主体分离。
+- `artifact`：PDF 中存在但不应进入语义 LaTeX 的节点。
+
+CSLT 边类型：
+
+- `next`：同一基线水平顺序。
+- `child`：通用组子节点。
+- `base`、`sup`、`sub`、`over`、`under`。
+- `numerator`、`denominator`、`fraction_bar`。
+- `radical_body`、`radical_index`、`radical_rule`。
+- `accent_base`、`accent_mark`。
+- `fence_open`、`fence_body`、`fence_close`。
+- `matrix_row`、`matrix_cell`、`cell_content`。
+- `text_char`。
+- `artifact_of`。
+
+### 3.2 为什么不用作者源码作为直接目标
+
+作者源码有大量等价写法：
+
+- `h_t` 与 `h_{t}`。
+- `\le` 与 `\leq`。
+- `\mathbb N` 与 `\mathbb{N}`。
+- `\operatorname{Hom}`、`\mathrm{Hom}`、`\text{Hom}` 的局部等价。
+- 宏展开前后的命令完全不同。
+
+PDF 中通常不保存作者宏，也不保存完整 AST。直接追源码 exact 会把“源码风格”
+误当成“识别质量”。训练和评测应分层：
+
+1. CSLT exact：结构树是否正确。
+2. Canonical LaTeX exact：规范化后的 LaTeX 是否等价。
+3. Render/layout match：重新渲染后视觉布局是否与 PDF 观测一致。
+4. Source-style match：仅用于审计，不作为生产要求。
+
+## 4. 数据与标签路线
+
+### 4.1 数据分层
+
+保留并明确区分四类数据：
+
+1. `instrumented_training_rows`：源码插桩/重编译得到的训练入口。
+2. `graph_rows`：PDF glyph/vector/font/bbox 观测图。
+3. `target_tree_rows`：由源码经 TeX/MathML/AST 工具生成的 CSLT 目标树。
+4. `alignment_rows`：PDF 观测节点到 CSLT 节点的软/硬对齐。
+
+旧 relation labels 只作为第五类辅助数据：
+
+5. `weak_relation_rows`：用于 baseline、预训练或置信补充，不作为最终 hard truth。
+
+### 4.2 目标树生成
+
+目标树生成器必须把源码转换为 CSLT，而不是只抽 MathML hint。
+
+候选实现顺序：
+
+1. KaTeX parse tree：本地已有，速度快，适合作为第一版覆盖常见结构。
+2. MathML 输出：用于与 W3C 表示对齐，补 Presentation MathML 结构。
+3. LaTeXML 或等价 TeX AST 工具：用于处理 alignment、宏、复杂环境。
+4. 自定义 CSLT normalizer：把不同工具输出统一成项目内部 schema。
+
+目标树生成必须记录：
+
+- source formula hash。
+- macro-expanded label hash。
+- parser backend/version。
+- unsupported command/environment。
+- canonicalization warnings。
+- tree node count、edge count、depth。
+- structure coverage buckets。
+
+无法解析的源码不能丢；标记为 `target_parse_failed`，进入审计和后续工具覆盖。
+
+### 4.3 PDF 观测图清洗
+
+当前 graph rows 中可能包含空白、装饰、重复、不可见、颜色 marker、PDF artifact。
+下一步必须在模型前新增观测节点分类：
+
+- `semantic_symbol`：应进入公式语义。
+- `text_symbol`：属于 `\text{...}` 或 operator name。
+- `layout_rule`：fraction bar、radical rule、overline、underline、matrix rule。
+- `fence_symbol`：括号/定界符。
+- `spacing`：空白或仅排版间距。
+- `marker`：训练插桩 marker，不进模型目标。
+- `artifact`：PDF 残留、重复绘制、隐藏字符。
+- `unknown`：暂不能判断，训练时可 ignore。
+
+清洗不能靠样本文字规则，应使用：
+
+- PDF draw/text facts。
+- bbox 面积、可见性、颜色、字体、glyph id。
+- ToUnicode/CMap/glyph name。
+- OpenType MATH/font cmap。
+- 文档内同字体同 CID 传播。
+- 目标树对齐反馈。
+
+### 4.4 对齐器
+
+对齐器是下一阶段最重要的工程，不做它就不会有真正的监督。
 
 输入：
 
-- glyph nodes。
-- vector/path nodes。
-- identity candidates。
-- font/bbox/size/baseline。
-- line-of-sight edges。
-- PDF health 和 repair confidence。
+- PDF observation graph。
+- CSLT target tree。
+- source/canonical LaTeX metadata。
 
 输出：
 
-- relation logits。
-- Symbol Layout Tree。
-- canonical LaTeX candidate。
-- confidence。
-- explanation/evidence。
+- `pdf_node_id -> target_node_id` soft alignment。
+- `target_node_id -> pdf_node_ids` group alignment。
+- `alignment_confidence`。
+- `ignored_pdf_nodes` 及原因。
+- `unmatched_target_nodes` 及原因。
+- 由对齐导出的 hard/soft relation labels。
 
-不负责：
+对齐成本函数：
 
-- OCR。
-- glyph 身份修复。
-- 作者原始宏恢复。
-- 语义证明。
-- 自动 accepted。
+- 字符/Unicode/LaTeX symbol 一致性。
+- glyph name、CID、font family、math alphabet 一致性。
+- bbox 顺序与 target tree inorder 一致性。
+- baseline/size/relative position 与 script/fraction/radical 结构一致性。
+- vector line 与 fraction/radical/accent/underline 结构一致性。
+- text run 连续性。
+- matrix row/column 对齐一致性。
+- macro-expanded canonical symbol 等价类。
 
-特别禁止：
+算法可分阶段：
 
-- 把 TinyBDMath 当作“所有公式规则解析器”。
-- 用固定 LaTeX 命令表、样本论文词表或手写正则伪装结构识别。
-- 在符号身份缺失时跳过 r0.5，让模型硬猜 Unicode/LaTeX。
-- 让模型自由生成 LaTeX 后直接进入正文、RAG 或 GraphRAG。
+1. 叶子节点 bipartite matching。
+2. 连续文本和连续数学 token 动态规划。
+3. group 节点 bottom-up 聚合。
+4. vector/rule 节点角色分配。
+5. 对低置信冲突保留 n-best alignment。
 
-## 2. 为什么适合小模型
+重要原则：
 
-born-digital PDF 已经提供了大量信息。模型不需要从像素中学“这个形状是不是 x”，它主要学：
+- 高置信 alignment 进入 hard supervision。
+- 中置信 alignment 进入 soft label 或 consistency loss。
+- 低置信 alignment 不参与 hard label，只进入审计。
+- 对齐失败是数据事实，不能在 decoder 中补掉。
 
-- 谁在谁右边。
-- 谁是谁的上标/下标。
-- 谁在线上方/下方。
-- 哪些符号属于根号内部。
-- 哪些符号构成矩阵行列。
-- 哪些符号只是编号或标点。
+### 4.5 标签审计
 
-这类任务输入维度小、结构明确、可解释，适合 MLP/GNN/Graph Transformer，而不是大视觉模型。
+训练前必须先让标签可信。每次生成标签都输出 audit report：
 
-## 3. 模型路线
+- row_count。
+- target_parse_success_rate。
+- pdf_node_coverage。
+- target_leaf_coverage。
+- semantic_symbol_precision。
+- artifact_rejection_rate。
+- hard_relation_count。
+- soft_relation_count。
+- ignored_relation_count。
+- per-structure coverage：sub/sup/fraction/radical/text/matrix/accent/operator/fence。
+- alignment_confidence histogram。
+- top failure cases。
 
-### 3.1 v0：MLP edge scorer
+第一阶段门槛：
 
-第一版先做 pairwise edge classifier：
+- 200 行审计：人工查看 top failures，确认 schema 和报告可信。
+- 2000 行审计：hard aligned rows 不低于 70%，关键结构都有样本。
+- 全量审计：不要求全成功，但失败必须分桶，不能无解释地吞掉。
 
-- 对候选边提取几何/字体/identity 特征。
-- 用 MLP/SVM/XGBoost 预测关系类别。
-- 用约束解码生成 SLT。
+## 5. 模型路线
+
+### 5.1 模型输入
+
+每个公式区域构造成 packed graph：
+
+节点特征：
+
+- node type：glyph/vector/image/artifact candidate。
+- Unicode/category/canonical symbol candidate。
+- glyph id/CID/glyph name。
+- font family、font size、font flags、math alphabet candidate。
+- bbox normalized x0/y0/x1/y1/cx/cy/w/h。
+- baseline、advance、line id、span id。
+- identity confidence/source。
+- visibility/color/marker flags。
+- local reading order index。
+
+边特征：
+
+- dx/dy/distance/angle。
+- x/y overlap、IoU、containment。
+- baseline delta、font size ratio。
+- nearest-neighbor ranks。
+- line-of-sight direction。
+- same span/line/font/page region。
+- vector crossing/adjacency evidence。
+- candidate structural prior。
+
+全局特征：
+
+- inline/display。
+- formula bbox size/aspect。
+- page/font health。
+- unknown glyph rate。
+- vector density。
+- source domain bucket 仅训练审计使用，不进生产推理。
+
+### 5.2 模型输出
+
+不要只输出 pairwise relation。正式模型至少输出：
+
+- node semantic mask。
+- canonical symbol distribution。
+- parent pointer distribution。
+- relation type distribution。
+- group boundary distribution。
+- vector/rule role distribution。
+- matrix row/column/cell distribution。
+- formula-level confidence。
+
+### 5.3 模型结构
+
+推荐从轻到重分三档：
+
+#### M1：Biaffine Graph Parser
+
+用途：替换当前 pairwise edge softmax。
+
+结构：
+
+- MLP node encoder。
+- relative geometry edge encoder。
+- 2-4 层 Graph Transformer 或 attention message passing。
+- biaffine parent scorer。
+- relation classifier head。
+- node mask head。
+- symbol head。
 
 优点：
 
-- 快。
-- 容易训练。
-- 容易 ONNX/NumPy 部署。
-- 适合先打通数据、指标和 verifier。
+- 能学习“每个节点只能有一个主要父节点”的全局偏好。
+- 能输出 parent + relation 联合分数。
+- 推理仍可批处理，不需要大型视觉模型。
 
-缺点：
+#### M2：Grammar-Constrained Tree Decoder
 
-- 全局上下文弱。
-- 复杂公式准确率有限。
+用途：从模型分数中生成 n-best CSLT。
 
-### 3.2 v1：GNN edge classifier
+能力：
 
-第二版使用 GNN：
+- arborescence/MST 或 ILP 选主树。
+- relation grammar 检查。
+- group/fence/script/fraction/radical/matrix 结构合法性检查。
+- beam search 保留多个候选。
+- 对低置信冲突 abstain。
 
-- GraphSAGE/GAT/GIN/TransformerConv 均可评估。
-- 2-4 层 message passing。
-- 对候选边输出 relation logits。
+#### M3：Verifier Reranker
 
-GNN 是主路线，因为公式天然是 glyph relation graph。
+用途：把 n-best CSLT 转为 canonical LaTeX/MathML 后重新验证。
 
-### 3.3 v2：Graph Transformer
-
-复杂结构可以尝试 Graph Transformer 或 Set Transformer：
-
-- 全局上下文更强。
-- 对矩阵、多行、复杂嵌套更有帮助。
-- 数据需求更高。
-
-不建议直接做自由 LaTeX seq2seq，因为可解释性和可验证性差。
-
-### 3.4 视觉 CNN/ViT 的位置
-
-CNN/ViT/视觉 Transformer 不属于 TinyBDMath 主模型。它们用于 r2b 视觉兜底。
-
-### 3.5 规则覆盖的正确含义
-
-LaTeX 是宏系统，PDF 也通常不保存作者原始宏或公式 AST，因此不能承诺“用一套手写规则覆盖所有公式”。TinyBDMath 的覆盖目标必须拆成：
-
-- relation label 覆盖：horizontal、sup、sub、subsup、fraction、radical、accent、over/under、operator limits、delimiter、matrix、cases、aligned、text run、math alphabet、arrow label 等。
-- dataset coverage：每类结构都有训练/验证/测试样本，manifest 中有数量和来源统计。
-- decoder coverage：每类关系能转成 SLT/Presentation MathML/canonical LaTeX。
-- verifier coverage：每类结构有符号覆盖、几何一致性和合法性检查。
-- abstain coverage：未知宏、低置信、unknown glyph、shape-only 关键符号、横线歧义、正文污染风险都必须 candidate-only。
-
-## 4. 特征设计
-
-### 4.1 Node feature
-
-- Unicode/category embedding。
-- identity confidence。
-- identity source。
-- font family embedding。
-- font size。
-- bbox normalized x0/y0/x1/y1/cx/cy/w/h。
-- baseline。
-- glyph advance。
-- math font flags。
-- repair warnings。
-- vector/glyph node type。
-
-### 4.2 Edge feature
-
-- dx/dy/distance/angle。
-- x overlap/y overlap。
-- bbox IoU。
-- font size ratio。
-- baseline delta。
-- same line/span/font。
-- line-of-sight direction。
-- vector separator evidence。
-- nearest neighbor ranks。
-- page/region normalized distance。
-
-### 4.3 Relation classes
-
-第一版：
-
-- HORIZONTAL。
-- SUP。
-- SUB。
-- SUBSUP。
-- ABOVE。
-- BELOW。
-- NUMERATOR。
-- DENOMINATOR。
-- RADICAL_BODY。
-- RADICAL_INDEX。
-- INSIDE。
-- ACCENT。
-- OVERLINE。
-- UNDERLINE。
-- OPERATOR_OVER。
-- OPERATOR_UNDER。
-- ARROW_LABEL_ABOVE。
-- ARROW_LABEL_BELOW。
-- FENCE_OPEN。
-- FENCE_CLOSE。
-- MATRIX_RIGHT。
-- MATRIX_DOWN。
-- CASES_BRANCH。
-- TEXT_RUN。
-- MATH_ALPHABET。
-- PUNCT。
-- NO_EDGE。
-
-第一版模型可以只训练高价值子集，但 manifest 和 coverage report 必须列出未覆盖类别，不能把未覆盖类别伪装成已解决。
-
-## 5. 数据工程
-
-### 5.1 训练数据来源
-
-- synthetic LaTeX formulas。
-- arXiv LaTeX source。
-- arXMLiv/LaTeXML MathML。
-- IM2LATEX 公式重新编译成 PDF。
-- Attention/Napkin 仅做回归和验收，不做过拟合训练。
-
-### 5.2 数据生成流程
-
-1. 取 LaTeX 公式。
-2. 编译为 PDF。
-3. r0 抽取 Raw Glyph Graph。
-4. r0.5 修复符号身份。
-5. 用 LaTeXML/KaTeX/自定义转换得到 SLT/Presentation MathML。
-6. 对齐 glyph node 与 target node。
-7. 生成 edge relation labels。
-
-### 5.3 训练集切分
-
-- 按论文切分。
-- 按年份切分。
-- 按领域切分。
-- 按字体/engine 切分。
-- 保留 Office/PPT 可复制公式单独域。
-
-不能随机按公式切分后宣称泛化。
-
-## 6. 解码器
-
-模型输出 edge logits 后，解码器负责：
-
-- 选择合法父边。
-- 避免环。
-- 合成 sub/sup/fraction/root/matrix。
-- 分离 equation number。
-- 生成 SLT。
-- 序列化 canonical LaTeX。
-
-解码器使用通用数学结构约束，不使用样本特化词表。
-
-## 7. Verifier 接口
-
-TinyBDMath 输出不能直接 accepted。必须交给 verifier：
+Verifier 信号：
 
 - symbol coverage。
+- bbox coverage。
 - geometry consistency。
-- structure legality。
-- render/layout check。
-- identity uncertainty check。
-- PDF health check。
+- render-layout match。
+- grammar legality。
+- unsupported command。
+- source-free confidence calibration。
 
-模型输出里必须保留足够信息给 verifier 判断。
+### 5.4 损失函数
 
-## 8. 部署
+多任务损失：
 
-### 8.1 训练
+- node semantic mask cross entropy。
+- symbol identity cross entropy 或 candidate ranking loss。
+- parent pointer loss。
+- relation type loss。
+- group boundary loss。
+- vector/rule role loss。
+- tree legality auxiliary loss。
+- alignment soft-label KL loss。
+- formula-level accepted/abstain calibration loss。
 
-训练可使用 PyTorch/PyTorch Geometric/DGL。训练环境可独立，不进主程序环境。
+类别极不平衡必须处理：
 
-### 8.2 推理
+- class-weighted loss。
+- focal loss 或 hard negative mining。
+- per-formula balanced sampling。
+- relation family balanced batches。
+- display/inline 分桶采样。
 
-推理优先：
+不能再让 `NO_RELATION` 和简单水平关系淹没训练。
 
-- MLP：ONNX Runtime 或 NumPy。
-- GNN：ONNX、TorchScript 或自实现轻量前向。
-- 批处理公式 graph。
-- 后台 worker，不进 UI 热路径。
+### 5.5 高级模型是否值得
 
-### 8.3 版本
+“更高级模型”不是直接上自由生成大模型。更合理的高级化顺序：
 
-每个结果必须记录：
+1. 先做强标签和对齐。没有强标签，模型越大越会学偏。
+2. 再做 graph parser。它最匹配 PDF glyph graph 的结构。
+3. 再做 constrained decoder 和 verifier。它们决定能不能 accepted。
+4. 最后才考虑 LayoutLM/Donut/视觉语言模型作为 r2b/r3 辅助，不放默认路径。
 
-- graph_schema_version。
-- model_version。
-- decoder_version。
-- verifier_version。
-- threshold_profile_version。
-- input_hash。
+原因：
 
-## 9. 指标
+- born-digital PDF 已经给出矢量和字体事实，视觉大模型会浪费信息。
+- 自由 seq2seq LaTeX 难以解释和校准，容易幻觉。
+- 用户最需要的是高精度 accepted，不是一个看起来流畅但不可证的字符串。
 
-模型内部：
+## 6. 解码与验证
 
-- relation F1。
-- per-relation precision/recall。
-- SLT exact。
-- tree edit distance。
+### 6.1 decoder 职责
 
-产品指标：
+decoder 只做：
 
-- candidate recall。
-- accepted precision。
-- accepted coverage。
-- latency。
-- cache skip rate。
-- downstream RAG contamination rate。
+- 读取模型输出。
+- 生成合法 CSLT。
+- 输出 n-best canonical LaTeX。
+- 保留完整 evidence。
+- 标记 warnings 和 abstain reasons。
 
-99.999% 只用于 accepted precision 的长期统计目标。
+decoder 不做：
 
-## 10. 研发里程碑
+- 根据字符串写单例补丁。
+- 在模型没选主体时猜根号/分数主体。
+- 把低置信候选强行 canonicalize 成正确答案。
+- 为提高 eval exact 改写结构事实。
 
-### 2026-05-26 当前实跑状态
+### 6.2 通用语法约束
 
-当前已经完成“模型链路跑通”，但没有完成“模型效果达标”。
+允许的约束示例：
 
-已确认事实：
+- 每个 semantic node 最多一个主父节点。
+- 树不能成环。
+- `fraction` 必须有 numerator 和 denominator。
+- `radical` 必须有 body，index 可选。
+- `script` 必须有 base，sup/sub 至少一个。
+- fence open/close 必须方向兼容。
+- matrix cell 必须属于 row，row 必须属于 matrix。
+- artifact/spacing 不进入 semantic serialization。
 
-- 精确训练样本来自 LaTeX 插桩/重编译/PDF 结构层彩色框，不是粗略 PDF-源码匹配。当前 verified exact 行数是 Attention 135、Napkin 29743，合计 29878；Attention 未找到颜色 marker 的 3 条不进入 verified 训练行。
-- 每条样本保留 `raw_source_latex` 和 macro-expanded `label_latex`。宏展开是训练目标标准化的一部分，真实生产推理不读源码。
-- 训练样本层是准确的；当前 warning 主要来自 KaTeX 将复杂 canonical LaTeX 转为 MathML/parse-tree 时的覆盖限制，特别是 Napkin 的 alignment `&`、xy-pic/电路图和复杂宏形态。下一步应引入 LaTeXML 或更强 TeX AST/MathML 监督。
+这些是数学排版通用合法性约束，不是样本硬编码。
 
-已跑通链路：
+### 6.3 verifier
 
-- `instrumented_training_rows.jsonl -> tinybdmath_graph_rows.jsonl`：29878 行。
-- `graph rows -> MathML hints -> relation labels`：2037744 条 edge labels。
-- `relation labels -> PyTorch edge model`：有效 edge samples 1965743，导出 JSON 模型 `tinybdmath_edge_softmax_v2_geometry_vector_rule_radical`，主程序环境不需要 PyTorch。
-- `edge model -> relation scores`：29878 行，1570380 条 relation scores。
-- `relation scores -> structural candidates`：29878 行，219617 条 selected relations。
-- `structural eval`：micro precision=0.963245、recall=0.189623、F1=0.316868。
-- `r2a main pipeline`：Attention 前 4 页用全量模型写入 46 条 `tinybdmath_structural:tinybdmath`；所有结果 candidate-only，accepted=0；复用 DB 时 fusion 50 条全部 `already_done_same_input`。
+Verifier 输出：
 
-当前边界：
+- `passed_for_candidate`。
+- `passed_for_accepted`。
+- `confidence_calibrated`。
+- `symbol_coverage`。
+- `layout_coverage`。
+- `render_similarity`。
+- `warnings`。
+- `blockers`。
 
-- 关系层验证 accuracy/precision 高不等于最终 LaTeX 还原准确率。
-- 结构候选召回低，SLT/decoder 仍弱，`h_{t-1}`、`\sqrt{d_k}` 这类样例仍可能被错误结构化。
-- TinyBDMath 输出不能 accepted，不能写正文/RAG/GraphRAG accepted。
-- decoder 只能把模型选中的关系渲染为候选 LaTeX；不能在输出层用几何 fallback 猜根号主体、分数上下、上下标归属。
+accepted 的最低条件：
 
-下一步优先级：
+- 没有 unsupported critical structure。
+- semantic symbol coverage 高。
+- layout/render 一致。
+- 模型置信和 verifier 置信均超过门槛。
+- 当前 PDF health 足够好。
+- 不含高风险未解析 artifact。
 
-1. 用 LaTeXML/TeX AST 替换或补充 KaTeX 对复杂环境的关系监督，减少 MathML warning 和 weak-label 噪声。
-2. 从 weak relation hints 升级到更强的 SLT/MathML 节点对齐标签，尤其是根号主体、分数 numerator/denominator、overline/accent、operator limits、matrix/cases/alignment。
-3. 训练 class-weighted MLP/GNN，而不是只用线性 edge softmax；把结构一致性放入模型/候选选择层。
-4. decoder 只做图到 LaTeX 的通用序列化和合法性检查，任何“选谁当主体”的判断必须来自模型输出或 verifier，不在 decoder 写补丁。
-5. 继续用 Attention/Napkin 全量和后续新增 PDF+LaTeX 资料做真实评测，报告 formula-level exact/near/weak，而不是只报 relation-level 指标。
+达不到条件时只能 candidate-only。
 
-### M0：数据 schema
+## 7. 工程落地计划
 
-- Raw Glyph Graph schema 已由 `src/core/pdf_glyph_graph.py` 落地，r0 evidence 已携带局部 graph hash/health/glyph/vector/image。
-- Enriched Glyph Graph schema MVP 已由 `src/core/symbol_identity_repair.py` 落地，当前支持 PDF text/glyph name/same font+CID 三类保守身份证据。
-- Enriched Glyph Graph 已作为 `r0_5_symbol_identity_repair` 独立轮次写入 `formula_round_jobs`，按 input hash 跳过。
-- `GlyphNameMappingLoader` 已提供 AGL/texglyphlist 风格资源加载入口，并把 mapping source/warnings 写入 r0.5 summary。
-- `GlyphNameMappingLoader` 已支持项目资源目录、环境变量和 TeX Live/MiKTeX 常见路径自动发现；发现失败仅记录 warning。
-- 本地标准和映射参考已缓存到 `.local_references/standards/`，索引见 `docs/local_standards_cache_index.md`；这些文件不提交，后续产品化资源必须先做许可证与 hash 审计。
-- `tools/born_digital_formula_dataset.py` 已开始把 Attention/Napkin 全量 PDF + LaTeX 源码整理为真实训练/验收数据：source formula index、PDF candidate index、TinyBD feature graph JSONL。
-- 下一步扩展真实 TeX Live/CTAN 资源打包策略、font cmap 和 outline 候选。
-- edge candidate generator。
-- 可视化工具。
+### 7.1 新增/重写模块
 
-### M1：MLP baseline
+建议文件：
 
-- Attention/Napkin 真实 PDF + LaTeX 源码数据流已开始落地：`tools/born_digital_formula_dataset.py`
-  生成 source formula index、PDF candidate index 和 TinyBD feature graph JSONL。
-- 源码插桩/重编译训练集已成为更可靠的第一训练资产：Attention 全量 138/138 verified exact rows；Napkin v3 全量 29743/29743 verified exact rows，blockers 为空。该数据集提供真实 PDF glyph/vector bbox 和 canonical LaTeX label，是下一阶段 TinyBDMath 训练/评测的主入口。
-- `tools/tinybdmath_training_data.py` 已把真实数据产物转成训练/验收行，包含 quality label、
-  unknown glyph rate、edge hint counts、feature density、structural signal count 和源码目标。
-- `src/core/tinybdmath_baseline.py` 已提供标准库一隐藏层 MLP，用 PDF graph 特征预测候选质量；
-  源 LaTeX 只用于标签和评估，不作为推理特征。
-- `src/core/tinybdmath_torch_backend.py` 和 `tools/tinybdmath_train_torch.py` 已提供可选 PyTorch 后端；
-  用户本机 `science` conda 环境可用于训练，主程序环境不安装 torch。
-- 仍缺真正 relation label/SLT decoder；当前 MLP 是质量门控基线，不负责从 graph 直接生成 LaTeX。
+- `src/core/tinybdmath_cslt_schema.py`：CSLT 节点、边、序列化 schema。
+- `src/core/tinybdmath_target_tree.py`：KaTeX/MathML/LaTeXML 输出到 CSLT。
+- `src/core/tinybdmath_observation_cleaner.py`：PDF 观测节点分类和清洗。
+- `src/core/tinybdmath_alignment.py`：PDF graph 与 CSLT 对齐。
+- `src/core/tinybdmath_alignment_audit.py`：标签审计和失败分桶。
+- `src/core/tinybdmath_graph_parser.py`：PyTorch graph parser 结构。
+- `src/core/tinybdmath_constrained_decode.py`：CSLT 约束解码。
+- `src/core/tinybdmath_layout_verifier.py`：候选验证和置信校准。
+- `src/core/tinybdmath_candidate_serializer.py`：CSLT/LaTeX/MathML 输出。
 
-### M2：插桩数据资产化
+建议工具：
 
-目标：把插桩训练集转换成结构模型真正能学习的 graph/relation 数据，而不是只把公式 bbox 和 LaTeX label 存起来。
+- `tools/tinybdmath_build_target_trees.py`。
+- `tools/tinybdmath_align_targets.py`。
+- `tools/tinybdmath_audit_alignment.py`。
+- `tools/tinybdmath_train_graph_parser.py`。
+- `tools/tinybdmath_decode_cslt.py`。
+- `tools/tinybdmath_eval_formula_recovery.py`。
+- `tools/run_tinybdmath_neural_symbolic_pipeline.ps1`。
 
-必须产出：
+旧入口保留但降级：
 
-- `instrumented_training_rows.jsonl -> tinybdmath_graph_rows.jsonl` 转换器。
-- 每条样本包含 glyph nodes、vector nodes、font/size/bbox、reading/order edges、candidate structural edges、label_latex、raw_source_latex、case/page/source id、compiled PDF hash、schema/model preprocessing version。
-- dataset manifest：输入文件 hash、行数、case split、公式类型统计、inline/display 统计、数学字体统计、vector-line 参与统计、失败样本。
-- train/validation/test split：按 case、章节/页段和公式类型分层，禁止同页近邻泄漏。
+- `tools/run_tinybdmath_relation_pipeline.ps1` 只作为 weak-label baseline。
+- `tools/tinybdmath_decode_structural_candidates.py` 只作为历史 candidate baseline。
+- `tools/tinybdmath_eval_structural_candidates.py` 只评估 relation 层，不代表公式质量。
 
-第一版 relation label 可以分两层：
+### 7.2 第一阶段：目标树和对齐审计
 
-- 弱监督 formula-level：模型先学候选质量和局部结构风险，用于 r2a candidate scoring。
-- 结构监督 relation-level：用可审计的 LaTeX/MathML/SLT 转换器生成父子/上下标/分数/根号/alignment 关系，再对齐 glyph graph。该层必须保留对齐置信度，不能把低置信关系当 hard label。
+目标：不训练，先证明标签层可信。
+
+任务：
+
+1. 定义 CSLT schema。
+2. 从 200 行 graph rows + label LaTeX 生成 target tree。
+3. 实现 leaf alignment。
+4. 实现 text run、script、fraction、radical 的 group alignment。
+5. 输出 alignment report。
+6. 人工查看 top 50 failures。
 
 验收：
 
-- Attention 转换行数 138，Napkin 转换行数 29743。
-- 0 个缺 label、0 个缺 bbox、0 个 JSON schema error。
-- 低置信 relation label 可以存在，但必须标记为 weak/ignored，不参与 hard supervision。
+- target tree JSON schema 稳定。
+- 每行保留 source hash、graph hash、parser backend、warnings。
+- 200 行报告可解释。
+- `h_{t-1}`、`\sqrt{d_k}`、`d_{\text{model}}` 这类样例能在标签层表达正确目标。
+- 不要求模型准确率。
 
-### M3：项目接入
+### 7.3 第二阶段：2000 行标签规模化
 
-- r2a structural candidate worker 已有第一版：`src/app/tinybdmath_candidate_service.py` 从 r0/r0.5
-  persisted evidence 生成 TinyBD feature graph，写入 `formula_recognition_results`
-  的 `tinybdmath_structural:tinybdmath` 候选，并写 `r2a_tinybdmath_structural` round record。
-- `tools/formula_multiround_pipeline.py --run-tinybdmath` 已接入 r0/r0.5 后、fusion 前的非视觉 r2a；`--tinybdmath-edge-model` 可传入 edge relation model，把 `relation_scoring` 和 `structural_candidate` 一并写入 evidence。
-- FormulaIndexStore 落库。
-- pipeline 报告 TinyBDMath 候选，并进入 fusion/r3/r4 后续链路；结果固定 candidate-only，不覆盖正文/RAG。
+目标：确认标签覆盖不是靠几个样例。
 
-下一步接入要求：
+任务：
 
-- r2a 输出必须包含 candidate LaTeX、relation evidence、confidence、verifier warnings、model_version、feature_schema_version、input_hash。
-- Attention/Napkin 验收报告必须能比较 r0、r2a、r2b 视觉工具、r3 review 和 fusion 最终候选。
-- 没有通过 verifier/accepted gate 时，r2a 永远不能覆盖正文和 RAG。
+1. 扩展到 2000 行。
+2. 统计 sub/sup/fraction/radical/text/fence/operator/matrix coverage。
+3. 按 confidence 分 hard/soft/ignore。
+4. 输出可复现 manifest。
+5. 对比旧 weak relation labels，列出冲突分桶。
 
-### M4：GNN
+验收：
 
-- GNN edge classifier。
-- 分数/根号/上下标专项评估。
-- inline 初步支持。
+- hard aligned rows >= 70% 或明确说明失败结构。
+- 每类关键结构至少有样本和指标。
+- artifact/spacing 节点不再无解释进入 hard supervision。
+- 不用 decoder 补丁掩盖标签失败。
 
-### M5：复杂结构
+### 7.4 第三阶段：Graph Parser 训练
 
-- matrix/cases/aligned。
-- math alphabet。
-- Office/PPT 可复制公式域。
+目标：训练 M1，不追求一步到位 accepted。
 
-### M6：质量证明
+任务：
 
-- 大规模独立测试。
-- accepted gate 校准。
-- 统计置信区间。
+1. 用 hard labels 训练 node mask、parent pointer、relation type。
+2. 用 soft labels 做辅助 KL。
+3. class-balanced sampling。
+4. 每 1-2 epoch 输出 formula-level dev decode。
+5. 与旧 edge model 做 ablation。
 
-## 11. 当前最小可执行任务
+初始验收：
 
-1. 已完成 Raw Glyph Graph schema。
-2. 已完成 r0.5 静态映射 MVP，生成 Enriched Glyph Graph。
-3. 已完成 r0.5 独立落库最小闭环。
-4. 已完成 AGL/texglyphlist 风格映射资源 loader。
-5. 已完成 glyph map 自动发现入口。
-6. 已开始 Attention/Napkin 真实数据集生成器。
-7. 已完成真实训练行生成器、标准库 MLP 训练器、候选打分器和数据审计器。旧 `realdata` pipeline
-   已废弃并删除；后续数据制备以 sharded dataset、instrumented dataset 和 graph relation pipeline 为准。
-8. 已完成可选 PyTorch 训练后端；旧 `tools/run_tinybdmath_torch_science.ps1` 已删除，后续直接用
-   `tools/tinybdmath_train_torch.py` 或 `tools/tinybdmath_train_edge_torch.py`，并保持主环境不安装 torch。
-9. 已接入 r2a candidate-only 服务和 `--run-tinybdmath` pipeline 开关。
-10. Attention 前 6 页 smoke：`r2a_tinybdmath_structural` 处理 7 条 r0 候选，写入
-    `tinybdmath_structural:tinybdmath` 7 条候选和 7 条 round done；fusion 能读取，`ready_for_manual_accept=0`。
-11. 已完成插桩训练集第一阶段：Attention 138/138、Napkin v3 29743/29743 verified exact rows。
-12. 已完成插桩训练集 graph assetization 第一版：`tools/tinybdmath_instrumented_graph_dataset.py` 将 Attention + Napkin 29881 条 verified exact rows 转成 `tinybdmath_graph_rows.jsonl`、manifest 和 split；实跑 rows=29881、attention=138、napkin=29743、blockers={}，dataset hash `f49359d58f2b34b006028cfd106d6678e7999f116934fbbaebbf6b250c886ba0`。
-13. 已完成 dependency-light graph baseline smoke：`src/core/tinybdmath_graph_baseline.py` 和 `tools/tinybdmath_train_graph_baseline.py` 可从 graph rows 训练弱监督结构桶 softmax baseline，输出 model artifact 和 report。2000 行 smoke、3 epochs 验证集 accuracy 约 0.796；该 baseline 只证明数据/模型工件链路，不负责 LaTeX 生成或 accepted。
-14. 已完成 relation label 弱监督流水线：`src/core/tinybdmath_relation_labels.py` 和 `tools/tinybdmath_build_relation_labels.py` 从 graph rows 生成 edge label rows。全量实跑 rows=29881、edge_labels=2035016、blockers={}，标签包括 HORIZONTAL/SUP/SUB/ABOVE/BELOW/FRACTION_BAR/RADICAL_BODY/NO_RELATION/IGNORE。弱标签只用于 bootstrapping，不能作为 accepted 质量证明。
-15. 已完成 dependency-light edge baseline smoke：`src/core/tinybdmath_edge_baseline.py` 和 `tools/tinybdmath_train_edge_baseline.py` 可从 graph rows + relation labels 训练 edge softmax baseline。2000 行 graph 对应 121174 条 edge samples、3 epochs smoke 验证 accuracy=1.0；该结果主要证明弱标签和 hint 高相关，不能当泛化指标或最终准确率。
-16. 已完成 relation scorer inference bridge：`src/core/tinybdmath_relation_scorer.py` 和 `tools/tinybdmath_score_relations.py` 可加载 edge model，对 graph rows 输出 candidate-only relation scores、summary、warnings 和 manifest。2000 行 smoke 输出 relation_scores=99467，warning 仍包含 expected_subscript/superscript/fraction not scored，说明当前模型只能作为候选证据，不能 accepted。
-17. 已完成结构候选整理 MVP：`src/core/tinybdmath_structural_candidate.py` 和 `tools/tinybdmath_decode_structural_candidates.py` 将 relation scores 转成 selected_relations、horizontal-rule ambiguity report、verifier warnings 和 abstain 标记；不生成 accepted LaTeX，不把横线硬判为分数线/根号线/overline。
-18. 已把 edge model 接入 r2a service 和 multiround pipeline：`TinyBDMathCandidateService(edge_model_path=...)` 会在 `evidence_json` 写入 `relation_scoring` 和 `structural_candidate`。Attention 前 6 页 smoke：r2a records_seen=7、processed=7、`relation_model_version=tinybdmath_edge_softmax_v0`，SQLite 抽查每条候选有 200+ relation scores 和 selected_relations；仍只沿用 r0 LaTeX 候选，未提升最终准确率。
-19. 已把 inline math-font 证据接入 r2a：`TinyBDMathCandidateService.process_inline_candidates(...)` 会消费 `inline_pdf_evidence.spans` 中的字体、字号、bbox，并生成 inline feature graph、relation scores 和 structural candidate。Attention 前 2 页 smoke：inline records_seen=9、processed=6、skipped_no_evidence=3；`h_t`、`h_{t-1}` 等带脚本字号证据的行内候选已进入 `tinybdmath_structural:tinybdmath`。这仍是 candidate-only，单字母或无 span 证据会 abstain/跳过。
-20. 已加入 SLT skeleton/verifier MVP：`structural_candidate` 现在包含 `slt_skeleton` 和 `verifier_report`，记录节点、roots、孤立节点、覆盖率、多父冲突、横线歧义和 accepted blocker。结构选择加入通用出入度约束，2000 行 smoke 中 selected_relations 从 39573 收敛到 9004，`slt_node_has_multiple_parents` 从 1346 降到 78。它仍不生成 LaTeX，也明确 `passed_for_accepted=false`；下一步 decoder 可以消费这个 skeleton，而不是直接读散乱 edge。
-21. 已加入 structural candidate relation 级评测入口：`src/core/tinybdmath_structural_eval.py` 和 `tools/tinybdmath_eval_structural_candidates.py` 可把 selected relations 与 relation labels 对齐，输出 per-relation precision/recall/F1、row report 和 warning counts。2000 行 weak-label smoke：micro precision=0.978121、recall=0.124314、F1=0.220591，说明当前结构候选很保守、不能作为最终识别质量。
-22. 已加入 KaTeX MathML/parse-tree audit extractor：`src/core/latex_mathml_extractor.py` 和 `tools/tinybdmath_extract_mathml.py` 复用本地 `src/ui/katex.min.js`，输出 MathML、parse tree node counts 和 relation hints。300 行 graph rows smoke 成功，只有 1 条 alignment `&` parse warning；该工具只用于训练/审计，不进入生产 PDF 推理输入。
-23. relation labels 已带 MathML 结构提示：`tinybdmath_relation_labels.py` 为每条 graph row 记录 `mathml_relation_hints/mathml_node_counts/mathml_warnings`。100 行 smoke 中 MathML hints 包含 FRACTION_BAR=3、RADICAL_BODY=5、SUB=70、SUP=22。
-24. 已加入一键 relation pipeline smoke：`tools/run_tinybdmath_relation_pipeline.ps1` 串起 MathML extraction、graph rows -> relation labels -> edge baseline training -> relation scoring -> structural candidates -> relation eval，并生成 `relation_pipeline_summary.json`。500 行训练/审计链已跑通主体步骤：MathML rows=500、relation labels rows=500、score rows=500、structural eval micro precision=0.966903、recall=0.125402、F1=0.222011；80 行 summary check 已验证汇总 JSON 正常生成。
-25. 已完成 relation pipeline 性能修正：KaTeX MathML extraction 改为分块批量调用，relation label 构建可复用预计算 MathML rows，不再对每条公式重复启动/调用 KaTeX。2000 行完整 relation pipeline（MathML -> labels -> train -> score -> structural -> eval）已跑通，总耗时约 48.758s；relation labels 单步 2000 行降到约 5.791s，edge_labels=122580，structural eval micro precision=0.978121、recall=0.124314、F1=0.220591。
-26. 已修正生产 r2a 限流错误：`r2_limit=0` 只表示跳过视觉/本地高精度 r2，不再截断非视觉 TinyBDMath r2a。新增回归测试保证 `r2_limit=0` 时 inline candidates 仍会全量进入 r2a。
-27. 已跑通生产候选链 v2：Attention 前 6 页 `formula_multiround_pipeline.py --run-tinybdmath --tinybdmath-edge-model ... --r2-limit 0` 成功完成 r0/r0.5/r2a/r1/r2/r3/r4/r5，r2a records_seen=122、processed=115（7 条 r0 structure + 108 条 inline）、r2a elapsed=1.254s、总 elapsed=12.521s；Napkin 8-16 页 r2a records_seen=81、processed=78（2 条 r0 structure + 76 条 inline）、r2a elapsed=0.586s、总 elapsed=10.432s。两者均为 born-digital 非 OCR 默认路径，所有 TinyBDMath 输出仍是 candidate-only，`ready_for_manual_accept=0`。
-28. 已验证二次打开跳过：Attention 前 6 页复用同 DB 时 r0 processed_pages=0、skipped_completed_pages=6，r2a processed=0、skipped_cached=115，总 elapsed=5.629s；Napkin 8-16 页 r0 processed_pages=0、skipped_completed_pages=8，r2a processed=0、skipped_cached=78，总 elapsed=5.703s。
-29. 当前质量门禁仍未达标：Attention 前 6 页 TinyBDMath group candidate_count=78、near_match_rate=0.257、average_best_similarity=0.605；Napkin 8-16 页 TinyBDMath group candidate_count=30、near_match_rate=0.0、average_best_similarity=0.116。严格质量门禁均失败，说明链路已跑通但公式 LaTeX 恢复质量远未完成，不能写 accepted，也不能进入正文/RAG/GraphRAG。
-30. 全量 29881 行 relation pipeline 已启动后台运行，当前已完成全量 MathML 和 relation labels 阶段，coverage 包括 inline=27725、display=2156、math_alphabet=5772、subscript=7188、superscript=4331、fraction=765、radical=564、script_size_pdf_evidence=11247，blockers={}；后续需等待 train/score/structural/eval 完成并审计报告。
-31. 已新增正式 PyTorch edge relation 训练入口：`tools/tinybdmath_train_edge_torch.py` 必须在隔离 `science` 环境运行，训练后导出主程序可读取的 `tinybdmath_edge_baseline_model.json`，主环境不安装 torch；`tools/run_tinybdmath_relation_pipeline.ps1 -UseTorchEdge` 可切换到该路径。
-32. PyTorch edge smoke 已跑通但不能直接替代当前候选 baseline：2000 行/121174 条边、CPU 4 epochs 验证 accuracy=0.999424，并能导出兼容模型；500 行端到端 PyTorch relation pipeline v2 structural eval precision=0.910751、recall=0.022944、F1=0.044761，仍低于 hint-prior/保守 baseline 的 500 行 F1=0.222011。原因包括类别极不平衡、置信度校准偏保守、decoder 对 LOW_CONFIDENCE 和横线/上下标选择仍过度 abstain。结论：PyTorch 路径已接通，但后续必须做 class-weighted loss、两层 MLP/GNN、阈值校准和 decoder 改进，不能为了“用 PyTorch”牺牲准确率。
-33. 下一步第一优先级：把 `mathml_relation_hints` 升级为可对齐到 glyph graph 的 SLT/MathML hard labels，降低对 candidate hint 的直接依赖，形成真正 relation-level supervision。
-34. 下一步第二优先级：用 graph rows 训练更正式的 MLP/PyTorch edge baseline，输出按 inline/display、上下标、分数线、根号、align、数学字体分项的评测报告。
-35. 下一步第三优先级：让 r2a 用 structural candidate 进入真正 decoder/verifier，而不是继续复用 r0 latex；证明相对 r0/fusion baseline 有提升后才能提高门禁。
-36. 下一步继续接入真实 TeX Live/CTAN 资源目录、font cmap 和 outline/shape identity candidate。
-37. 下一步生成 100-1000 条 synthetic 公式 PDF graph，并开始 SLT/MathML decoder/verifier MVP。
-38. 2026-06-01 已完成 relation scoring 性能改造：`tools/tinybdmath_score_relations.py` 支持
-    PyTorch batch/vectorized fast scoring、compact score、direct structural decode 和 no-score-jsonl；
-    `tools/tinybdmath_eval_structural_candidates.py`、`tools/tinybdmath_eval_decoded_latex.py` 支持 streaming eval。
-    全量 29881 行 direct eval 约 192.59s，structural F1=0.315585，decoded exact=0.523242、
-    near=0.659550。性能路径可用，但质量仍不达标，下一步必须改监督/模型/decoder/verifier，不得写样本硬编码。
+- 2000 行 dev formula exact 明显高于旧 baseline。
+- `h_{t-1}`、`\sqrt{d_k}`、`d_{\text{model}}` 不再依赖 decoder 猜。
+- relation recall 提升时 precision 不崩。
+- 模型可导出独立 artifact，主程序环境不强制装 PyTorch。
 
-## 12. 近期 48 小时执行计划
+### 7.5 第四阶段：约束解码与 verifier
 
-1. **数据转换器**
-   - 输入：当前保留的 `test_artifacts/instrumented_full_unique_color_components_v3_20260601/instrumented_training_rows.jsonl`
-     或后续新生成的 Attention/Napkin 插桩训练行。
-   - 输出：`tinybdmath_graph_rows.jsonl`、`tinybdmath_graph_manifest.json`、`tinybdmath_graph_split.json`。
-   - 要求：0 缺失、0 schema error、保留所有 hash/version/source/bbox/glyph/font/vector 证据，并记录 MathML/Unicode/glyph resource version。
+目标：把模型输出变成可校准候选。
 
-2. **评测基线**
-   - 先训练质量/结构风险 MLP，不急着宣称完整 LaTeX 生成。
-   - 输出：train/val/test 指标、confusion、低置信样例、按公式类型分桶指标、未覆盖结构类别清单。
-   - 目标：证明它能识别当前 r0/r2a 哪些候选可靠、哪些需要 r3/r2b/人工复核。
+任务：
 
-3. **结构解码 MVP**
-   - 先覆盖高价值结构：horizontal、sup、sub、subsup、fraction bar、sqrt/radical body、large operator limits、alignment rows、math alphabet。
-   - 横线歧义处理原则：横线节点不先验指定为分数线/根号线/overline/limit bar，而是由上下文候选关系和 verifier 判断；低置信时输出多候选，不 accepted。
-   - 未覆盖结构必须显式 abstain 或进入 r2b/r3/人工复核，不能用粗糙 LaTeX fallback 冒充正确结果。
+1. 实现 CSLT constrained decoder。
+2. 实现 n-best beam。
+3. 实现 layout verifier。
+4. 输出 candidate/evidence/warnings/blockers。
+5. 旧 LaTeX decoder 改为 CSLT serializer，不再直接消费散边。
 
-4. **r2a 集成**
-   - 新模型输出进入 `formula_recognition_results`，stage/model 写清 `tinybdmath_structural` 和模型版本。
-   - fusion 使用 r2a 置信度和 verifier warnings 排序。
-   - `--reuse-db` 必须跳过同 input hash 的已完成 r2a。
+验收：
 
-5. **门禁与 E2E**
-   - accepted/rejected/revision 表、命令行审核、基础 UI、manual revision、evidence 预览、PDF bbox 定位和 r5 增量写回已接线；下一步补批量审核、accepted precision 报告和更清晰的 GraphRAG 路径证据。
-   - Napkin 长文档默认打开路径不得加载训练/模型冷启动。
-   - E2E 再覆盖滚动、跳转、缩放、翻译、问答和日志审计。
+- formula-level exact/near 用新 eval 评估。
+- verifier 能拒绝明显错误候选。
+- accepted gate 默认仍关闭或极保守。
+- 所有候选保留 bbox/source-free evidence。
+
+### 7.6 第五阶段：主线 r2a 集成
+
+目标：替换 r2a 内部候选生成，但保持生产安全边界。
+
+任务：
+
+1. `TinyBDMathCandidateService` 支持新 graph parser artifact。
+2. 写入 `formula_recognition_results` 的 evidence JSON：
+   - graph schema version。
+   - target/model/decode/verifier version。
+   - selected CSLT。
+   - n-best candidates。
+   - confidence。
+   - verifier report。
+   - abstain reasons。
+3. fusion 只把它作为候选排序依据。
+4. accepted 仍由审核/门禁控制。
+
+验收：
+
+- Attention/Napkin 限页 pipeline 可跑。
+- 二次打开同 input hash 跳过。
+- 不加载 OCR/MFR。
+- 不污染正文、FTS、向量库、GraphRAG。
+
+### 7.7 第六阶段：全量评估与校准
+
+目标：给出可信的质量结论。
+
+评估维度：
+
+- formula canonical exact。
+- formula near。
+- CSLT tree edit distance。
+- render/layout match。
+- per-structure exact。
+- accepted precision。
+- accepted coverage。
+- abstain rate。
+- latency P50/P95。
+- cache skip rate。
+
+门槛：
+
+- 先超过旧 direct eval exact=0.523/near=0.660。
+- 再超过 r0/fusion baseline。
+- 再开极保守 accepted profile。
+- accepted precision 没有足够样本和置信区间前，不宣称 99.9%。
+
+## 8. 具体执行清单
+
+### 8.1 立即做
+
+1. 冻结旧 edge/decoder 试验为 baseline，不继续在旧 decoder 上写补丁。
+2. 新建 CSLT schema。
+3. 新建 target tree builder。
+4. 新建 alignment report，先跑 200 行。
+5. 把 200 行失败样例分桶写入报告。
+
+### 8.2 跑通后做
+
+1. 扩展到 2000 行。
+2. 实现 Graph Parser M1。
+3. 训练 2000 行 smoke。
+4. 新建 formula-level eval。
+5. 与旧 direct eval 对比。
+
+### 8.3 再之后做
+
+1. 全量训练。
+2. verifier/reranker。
+3. r2a 接入。
+4. Attention/Napkin 限页 E2E。
+5. 全量质量报告。
+6. 极保守 accepted profile。
+
+## 9. 需要删除或停止依赖的旧思路
+
+以下内容不再作为主路线：
+
+- 单纯 pairwise edge softmax 当最终模型。
+- 只看 relation F1 就判断公式识别完成。
+- 在 decoder 里补根号主体、分数主体、上下标组。
+- 通过 canonicalizer 放宽 exact 来掩盖结构错误。
+- 为性能继续堆中间 JSONL 和评分脚本，而不改标签/模型。
+- 用 OCR/MFR 解决 born-digital 公式主问题。
+- 把 LaTeX 源码风格 exact 当成生产目标。
+
+保留用途：
+
+- 旧 edge model：baseline、pretrain、ablation。
+- 旧 relation labels：weak supervision、错误分析。
+- 旧 direct eval：性能和质量回归基线。
+- 旧 structural candidate：fallback candidate，不 accepted。
+
+## 10. 风险与应对
+
+### 10.1 源码标签泄漏
+
+风险：训练工具无意把源码 token 作为推理特征。
+
+应对：
+
+- 训练 row 明确区分 input graph 和 target。
+- 推理 API 只接受 PDF graph。
+- 单元测试验证 production path 不读取 source/label 字段。
+
+### 10.2 Parser 覆盖不足
+
+风险：KaTeX/MathML 无法解析复杂 TeX 环境。
+
+应对：
+
+- 解析失败进入分桶。
+- 引入 LaTeXML 或其他 AST 后端补覆盖。
+- 不把 parser failure 训练成错误 hard label。
+
+### 10.3 PDF artifact 污染
+
+风险：空白 glyph、marker、重复绘制、不可见节点进入语义树。
+
+应对：
+
+- 单独训练 node semantic mask。
+- alignment 审计 artifact rejection。
+- verifier 检查 semantic coverage 与 artifact blockers。
+
+### 10.4 Text run 和 operator name
+
+风险：`model`、`Hom`、`Spec` 等文本被拆成错误下标或变量序列。
+
+应对：
+
+- CSLT 有 `text_run`。
+- alignment 支持连续文本组。
+- 模型输出 group boundary。
+- eval 单独统计 text run integrity。
+
+### 10.5 Matrix/cases/alignment
+
+风险：复杂二维布局不是简单树。
+
+应对：
+
+- CSLT 显式建 `matrix/row/cell`。
+- 第一阶段可先 ignore 低置信 matrix，不硬解。
+- 后续引入行列聚类和 cell head。
+
+### 10.6 accepted 误污染
+
+风险：低置信公式进入正文或知识库。
+
+应对：
+
+- r2a 默认 candidate-only。
+- accepted gate 单独校准。
+- r5 只消费 accepted 或人工 revision。
+
+## 11. 推荐命令草案
+
+以下命令是计划中的目标形态，具体参数以实现为准：
+
+```powershell
+# 1. 生成目标树
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
+  tools\tinybdmath_build_target_trees.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --limit 200 `
+  --output-dir test_artifacts\tinybdmath_cslt_target_200
+
+# 2. 对齐并审计
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
+  tools\tinybdmath_align_targets.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --target-trees test_artifacts\tinybdmath_cslt_target_200\target_trees.jsonl `
+  --output-dir test_artifacts\tinybdmath_alignment_200
+
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
+  tools\tinybdmath_audit_alignment.py `
+  --alignment-rows test_artifacts\tinybdmath_alignment_200\alignment_rows.jsonl `
+  --output test_artifacts\tinybdmath_alignment_200\alignment_audit.json
+
+# 3. 训练 graph parser smoke
+C:\Users\WYK\.conda\envs\science\python.exe `
+  tools\tinybdmath_train_graph_parser.py `
+  --alignment-rows test_artifacts\tinybdmath_alignment_2000\alignment_rows.jsonl `
+  --output-dir test_artifacts\tinybdmath_graph_parser_2000
+
+# 4. 公式级评估
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
+  tools\tinybdmath_eval_formula_recovery.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --model test_artifacts\tinybdmath_graph_parser_2000\model_export.json `
+  --output-dir test_artifacts\tinybdmath_formula_eval_2000
+```
+
+## 12. 接手时的判断标准
+
+下一位接手者不要先训练，也不要先调 decoder。先问三个问题：
+
+1. CSLT 目标树是否能表达当前失败样例？
+2. PDF graph 到 CSLT 的 alignment 是否可信？
+3. 标签审计是否证明 hard labels 足够干净？
+
+这三个答案为“是”之前，继续训练更大模型没有意义；继续改 decoder 只会把
+错误藏得更深。

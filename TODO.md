@@ -51,6 +51,22 @@ Python `__pycache__`、`.cache/pytest`、Chroma/FTS 知识库缓存以及
 `tools/tinybdmath_train_torch.py` 或 `tools/tinybdmath_train_edge_torch.py`。旧 baseline/torch backend 模块保留为兼容和
 测试资产，不再新增旧 `realdata` pipeline 产物。
 
+## 2026-06-01 TinyBDMath 深度计划重写补记
+
+已把 `docs/tiny_born_digital_math_model_engineering.md` 从旧 v0/v1 edge scorer 流水账重写为
+神经符号公式恢复计划。当前主线不再是继续训练旧 edge softmax 或继续修旧 decoder，而是先建立：
+
+1. CSLT canonical symbol layout tree schema。
+2. source-derived target tree，只用于训练/审计。
+3. PDF graph 到 CSLT 的 hard/soft/ignore alignment。
+4. node semantic mask、parent pointer、relation type、group boundary 的 Graph Parser。
+5. constrained CSLT decode。
+6. layout verifier 和 accepted gate。
+
+`docs/current_goal_and_next_steps.md` 和 `docs/next_session_handoff.md` 已压缩为当前接手入口，
+删除大段过期历史记录。若工作树里仍有全局 parent forest/decoded eval canonicalization 试验，
+只能作为 baseline 或 ablation；它不能当作“非硬编码 decoder bug 已修复”的最终路线。
+
 ## 2026-05-31 上一轮未提交 bug fix 补记：缩放时离屏裂缝页不再抢占可见页重渲染
 
 上一轮 Codex 会话留下的未提交改动范围很小，只涉及 `src/ui/pdf_viewer.py` 和
