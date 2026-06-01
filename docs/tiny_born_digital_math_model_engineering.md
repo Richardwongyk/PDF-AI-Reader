@@ -406,8 +406,10 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 4. 已完成 AGL/texglyphlist 风格映射资源 loader。
 5. 已完成 glyph map 自动发现入口。
 6. 已开始 Attention/Napkin 真实数据集生成器。
-7. 已完成真实训练行生成器、标准库 MLP 训练器、候选打分器、数据审计器、realdata pipeline。
-8. 已完成可选 PyTorch 训练后端和 `tools/run_tinybdmath_torch_science.ps1`，可调用 `science` 环境训练。
+7. 已完成真实训练行生成器、标准库 MLP 训练器、候选打分器和数据审计器。旧 `realdata` pipeline
+   已废弃并删除；后续数据制备以 sharded dataset、instrumented dataset 和 graph relation pipeline 为准。
+8. 已完成可选 PyTorch 训练后端；旧 `tools/run_tinybdmath_torch_science.ps1` 已删除，后续直接用
+   `tools/tinybdmath_train_torch.py` 或 `tools/tinybdmath_train_edge_torch.py`，并保持主环境不安装 torch。
 9. 已接入 r2a candidate-only 服务和 `--run-tinybdmath` pipeline 开关。
 10. Attention 前 6 页 smoke：`r2a_tinybdmath_structural` 处理 7 条 r0 候选，写入
     `tinybdmath_structural:tinybdmath` 7 条候选和 7 条 round done；fusion 能读取，`ready_for_manual_accept=0`。
@@ -438,11 +440,17 @@ TinyBDMath 输出不能直接 accepted。必须交给 verifier：
 35. 下一步第三优先级：让 r2a 用 structural candidate 进入真正 decoder/verifier，而不是继续复用 r0 latex；证明相对 r0/fusion baseline 有提升后才能提高门禁。
 36. 下一步继续接入真实 TeX Live/CTAN 资源目录、font cmap 和 outline/shape identity candidate。
 37. 下一步生成 100-1000 条 synthetic 公式 PDF graph，并开始 SLT/MathML decoder/verifier MVP。
+38. 2026-06-01 已完成 relation scoring 性能改造：`tools/tinybdmath_score_relations.py` 支持
+    PyTorch batch/vectorized fast scoring、compact score、direct structural decode 和 no-score-jsonl；
+    `tools/tinybdmath_eval_structural_candidates.py`、`tools/tinybdmath_eval_decoded_latex.py` 支持 streaming eval。
+    全量 29881 行 direct eval 约 192.59s，structural F1=0.315585，decoded exact=0.523242、
+    near=0.659550。性能路径可用，但质量仍不达标，下一步必须改监督/模型/decoder/verifier，不得写样本硬编码。
 
 ## 12. 近期 48 小时执行计划
 
 1. **数据转换器**
-   - 输入：`test_artifacts/instrumented_attention_fast_delivery/instrumented_training_rows.jsonl` 和 `test_artifacts/instrumented_napkin_fast_delivery_v3/instrumented_training_rows.jsonl`。
+   - 输入：当前保留的 `test_artifacts/instrumented_full_unique_color_components_v3_20260601/instrumented_training_rows.jsonl`
+     或后续新生成的 Attention/Napkin 插桩训练行。
    - 输出：`tinybdmath_graph_rows.jsonl`、`tinybdmath_graph_manifest.json`、`tinybdmath_graph_split.json`。
    - 要求：0 缺失、0 schema error、保留所有 hash/version/source/bbox/glyph/font/vector 证据，并记录 MathML/Unicode/glyph resource version。
 

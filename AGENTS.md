@@ -35,6 +35,15 @@
   新会话不得继续大规模重构、压测、算法探索、工具安装或性能实验；只有在读完交接文档、定位到
   单一具体 bug、修复路径非常确定且可用小范围测试验证时，才允许动代码。否则只允许汇报状态或等待
   用户明确新指令。
+- 2026-06-01 已提交 TinyBDMath relation scoring 性能优化 `5b5b38e`：PyTorch batch/vectorized
+  打分、compact score、direct structural decode、no-score-jsonl 和 streaming eval 已接入。全量 direct
+  eval 约 192.59s，structural F1=0.315585，decoded exact_match_rate=0.523242、near_match_rate=0.659550；
+  性能路径可用，但公式质量远未达标。后续只能改监督、模型、decoder/verifier 和门禁，不能写样本硬编码规则。
+- 2026-06-01 已清理旧运行产物和废弃 TinyBDMath 入口。目录保留/可删边界见
+  `docs/workspace_inventory.md`。已删除 `tools/tinybdmath_realdata_pipeline.py`、
+  `tools/tinybdmath_score_candidates.py`、`tools/run_tinybdmath_realdata.ps1` 和
+  `tools/run_tinybdmath_torch_science.ps1`；当前 TinyBDMath 入口以插桩数据、graph rows 和
+  `tools/run_tinybdmath_relation_pipeline.ps1` 为准。
 - 外部工具模型缓存已迁到仓库本地 `.tool_models/`，并由 `PDF_AI_READER_TOOL_MODELS_DIR`
   作为统一覆盖入口；不要再把新模型缓存放到 `C:\pdf_ai_reader_tool_models` 或用户默认
   `.cache\modelscope`。

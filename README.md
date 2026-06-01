@@ -82,6 +82,7 @@ python src\main.py
 - `TODO.md`
 - `docs/next_session_handoff.md`
 - `docs/current_goal_and_next_steps.md`
+- `docs/workspace_inventory.md`
 
 详细的公式、知识库、测试和工程设计文档都在 `docs/` 目录中。
 
@@ -94,6 +95,8 @@ python src\main.py
 - `test_artifacts/`
 - `config.yaml`
 - 临时 benchmark 输出
+
+本地知识库索引和测试产物都可以重建；清理前先看 `docs/workspace_inventory.md`，不要误删工具模型缓存、用户资料或本地标准参考资料。
 
 ## License
 

@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
-> 基于 git 日志 93 次提交 + 12 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-06-01 (补记公式扫描/识别任务链路修复)
+> 项目状态、交接记录与重构路线图
+> 最后更新：2026-06-01 (补记 TinyBDMath 性能评估与目录清理)
 
 ---
 
@@ -20,6 +20,36 @@
 4. 防休眠脚本在仓库 `tools/keep_awake.ps1` 和 `tools/keep_awake_watchdog.ps1`，新会话必须先检查是否仍在运行。
 5. 外部工具（MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、PaddleOCR、magic-pdf）要按独立 worker 环境矩阵验证，不得混装到主环境。
 6. 所有提交不得带额外署名、来源标记或生成工具署名；不要提交 `测试资料/`、日志、缓存、临时 benchmark 输出。
+
+## 2026-06-01 TinyBDMath 性能评估与目录清理补记
+
+本轮先提交了 TinyBDMath relation scoring/structural decode 性能优化，提交为
+`5b5b38e Optimize TinyBDMath relation scoring pipeline`。该提交把 relation scorer 的全量行打分改为
+PyTorch batch/vectorized 路径，并加入 compact score、direct structural decode、no-score-jsonl 和 streaming
+structural/decoded eval 开关。目标是减少 JSONL 中间文件和 Python 逐边循环开销；没有在 decoder 里写样本特化规则，
+也没有把低置信输出写入正文、RAG 或 GraphRAG accepted。
+
+实跑评估使用保留的全量 graph/label/model 资产完成，无继续训练。命令等价于
+`tools/run_tinybdmath_relation_pipeline.ps1` 的 fast torch scoring + direct structural decode + no score jsonl
+路径，输出目录为 `test_artifacts/tinybdmath_direct_full_eval_20260601`。耗时约 192.59s，
+rows=29881，selected relations=202364；structural micro precision=0.971798、recall=0.188380、
+F1=0.315585；decoded exact_match_rate=0.523242、near_match_rate=0.659550、avg_similarity=0.839214。
+结论：性能链路已经明显更直接，但质量仍远未达到用户要求，瓶颈在监督/模型/decoder/verifier，不是继续堆 JSONL
+评分性能。后续不得靠硬编码 LaTeX 样本规则补质量。
+
+本轮还清理了仓库运行目录。已删除旧 fast compact 全量评分输出、3 个 probe 输出、5 月旧审计/压测日志、
+Python `__pycache__`、`.cache/pytest`、Chroma/FTS 知识库缓存以及
+`instrumented_full_unique_color_components_v3_20260601/work` 临时 LaTeX 工作目录。保留的本地大资产是：
+`test_artifacts/tinybdmath_graph_unique_color_components_v3_20260601`、`test_artifacts/tinybdmath_relation_pipeline_full_v3_20260601_184126`
+中的 relation labels/mathml/edge model、`test_artifacts/instrumented_full_unique_color_components_v3_20260601`
+的 JSONL 训练行，以及本轮 direct full eval 结果。`.pytest_cache` 当前目录权限异常，体积接近 0，未强行改 ACL。
+
+代码层删除了旧入口脚本 `tools/tinybdmath_realdata_pipeline.py`、`tools/tinybdmath_score_candidates.py`、
+`tools/run_tinybdmath_realdata.ps1`、`tools/run_tinybdmath_torch_science.ps1`。当前推荐入口是：
+`tools/run_instrumented_dataset_background.ps1` 制备可验证插桩数据，`tools/run_tinybdmath_instrumented_graph_dataset.ps1`
+生成 graph rows，`tools/run_tinybdmath_relation_pipeline.ps1` 训练/打分/结构评估，必要时直接调用
+`tools/tinybdmath_train_torch.py` 或 `tools/tinybdmath_train_edge_torch.py`。旧 baseline/torch backend 模块保留为兼容和
+测试资产，不再新增旧 `realdata` pipeline 产物。
 
 ## 2026-05-31 上一轮未提交 bug fix 补记：缩放时离屏裂缝页不再抢占可见页重渲染
 
