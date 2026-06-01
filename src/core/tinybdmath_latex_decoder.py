@@ -12,6 +12,8 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from src.core.symbol_identity_repair import latex_for_unicode_text
+
 
 TINYBDMATH_LATEX_DECODER_VERSION = "tinybdmath_slt_latex_candidate_v2_relation_only_radical"
 
@@ -48,7 +50,13 @@ def decode_latex_candidate(
     if not glyph_by_id:
         return _fallback(fallback_text, warnings | {"decoder_no_glyphs"})
     if not relations:
-        return _fallback(fallback_text, warnings | {"decoder_no_selected_relations"})
+        text = _decode_linear_glyphs(list(glyph_by_id.values()))
+        return TinyBDDecodedLatex(
+            decoder_version=TINYBDMATH_LATEX_DECODER_VERSION,
+            latex=text or latex_for_unicode_text(fallback_text),
+            confidence=0.0,
+            warnings=tuple(sorted(warnings | {"decoder_no_selected_relations"})),
+        )
 
     by_source: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     has_parent: set[str] = set()
@@ -212,9 +220,13 @@ def _glyph_latex(glyph: dict[str, Any]) -> str:
         return latex
     unicode_value = str(glyph.get("unicode", "") or "")
     if unicode_value:
-        return unicode_value
+        return latex_for_unicode_text(unicode_value)
     raw = glyph.get("raw", {}) if isinstance(glyph.get("raw", {}), dict) else {}
-    return str(raw.get("text", "") or "")
+    return latex_for_unicode_text(str(raw.get("text", "") or ""))
+
+
+def _decode_linear_glyphs(glyphs: list[dict[str, Any]]) -> str:
+    return "".join(_glyph_latex(glyph) for glyph in sorted(glyphs, key=_glyph_sort_key))
 
 
 def _glyph_sort_key(glyph: dict[str, Any]) -> tuple[float, float, str]:

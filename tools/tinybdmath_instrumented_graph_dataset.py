@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tools.tinybdmath_instrumented_latex_dataset import CAPTURE_QUALITY_VERSION
+
 
 GRAPH_DATASET_SCHEMA_VERSION = "tinybdmath_instrumented_graph_dataset_v1"
 GRAPH_ROW_SCHEMA_VERSION = "tinybdmath_instrumented_graph_row_v1"
@@ -170,6 +172,11 @@ def _graph_row(
     blockers: list[str] = []
     if raw.get("verified_exact_box") is not True:
         blockers.append("not_verified_exact_box")
+    if str(raw.get("capture_quality_version", "") or "") != CAPTURE_QUALITY_VERSION:
+        blockers.append("capture_quality_not_verified")
+    raw_blockers = [str(item) for item in raw.get("blockers", []) or [] if item]
+    if raw_blockers:
+        blockers.extend(f"upstream:{item}" for item in raw_blockers)
     label = str(raw.get("label_latex", "") or "")
     if not label.strip():
         blockers.append("missing_label_latex")
@@ -218,6 +225,8 @@ def _graph_row(
         "coordinate_baseline": str(raw.get("coordinate_baseline", "") or "compiled_instrumented_pdf"),
         "tex_path": str(raw.get("tex_path", "") or ""),
         "page_num": _optional_int(raw.get("page_num")),
+        "capture_pages": [_optional_int(item) for item in _list(raw.get("capture_pages")) if _optional_int(item) is not None],
+        "page_bboxes": _list(raw.get("page_bboxes")),
         "bbox": bbox,
         "glyph_nodes": glyphs,
         "vector_nodes": vectors,
@@ -251,6 +260,7 @@ def _glyph_node(item: dict[str, Any], index: int) -> dict[str, Any] | None:
         "font": font,
         "normalized_font": _normalize_font(font),
         "size": round(size, 6),
+        "page_num": _optional_int(item.get("page_num")),
         "bbox": bbox,
         "center": [round((bbox[0] + bbox[2]) / 2.0, 6), round((bbox[1] + bbox[3]) / 2.0, 6)],
         "width": round(width, 6),
@@ -275,6 +285,7 @@ def _vector_node(item: dict[str, Any], index: int) -> dict[str, Any] | None:
         "node_id": f"v{index:04d}",
         "node_type": "vector",
         "vector_type": kind,
+        "page_num": _optional_int(item.get("page_num")),
         "bbox": bbox,
         "center": [round((bbox[0] + bbox[2]) / 2.0, 6), round((bbox[1] + bbox[3]) / 2.0, 6)],
         "width": round(width, 6),
@@ -289,45 +300,59 @@ def _candidate_edges(glyphs: list[dict[str, Any]], vectors: list[dict[str, Any]]
     edges: list[dict[str, Any]] = []
     nonempty = [glyph for glyph in glyphs if str(glyph.get("text", "")).strip()]
     if nonempty:
-        reference_size = max([float(glyph["size"]) for glyph in nonempty if float(glyph.get("size", 0.0)) > 0.0], default=0.0)
-        if reference_size > 0:
-            for glyph in glyphs:
+        glyphs_by_page = _group_by_page(glyphs)
+        for page_glyphs in glyphs_by_page.values():
+            page_nonempty = [glyph for glyph in page_glyphs if str(glyph.get("text", "")).strip()]
+            reference_size = max([float(glyph["size"]) for glyph in page_nonempty if float(glyph.get("size", 0.0)) > 0.0], default=0.0)
+            if reference_size <= 0:
+                continue
+            for glyph in page_glyphs:
                 glyph["is_script_size"] = float(glyph.get("size", 0.0)) <= reference_size * 0.82
-    ordered_x = sorted(glyphs, key=lambda item: (float(item["bbox"][0]), float(item["center"][1]), str(item["node_id"])))
-    x0_values = [float(item["bbox"][0]) for item in ordered_x]
-    index_by_id = {str(item["node_id"]): index for index, item in enumerate(ordered_x)}
-    for source in glyphs:
-        ranked: list[dict[str, Any]] = []
-        for target in _local_glyph_targets(source, ordered_x, x0_values, index_by_id):
-            if source["node_id"] == target["node_id"]:
+    glyphs_by_page = _group_by_page(glyphs)
+    vectors_by_page = _group_by_page(vectors)
+    for page_key, page_glyphs in glyphs_by_page.items():
+        ordered_x = sorted(page_glyphs, key=lambda item: (float(item["bbox"][0]), float(item["center"][1]), str(item["node_id"])))
+        x0_values = [float(item["bbox"][0]) for item in ordered_x]
+        index_by_id = {str(item["node_id"]): index for index, item in enumerate(ordered_x)}
+        for source in page_glyphs:
+            ranked: list[dict[str, Any]] = []
+            for target in _local_glyph_targets(source, ordered_x, x0_values, index_by_id):
+                if source["node_id"] == target["node_id"]:
+                    continue
+                hint = _glyph_relation_hint(source, target)
+                if hint is None:
+                    continue
+                ranked.append(_edge(source, target, hint))
+            ranked.sort(key=_edge_rank)
+            edges.extend(ranked[:12])
+            radical_ranked = [
+                _edge(source, target, "radical_body_candidate")
+                for target in page_glyphs
+                if source["node_id"] != target["node_id"] and _radical_body_hint(source, target)
+            ]
+            radical_ranked.sort(key=_edge_rank)
+            edges.extend(radical_ranked[:12])
+        for vector in vectors_by_page.get(page_key, []):
+            if not vector.get("is_horizontal_rule_candidate"):
                 continue
-            hint = _glyph_relation_hint(source, target)
-            if hint is None:
-                continue
-            ranked.append(_edge(source, target, hint))
-        ranked.sort(key=_edge_rank)
-        edges.extend(ranked[:12])
-        radical_ranked = [
-            _edge(source, target, "radical_body_candidate")
-            for target in glyphs
-            if source["node_id"] != target["node_id"] and _radical_body_hint(source, target)
-        ]
-        radical_ranked.sort(key=_edge_rank)
-        edges.extend(radical_ranked[:12])
-    for vector in vectors:
-        if not vector.get("is_horizontal_rule_candidate"):
-            continue
-        above = [glyph for glyph in glyphs if _glyph_overlaps_rule(glyph, vector) and glyph["center"][1] < vector["center"][1]]
-        below = [glyph for glyph in glyphs if _glyph_overlaps_rule(glyph, vector) and glyph["center"][1] > vector["center"][1]]
-        for glyph in sorted(above, key=lambda item: (item["center"][0], item["center"][1], item["node_id"]))[:24]:
-            edges.append(_edge(vector, glyph, "above_rule_candidate"))
-        for glyph in sorted(below, key=lambda item: (item["center"][0], item["center"][1], item["node_id"]))[:24]:
-            edges.append(_edge(vector, glyph, "below_rule_candidate"))
-        if above and below:
-            edges.append(_rule_summary_edge(vector, above, below, "fraction_bar_candidate"))
-        elif above:
-            edges.append(_rule_summary_edge(vector, above, [], "overline_candidate"))
+            above = [glyph for glyph in page_glyphs if _glyph_overlaps_rule(glyph, vector) and glyph["center"][1] < vector["center"][1]]
+            below = [glyph for glyph in page_glyphs if _glyph_overlaps_rule(glyph, vector) and glyph["center"][1] > vector["center"][1]]
+            for glyph in sorted(above, key=lambda item: (item["center"][0], item["center"][1], item["node_id"]))[:24]:
+                edges.append(_edge(vector, glyph, "above_rule_candidate"))
+            for glyph in sorted(below, key=lambda item: (item["center"][0], item["center"][1], item["node_id"]))[:24]:
+                edges.append(_edge(vector, glyph, "below_rule_candidate"))
+            if above and below:
+                edges.append(_rule_summary_edge(vector, above, below, "fraction_bar_candidate"))
+            elif above:
+                edges.append(_rule_summary_edge(vector, above, [], "overline_candidate"))
     return _dedupe_edges(edges)
+
+
+def _group_by_page(nodes: list[dict[str, Any]]) -> dict[int | None, list[dict[str, Any]]]:
+    grouped: defaultdict[int | None, list[dict[str, Any]]] = defaultdict(list)
+    for node in nodes:
+        grouped[_optional_int(node.get("page_num"))].append(node)
+    return dict(grouped)
 
 
 def _local_glyph_targets(

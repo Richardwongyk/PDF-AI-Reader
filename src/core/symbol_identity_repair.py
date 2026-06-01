@@ -666,6 +666,12 @@ def _candidate_sort_key(candidate: SymbolIdentityCandidate) -> tuple[float, str,
     return (-candidate.confidence, candidate.source, candidate.unicode)
 
 
+def latex_for_unicode_text(text: str) -> str:
+    """Return the standard LaTeX spelling for Unicode math text."""
+
+    return _latex_for_unicode(text)
+
+
 def _latex_for_unicode(text: str) -> str:
     if text in _UNICODE_TO_LATEX:
         return _UNICODE_TO_LATEX[text]
@@ -699,6 +705,7 @@ _UNICODE_TO_LATEX = {
     "±": r"\pm",
     "∓": r"\mp",
     "∗": r"\ast",
+    "⋆": r"\star",
     "√": r"\sqrt",
     "∑": r"\sum",
     "∏": r"\prod",
@@ -717,6 +724,8 @@ _UNICODE_TO_LATEX = {
     "⊃": r"\supset",
     "⊆": r"\subseteq",
     "⊇": r"\supseteq",
+    "⊊": r"\subsetneq",
+    "⊋": r"\supsetneq",
     "∪": r"\cup",
     "∩": r"\cap",
     "∧": r"\wedge",
@@ -743,6 +752,7 @@ _UNICODE_TO_LATEX = {
     "∥": r"\parallel",
     "ℓ": r"\ell",
     "ℏ": r"\hbar",
+    "ℵ": r"\aleph",
     "ı": r"\imath",
     "ȷ": r"\jmath",
     "α": r"\alpha",
@@ -785,6 +795,7 @@ _UNICODE_TO_LATEX = {
     "Φ": r"\Phi",
     "Ψ": r"\Psi",
     "Ω": r"\Omega",
+    "Ω": r"\Omega",
 }
 
 

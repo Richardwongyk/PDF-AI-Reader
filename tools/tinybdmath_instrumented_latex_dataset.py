@@ -44,11 +44,16 @@ from tools.tinybdmath_synctex_dataset import _pdf_alignment
 SCHEMA_VERSION = "tinybdmath_instrumented_latex_dataset_v1"
 BOX_SCHEMA_VERSION = "tinybdmath_instrumented_formula_box_v1"
 TRAINING_ROW_SCHEMA_VERSION = "tinybdmath_instrumented_training_row_v1"
+CAPTURE_QUALITY_VERSION = "instrumented_capture_quality_v2_unique_color_components"
 MARKER_COMMAND = r"\pdfaireaderdatasetmarker"
 MARKER_PREAMBLE = r"""
 % PDF AI Reader dataset instrumentation. Inserted only in a temporary source copy.
 \providecommand{\pdfaireaderdatasetmarker}[2]{{\color[HTML]{#1}#2}}
 """
+MARKER_COLOR_LEVELS = 64
+MARKER_COLOR_MIN = 48
+MARKER_COLOR_STEP = 3
+MARKER_COLOR_CAPACITY = MARKER_COLOR_LEVELS ** 3
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ class ColorCapture:
     glyphs: list[dict[str, Any]] | None = None
     vectors: list[dict[str, Any]] | None = None
     fonts: Counter[str] | None = None
+    pages: set[int] | None = None
 
     def __post_init__(self) -> None:
         if self.glyphs is None:
@@ -86,6 +92,10 @@ class ColorCapture:
             self.vectors = []
         if self.fonts is None:
             self.fonts = Counter()
+        if self.pages is None:
+            self.pages = set()
+        if self.page_num is not None:
+            self.pages.add(int(self.page_num))
 
 
 def build_instrumented_dataset(
@@ -114,6 +124,7 @@ def build_instrumented_dataset(
     all_box_rows: list[dict[str, Any]] = []
     all_training_rows: list[dict[str, Any]] = []
     case_summaries: list[dict[str, Any]] = []
+    marker_color_offset = 0
 
     for case in _cases_for_build(case_name, custom_pdf=custom_pdf, custom_latex_root=custom_latex_root):
         case_started = time.perf_counter()
@@ -140,7 +151,9 @@ def build_instrumented_dataset(
         _log(f"[{case.name}] apply build profile={build_profile} main_tex={main}")
         _apply_build_profile(work_root, build_profile, main)
         _log(f"[{case.name}] instrument formula spans")
-        markers = _instrument_source_tree(case.latex_root, work_root, source_records)
+        markers = _instrument_source_tree(case.latex_root, work_root, source_records, marker_index_offset=marker_color_offset)
+        marker_color_offset += len(markers)
+        _ensure_unique_marker_colors(markers)
         _ensure_marker_preamble(main)
         _log(f"[{case.name}] compile instrumented PDF mode={compile_mode}")
         compiled_pdf, compile_info = _compile_instrumented_pdf(work_root, build_dir, main, compile_mode=compile_mode)
@@ -189,6 +202,8 @@ def build_instrumented_dataset(
                 "source_display_formulas": display_count,
                 "source_inline_formulas": inline_count,
                 "markers": len(markers),
+                "marker_colors": len({marker.color_int for marker in markers}),
+                "marker_color_unique": True,
                 "boxes_found": sum(1 for row in box_rows if row.get("box_status") == "found"),
                 "verified_exact_boxes": sum(1 for row in box_rows if row.get("verified_exact_box") is True),
                 "training_rows": len(training_rows),
@@ -199,6 +214,28 @@ def build_instrumented_dataset(
     _write_jsonl(output_dir / "source_formulas.jsonl", all_source_rows)
     _write_jsonl(output_dir / "instrumented_formula_boxes.jsonl", all_box_rows)
     _write_jsonl(output_dir / "instrumented_training_rows.jsonl", all_training_rows)
+    _ensure_unique_marker_colors([
+        MarkerSpec(
+            marker_id=str(row.get("marker_id", "")),
+            source_id=str(row.get("source_id", "")),
+            tex_path=str(row.get("tex_path", "")),
+            kind=str(row.get("kind", "")),
+            env=str(row.get("env", "")),
+            delimiter=str(row.get("delimiter", "")),
+            raw_latex=str(row.get("raw_latex", "")),
+            canonical_latex=str(row.get("canonical_latex", "")),
+            color_hex=str(row.get("color_hex", "")),
+            color_int=int(row.get("color_int", 0) or 0),
+            char_start=int(row.get("char_start", 0) or 0),
+            char_end=int(row.get("char_end", 0) or 0),
+            file_char_start=int(row.get("file_char_start", 0) or 0),
+            file_char_end=int(row.get("file_char_end", 0) or 0),
+            macro_expansion_warnings=tuple(),
+            source_offset_status="exact_offset",
+            source_offset_warnings=tuple(),
+        )
+        for row in all_box_rows
+    ])
     summary = {
         "schema_version": SCHEMA_VERSION,
         "case": case_name,
@@ -223,7 +260,7 @@ def build_instrumented_dataset(
             "This route uses LaTeX source only to manufacture audit/training labels.",
             "Color instrumentation is applied in a temporary copy and does not modify the user's source tree.",
             "The compiled instrumented PDF is the coordinate baseline for this dataset.",
-            "A row is exact when the unique marker color appears in the compiled PDF structure layer.",
+            "A row is exact only after unique marker color and capture component quality checks pass.",
             "The user-supplied PDF is only an optional reference fingerprint and never blocks training rows.",
         ],
     }
@@ -482,11 +519,13 @@ def _instrument_source_tree(
     original_root: Path,
     work_root: Path,
     records: list[SourceFormulaRecord],
+    *,
+    marker_index_offset: int = 0,
 ) -> list[MarkerSpec]:
     by_file: dict[str, list[tuple[SourceFormulaRecord, MarkerSpec]]] = defaultdict(list)
     markers: list[MarkerSpec] = []
     for index, record in enumerate(records):
-        marker = _marker_for_record(original_root, record, index)
+        marker = _marker_for_record(original_root, record, index, color_index=marker_index_offset + index)
         markers.append(marker)
         if marker.source_offset_status in {"exact_offset", "unique_raw_latex_relocated"}:
             by_file[record.tex_path].append((record, marker))
@@ -504,8 +543,8 @@ def _instrument_source_tree(
     return markers
 
 
-def _marker_for_record(original_root: Path, record: SourceFormulaRecord, index: int) -> MarkerSpec:
-    color_hex = _marker_color(index)
+def _marker_for_record(original_root: Path, record: SourceFormulaRecord, index: int, *, color_index: int | None = None) -> MarkerSpec:
+    color_hex = _marker_color(index if color_index is None else color_index)
     status = "exact_offset"
     warnings: list[str] = []
     file_start = int(record.char_start)
@@ -575,12 +614,28 @@ def _body_start_offset(text: str) -> int:
 
 
 def _marker_color(index: int) -> str:
-    # Deterministic high-saturation color sequence, avoiding black/white.
-    value = (0x3355AA + (index + 1) * 0x1F123B) & 0xFFFFFF
-    r = 48 + ((value >> 16) & 0xAF)
-    g = 48 + ((value >> 8) & 0xAF)
-    b = 48 + (value & 0xAF)
-    return f"{r & 0xFF:02X}{g & 0xFF:02X}{b & 0xFF:02X}"
+    """Return a deterministic marker color with no collisions under capacity."""
+
+    if index < 0 or index >= MARKER_COLOR_CAPACITY:
+        raise ValueError(f"marker color index out of range: {index}")
+    shuffled = ((int(index) + 1) * 1103515245 + 12345) % MARKER_COLOR_CAPACITY
+    r_digit = shuffled & 0x3F
+    g_digit = (shuffled >> 6) & 0x3F
+    b_digit = (shuffled >> 12) & 0x3F
+    r = MARKER_COLOR_MIN + MARKER_COLOR_STEP * r_digit
+    g = MARKER_COLOR_MIN + MARKER_COLOR_STEP * g_digit
+    b = MARKER_COLOR_MIN + MARKER_COLOR_STEP * b_digit
+    return f"{r:02X}{g:02X}{b:02X}"
+
+
+def _ensure_unique_marker_colors(markers: list[MarkerSpec]) -> None:
+    by_color: dict[int, list[str]] = defaultdict(list)
+    for marker in markers:
+        by_color[int(marker.color_int)].append(marker.marker_id)
+    duplicates = {f"{color:06X}": ids for color, ids in by_color.items() if len(ids) > 1}
+    if duplicates:
+        sample = dict(list(sorted(duplicates.items()))[:8])
+        raise RuntimeError(f"marker color collision detected: {sample}")
 
 
 def _instrumented_body(record: SourceFormulaRecord, color_hex: str, body: str) -> str:
@@ -802,6 +857,7 @@ def _collect_colored_glyphs(
                 capture = captures.setdefault(color, ColorCapture(page_num=page_num))
                 if capture.page_num is None:
                     capture.page_num = page_num
+                capture.pages.add(page_num)
                 font = str(span.get("font", ""))
                 size = _float(span.get("size"))
                 for char in span.get("chars", []):
@@ -814,6 +870,7 @@ def _collect_colored_glyphs(
                             "text": str(char.get("c", "")),
                             "font": font,
                             "size": round(size, 6),
+                            "page_num": page_num,
                             "bbox": [round(float(value), 3) for value in bbox],
                         }
                     )
@@ -842,7 +899,8 @@ def _collect_colored_vectors(
             capture = captures.setdefault(color, ColorCapture(page_num=page_num))
             if capture.page_num is None:
                 capture.page_num = page_num
-            capture.vectors.append({"bbox": bbox, "type": str(drawing.get("type", ""))})
+            capture.pages.add(page_num)
+            capture.vectors.append({"bbox": bbox, "page_num": page_num, "type": str(drawing.get("type", ""))})
 
 
 def _box_row(
@@ -857,7 +915,11 @@ def _box_row(
     glyphs = list(capture.glyphs if capture else [])
     vectors = list(capture.vectors if capture else [])
     bbox = _union_bbox([item["bbox"] for item in glyphs] + [item["bbox"] for item in vectors])
-    blockers = _box_blockers(marker, capture, bbox)
+    components = _capture_components(glyphs, vectors)
+    pages = sorted(capture.pages if capture and capture.pages else [])
+    page_bboxes = _page_bboxes(glyphs + vectors)
+    blockers = _box_blockers(marker, capture, bbox, components)
+    warnings = _box_warnings(marker, components, pages)
     return {
         "schema_version": BOX_SCHEMA_VERSION,
         "case": case_name,
@@ -883,21 +945,32 @@ def _box_row(
         "compiled_pdf": str(compiled_pdf),
         "reference_pdf_alignment_status": reference_pdf_alignment_status,
         "coordinate_baseline": "compiled_instrumented_pdf",
+        "capture_quality_version": CAPTURE_QUALITY_VERSION,
         "box_status": "found" if bbox is not None else "missing",
         "page_num": capture.page_num if capture else None,
+        "capture_pages": pages,
+        "page_bboxes": page_bboxes,
         "bbox": bbox,
         "glyph_count": len(glyphs),
         "vector_count": len(vectors),
+        "capture_component_count": len(components),
+        "capture_components": components,
         "fonts": dict(sorted((capture.fonts or Counter()).items())) if capture else {},
         "text_sample": "".join(item["text"] for item in glyphs)[:500],
-        "sampled_glyphs": glyphs[:400],
-        "sampled_vectors": vectors[:120],
+        "sampled_glyphs": glyphs,
+        "sampled_vectors": vectors,
         "verified_exact_box": not blockers,
         "blockers": blockers,
+        "warnings": warnings,
     }
 
 
-def _box_blockers(marker: MarkerSpec, capture: ColorCapture | None, bbox: list[float] | None) -> list[str]:
+def _box_blockers(
+    marker: MarkerSpec,
+    capture: ColorCapture | None,
+    bbox: list[float] | None,
+    components: list[dict[str, Any]],
+) -> list[str]:
     blockers: list[str] = []
     if marker.source_offset_status not in {"exact_offset", "unique_raw_latex_relocated"}:
         blockers.append("source_offset_not_verified")
@@ -907,7 +980,19 @@ def _box_blockers(marker: MarkerSpec, capture: ColorCapture | None, bbox: list[f
         blockers.append("marker_color_not_found_in_pdf")
     elif not capture.glyphs and not capture.vectors:
         blockers.append("empty_marker_capture")
+    else:
+        if capture.glyphs and not components:
+            blockers.append("empty_nonspace_marker_capture")
     return blockers
+
+
+def _box_warnings(marker: MarkerSpec, components: list[dict[str, Any]], pages: list[int]) -> list[str]:
+    warnings: list[str] = []
+    if len(pages) > 1:
+        warnings.append("marker_color_seen_on_multiple_pages")
+    if marker.kind == "inline" and len(components) > 1:
+        warnings.append("inline_disconnected_marker_capture")
+    return warnings
 
 
 def _training_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -924,17 +1009,126 @@ def _training_row(row: dict[str, Any]) -> dict[str, Any]:
         "compiled_pdf": row.get("compiled_pdf", ""),
         "target_pdf": row.get("target_pdf", ""),
         "coordinate_baseline": "compiled_instrumented_pdf",
+        "capture_quality_version": row.get("capture_quality_version", ""),
         "page_num": row.get("page_num"),
+        "capture_pages": row.get("capture_pages", []),
+        "page_bboxes": row.get("page_bboxes", []),
         "bbox": row.get("bbox"),
         "tex_path": row.get("tex_path", ""),
         "glyph_count": row.get("glyph_count", 0),
         "vector_count": row.get("vector_count", 0),
+        "capture_component_count": row.get("capture_component_count", 0),
+        "capture_components": row.get("capture_components", []),
         "fonts": row.get("fonts", {}),
         "text_sample": row.get("text_sample", ""),
         "sampled_glyphs": row.get("sampled_glyphs", []),
         "sampled_vectors": row.get("sampled_vectors", []),
         "verified_exact_box": row.get("verified_exact_box", False),
+        "blockers": row.get("blockers", []),
+        "warnings": row.get("warnings", []),
     }
+
+
+def _capture_components(glyphs: list[dict[str, Any]], vectors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for index, glyph in enumerate(glyphs):
+        text = str(glyph.get("text", "") or "")
+        if not text.strip():
+            continue
+        bbox = glyph.get("bbox")
+        if _valid_bbox(bbox):
+            items.append({
+                "kind": "glyph",
+                "index": index,
+                "page_num": _optional_int(glyph.get("page_num")),
+                "bbox": [float(value) for value in bbox],
+                "text": text,
+            })
+    for index, vector in enumerate(vectors):
+        bbox = vector.get("bbox")
+        if _valid_bbox(bbox):
+            items.append({
+                "kind": "vector",
+                "index": index,
+                "page_num": _optional_int(vector.get("page_num")),
+                "bbox": [float(value) for value in bbox],
+                "text": "",
+            })
+    if not items:
+        return []
+    heights = [max(0.0, item["bbox"][3] - item["bbox"][1]) for item in items]
+    widths = [max(0.0, item["bbox"][2] - item["bbox"][0]) for item in items]
+    median_height = max(_median([value for value in heights if value > 0.0]), 1.0)
+    median_width = max(_median([value for value in widths if value > 0.0]), 1.0)
+    x_margin = max(1.0, median_width * 2.0, median_height * 1.2)
+    y_margin = max(1.0, median_height * 1.6)
+    parents = list(range(len(items)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left in range(len(items)):
+        for right in range(left + 1, len(items)):
+            if items[left].get("page_num") != items[right].get("page_num"):
+                continue
+            if _boxes_are_near(items[left]["bbox"], items[right]["bbox"], x_margin=x_margin, y_margin=y_margin):
+                union(left, right)
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for index, item in enumerate(items):
+        grouped[find(index)].append(item)
+    components: list[dict[str, Any]] = []
+    for component_items in grouped.values():
+        boxes = [item["bbox"] for item in component_items]
+        bbox = _union_bbox(boxes)
+        components.append(
+            {
+                "page_num": component_items[0].get("page_num"),
+                "bbox": bbox,
+                "glyph_count": sum(1 for item in component_items if item["kind"] == "glyph"),
+                "vector_count": sum(1 for item in component_items if item["kind"] == "vector"),
+                "text_sample": "".join(item["text"] for item in sorted(component_items, key=lambda item: (item["bbox"][0], item["bbox"][1], item["index"])) if item["text"])[:120],
+            }
+        )
+    return sorted(components, key=lambda item: (float((item.get("bbox") or [0, 0, 0, 0])[1]), float((item.get("bbox") or [0, 0, 0, 0])[0])))
+
+
+def _page_bboxes(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[int, list[list[float]]] = defaultdict(list)
+    for item in items:
+        page_num = _optional_int(item.get("page_num"))
+        bbox = item.get("bbox")
+        if page_num is None or not _valid_bbox(bbox):
+            continue
+        grouped[page_num].append([float(value) for value in bbox])
+    return [
+        {"page_num": page_num, "bbox": _union_bbox(boxes)}
+        for page_num, boxes in sorted(grouped.items())
+        if boxes
+    ]
+
+
+def _boxes_are_near(
+    left: list[float],
+    right: list[float],
+    *,
+    x_margin: float,
+    y_margin: float,
+) -> bool:
+    return not (
+        left[2] + x_margin < right[0]
+        or right[2] + x_margin < left[0]
+        or left[3] + y_margin < right[1]
+        or right[3] + y_margin < left[1]
+    )
 
 
 def _union_bbox(boxes: list[list[float]]) -> list[float] | None:
@@ -975,8 +1169,27 @@ def _float(value: Any) -> float:
         return 0.0
 
 
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 def _valid_bbox(value: Any) -> bool:
     return isinstance(value, (list, tuple)) and len(value) == 4
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _blocker_counts(rows: list[dict[str, Any]]) -> dict[str, int]:

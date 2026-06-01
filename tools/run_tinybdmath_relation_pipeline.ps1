@@ -7,6 +7,9 @@ param(
     [double]$MinConfidence = 0.70,
     [switch]$UseTorchEdge,
     [switch]$CalibrateTorchEdge,
+    [ValidateSet("candidate_relation_f1", "accepted_precision")]
+    [string]$TorchCalibrationObjective = "candidate_relation_f1",
+    [double]$TorchCandidateThreshold = 0.70,
     [string]$TorchPython = "C:\Users\WYK\.conda\envs\science\python.exe"
 )
 
@@ -20,6 +23,7 @@ $edgeModel = Join-Path $out.FullName "edge_model"
 $scores = Join-Path $out.FullName "relation_scores"
 $structural = Join-Path $out.FullName "structural_candidates"
 $evalReport = Join-Path $out.FullName "structural_eval_report.json"
+$decodedEvalReport = Join-Path $out.FullName "decoded_latex_eval_report.json"
 $mathml = Join-Path $out.FullName "mathml"
 $summary = Join-Path $out.FullName "relation_pipeline_summary.json"
 
@@ -37,6 +41,10 @@ if ($UseTorchEdge) {
     )
     if ($CalibrateTorchEdge) {
         $torchArgs += "--calibrate-logit-scale"
+        $torchArgs += "--calibration-objective"
+        $torchArgs += $TorchCalibrationObjective
+        $torchArgs += "--candidate-threshold"
+        $torchArgs += "$TorchCandidateThreshold"
     }
     & $TorchPython @torchArgs
 } else {
@@ -45,6 +53,7 @@ if ($UseTorchEdge) {
 & $Python tools\tinybdmath_score_relations.py --rows $GraphRows --model (Join-Path $edgeModel "tinybdmath_edge_baseline_model.json") --output-dir $scores --limit $Limit --min-confidence 0.55 --stream
 & $Python tools\tinybdmath_decode_structural_candidates.py --scores (Join-Path $scores "tinybdmath_relation_scores.jsonl") --output-dir $structural --limit $Limit --min-confidence $MinConfidence
 & $Python tools\tinybdmath_eval_structural_candidates.py --candidates (Join-Path $structural "tinybdmath_structural_candidates.jsonl") --relation-labels (Join-Path $labels "tinybdmath_relation_label_rows.jsonl") --output $evalReport --limit $Limit
+& $Python tools\tinybdmath_eval_decoded_latex.py --graph-rows $GraphRows --candidates (Join-Path $structural "tinybdmath_structural_candidates.jsonl") --output $decodedEvalReport --limit $Limit
 
 function Read-JsonObject([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
@@ -69,6 +78,8 @@ $payload = [PSCustomObject]@{
     min_confidence = $MinConfidence
     edge_training = $(if ($UseTorchEdge) { "torch" } else { "baseline" })
     edge_calibration = $(if ($CalibrateTorchEdge) { "logit_scale" } else { "" })
+    edge_calibration_objective = $(if ($CalibrateTorchEdge) { $TorchCalibrationObjective } else { "" })
+    edge_candidate_threshold = $TorchCandidateThreshold
     mathml = Read-JsonObject (Join-Path $mathml "latex_mathml_manifest.json")
     relation_labels = Read-JsonObject (Join-Path $labels "tinybdmath_relation_label_manifest.json")
     edge_model = Read-FirstJsonObject @(
@@ -78,6 +89,7 @@ $payload = [PSCustomObject]@{
     relation_scores = Read-JsonObject (Join-Path $scores "tinybdmath_relation_score_manifest.json")
     structural_candidates = Read-JsonObject (Join-Path $structural "tinybdmath_structural_candidate_manifest.json")
     structural_eval = Read-JsonObject $evalReport
+    decoded_latex_eval = Read-JsonObject $decodedEvalReport
     candidate_only = $true
     accepted_latex_emitted = $false
 }
@@ -86,6 +98,7 @@ $payload | ConvertTo-Json -Depth 80 | Set-Content -LiteralPath $summary -Encodin
     schema_version = $payload.schema_version
     rows = $payload.structural_eval.rows
     micro = $payload.structural_eval.micro
+    decoded_latex = $payload.decoded_latex_eval.metrics
     mathml_warnings = $payload.mathml.warnings
     accepted_latex_emitted = $false
 } | ConvertTo-Json -Depth 20

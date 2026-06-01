@@ -21,14 +21,29 @@ def test_decoder_builds_subscript_candidate_from_selected_relations() -> None:
     assert decoded.accepted is False
 
 
-def test_decoder_falls_back_when_no_relations() -> None:
+def test_decoder_uses_ordered_glyphs_when_no_relations() -> None:
     decoded = decode_latex_candidate(
         [{"node_id": "g0", "latex": "x", "bbox": [0, 0, 8, 10]}],
         {"selected_relations": []},
-        fallback_text="x",
+        fallback_text="fallback",
     )
 
     assert decoded.latex == "x"
+    assert "decoder_no_selected_relations" in decoded.warnings
+
+
+def test_decoder_maps_unicode_math_glyphs_to_standard_latex() -> None:
+    decoded = decode_latex_candidate(
+        [
+            {"node_id": "g0", "unicode": "⊆", "bbox": [0, 0, 8, 10]},
+            {"node_id": "g1", "unicode": "Ω", "bbox": [10, 0, 18, 10]},
+            {"node_id": "g2", "unicode": "⋆", "bbox": [20, 0, 28, 10]},
+        ],
+        {"selected_relations": []},
+        fallback_text="⊆Ω⋆",
+    )
+
+    assert decoded.latex == r"\subseteq\Omega\star"
     assert "decoder_no_selected_relations" in decoded.warnings
 
 

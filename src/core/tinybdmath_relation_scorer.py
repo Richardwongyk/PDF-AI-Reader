@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.core.tinybdmath_edge_baseline import TinyBDEdgeBaselineModel
+from src.core.tinybdmath_edge_baseline import TinyBDEdgeBaselineModel, add_graph_context_features
 
 
 RELATION_SCORE_SCHEMA_VERSION = "tinybdmath_relation_scores_v1"
@@ -28,6 +28,7 @@ class TinyBDRelationScore:
     predicted_relation: str
     confidence: float
     probabilities: dict[str, float]
+    features: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,8 @@ class TinyBDRelationScorer:
 
     def score_graph_row(self, row: dict[str, Any]) -> TinyBDScoredGraph:
         scores: list[TinyBDRelationScore] = []
-        for edge in row.get("candidate_edges", [])[: self.max_edges]:
+        raw_edges = [edge for edge in row.get("candidate_edges", []) if isinstance(edge, dict)]
+        for edge in add_graph_context_features(raw_edges)[: self.max_edges]:
             if not isinstance(edge, dict):
                 continue
             probabilities = self.model.predict_proba(edge)
@@ -88,6 +90,7 @@ class TinyBDRelationScorer:
                     predicted_relation=predicted,
                     confidence=round(confidence, 6),
                     probabilities=probabilities,
+                    features=_numeric_features(edge.get("features", {})),
                 )
             )
         warnings = _verifier_warnings(row, scores)
@@ -224,6 +227,18 @@ def _best(probabilities: dict[str, float]) -> tuple[str, float]:
         return "LOW_CONFIDENCE", 0.0
     label, confidence = max(probabilities.items(), key=lambda item: item[1])
     return label, float(confidence)
+
+
+def _numeric_features(value: object) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, item in value.items():
+        try:
+            result[str(key)] = float(item or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def _optional_int(value: object) -> int | None:

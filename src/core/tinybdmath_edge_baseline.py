@@ -7,6 +7,7 @@ recognizer.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -15,6 +16,7 @@ from typing import Any
 
 
 EDGE_BASELINE_VERSION = "tinybdmath_edge_softmax_v2_geometry_vector_rule_radical"
+EDGE_MLP_VERSION = "tinybdmath_edge_mlp_v1_class_weighted_geometry_vector_rule_radical"
 EDGE_FEATURES = (
     "bias",
     "dx_over_height",
@@ -44,6 +46,22 @@ EDGE_FEATURES = (
     "hint_overline",
     "hint_radical_body",
 )
+EDGE_CONTEXT_FEATURES = (
+    "source_candidate_count",
+    "target_candidate_count",
+    "source_same_relation_count",
+    "target_same_relation_count",
+    "source_relation_rank",
+    "target_relation_rank",
+    "source_best_relation_margin",
+    "target_best_relation_margin",
+    "source_has_fraction_bar",
+    "source_has_above_candidate",
+    "source_has_below_candidate",
+    "target_has_script_parent_candidate",
+    "source_has_script_child_candidate",
+)
+EDGE_FEATURES_V2 = EDGE_FEATURES + EDGE_CONTEXT_FEATURES
 EDGE_LABELS = (
     "HORIZONTAL",
     "SUP",
@@ -66,12 +84,21 @@ class TinyBDEdgeBaselineModel:
     means: tuple[float, ...]
     scales: tuple[float, ...]
     train_config: dict[str, Any]
+    model_type: str = "linear_softmax"
+    hidden_weights: tuple[tuple[tuple[float, ...], ...], ...] = ()
+    hidden_biases: tuple[tuple[float, ...], ...] = ()
+    output_weights: tuple[tuple[float, ...], ...] = ()
+    output_bias: tuple[float, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "TinyBDEdgeBaselineModel":
+        hidden_weights = payload.get("hidden_weights", [])
+        hidden_biases = payload.get("hidden_biases", [])
+        output_weights = payload.get("output_weights", [])
+        output_bias = payload.get("output_bias", [])
         return cls(
             version=str(payload.get("version", EDGE_BASELINE_VERSION)),
             feature_names=tuple(str(item) for item in payload.get("feature_names", EDGE_FEATURES)),
@@ -80,6 +107,14 @@ class TinyBDEdgeBaselineModel:
             means=tuple(float(v) for v in payload.get("means", [])),
             scales=tuple(float(v) for v in payload.get("scales", [])),
             train_config=dict(payload.get("train_config", {})),
+            model_type=str(payload.get("model_type", "mlp_relu" if hidden_weights else "linear_softmax")),
+            hidden_weights=tuple(
+                tuple(tuple(float(v) for v in row) for row in layer)
+                for layer in hidden_weights
+            ),
+            hidden_biases=tuple(tuple(float(v) for v in layer) for layer in hidden_biases),
+            output_weights=tuple(tuple(float(v) for v in row) for row in output_weights),
+            output_bias=tuple(float(v) for v in output_bias),
         )
 
     def save(self, path: Path) -> None:
@@ -93,12 +128,31 @@ class TinyBDEdgeBaselineModel:
     def predict_proba(self, edge: dict[str, Any]) -> dict[str, float]:
         feature_names = self.feature_names or EDGE_FEATURES
         vector = _normalize(edge_features(edge), self.means, self.scales, feature_names=feature_names)
-        probs = _softmax([_dot(weights, vector) for weights in self.weights])
+        probs = _softmax(self._logits(vector))
         return {label: round(probs[index], 6) for index, label in enumerate(self.labels)}
 
     def predict(self, edge: dict[str, Any]) -> str:
         probs = self.predict_proba(edge)
         return max(probs.items(), key=lambda item: item[1])[0] if probs else "NO_RELATION"
+
+    def _logits(self, vector: list[float]) -> list[float]:
+        if self.model_type == "mlp_relu" or self.hidden_weights:
+            return self._mlp_logits(vector)
+        return [_dot(weights, vector) for weights in self.weights]
+
+    def _mlp_logits(self, vector: list[float]) -> list[float]:
+        activations = list(vector)
+        for layer_index, weights in enumerate(self.hidden_weights):
+            biases = self.hidden_biases[layer_index] if layer_index < len(self.hidden_biases) else ()
+            activations = [
+                max(0.0, _dot(row, activations) + (biases[row_index] if row_index < len(biases) else 0.0))
+                for row_index, row in enumerate(weights)
+            ]
+        output_weights = self.output_weights or self.weights
+        return [
+            _dot(row, activations) + (self.output_bias[row_index] if row_index < len(self.output_bias) else 0.0)
+            for row_index, row in enumerate(output_weights)
+        ]
 
 
 def train_edge_baseline(
@@ -155,7 +209,7 @@ def edge_features(edge: dict[str, Any]) -> dict[str, float]:
     if not isinstance(features, dict):
         features = {}
     hint = str(edge.get("hint", ""))
-    return {
+    values = {
         "bias": 1.0,
         "dx_over_height": _float(features.get("dx_over_height")),
         "dy_over_height": _float(features.get("dy_over_height")),
@@ -184,6 +238,53 @@ def edge_features(edge: dict[str, Any]) -> dict[str, float]:
         "hint_overline": 1.0 if hint == "overline_candidate" else 0.0,
         "hint_radical_body": 1.0 if hint == "radical_body_candidate" else 0.0,
     }
+    context = edge.get("context_features", {})
+    if isinstance(context, dict):
+        for name in EDGE_CONTEXT_FEATURES:
+            values[name] = _float(context.get(name))
+    return values
+
+
+def add_graph_context_features(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach graph-local competition features to candidate edges.
+
+    These are generic structure features derived from the candidate graph, not
+    labels or source LaTeX. They are safe for production r2a evidence.
+    """
+
+    prepared = [dict(edge) for edge in edges if isinstance(edge, dict)]
+    source_edges: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    target_edges: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for edge in prepared:
+        source_edges[str(edge.get("source", ""))].append(edge)
+        target_edges[str(edge.get("target", ""))].append(edge)
+    for edge in prepared:
+        source = str(edge.get("source", ""))
+        target = str(edge.get("target", ""))
+        hint = str(edge.get("hint", ""))
+        source_group = source_edges.get(source, [])
+        target_group = target_edges.get(target, [])
+        source_same = _same_relation_edges(source_group, hint)
+        target_same = _same_relation_edges(target_group, hint)
+        context = {
+            "source_candidate_count": _log_count(len(source_group)),
+            "target_candidate_count": _log_count(len(target_group)),
+            "source_same_relation_count": _log_count(len(source_same)),
+            "target_same_relation_count": _log_count(len(target_same)),
+            "source_relation_rank": _rank_fraction(source_same, edge),
+            "target_relation_rank": _rank_fraction(target_same, edge),
+            "source_best_relation_margin": _best_margin(source_same, edge),
+            "target_best_relation_margin": _best_margin(target_same, edge),
+            "source_has_fraction_bar": 1.0 if any(str(item.get("hint", "")) == "fraction_bar_candidate" for item in source_group) else 0.0,
+            "source_has_above_candidate": 1.0 if any(str(item.get("hint", "")) in {"above_zone", "above_rule_candidate"} for item in source_group) else 0.0,
+            "source_has_below_candidate": 1.0 if any(str(item.get("hint", "")) in {"below_zone", "below_rule_candidate"} for item in source_group) else 0.0,
+            "target_has_script_parent_candidate": 1.0 if any(str(item.get("hint", "")) in {"superscript_zone", "subscript_zone"} for item in target_group) else 0.0,
+            "source_has_script_child_candidate": 1.0 if any(str(item.get("hint", "")) in {"superscript_zone", "subscript_zone"} for item in source_group) else 0.0,
+        }
+        merged_context = dict(edge.get("context_features", {}) if isinstance(edge.get("context_features"), dict) else {})
+        merged_context.update(context)
+        edge["context_features"] = merged_context
+    return prepared
 
 
 def evaluate_edge_baseline(model: TinyBDEdgeBaselineModel, samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -280,6 +381,54 @@ def _label_counts(samples: list[dict[str, Any]]) -> dict[str, int]:
         if label in counts:
             counts[label] += 1
     return counts
+
+
+def _same_relation_edges(edges: list[dict[str, Any]], hint: str) -> list[dict[str, Any]]:
+    family = _hint_family(hint)
+    return [edge for edge in edges if _hint_family(str(edge.get("hint", ""))) == family]
+
+
+def _hint_family(hint: str) -> str:
+    if hint in {"above_zone", "above_rule_candidate"}:
+        return "above"
+    if hint in {"below_zone", "below_rule_candidate"}:
+        return "below"
+    if hint in {"superscript_zone", "subscript_zone", "right_neighbor", "far_context", "fraction_bar_candidate", "overline_candidate", "radical_body_candidate"}:
+        return hint
+    if "rule" in hint:
+        return "rule"
+    return hint or "unknown"
+
+
+def _rank_fraction(edges: list[dict[str, Any]], edge: dict[str, Any]) -> float:
+    if not edges:
+        return 0.0
+    ordered = sorted(edges, key=lambda item: (_edge_distance(item), str(item.get("edge_id", ""))))
+    edge_id = str(edge.get("edge_id", ""))
+    for index, item in enumerate(ordered):
+        if str(item.get("edge_id", "")) == edge_id:
+            return index / max(1, len(ordered) - 1)
+    return 1.0
+
+
+def _best_margin(edges: list[dict[str, Any]], edge: dict[str, Any]) -> float:
+    if not edges:
+        return 0.0
+    distances = sorted(_edge_distance(item) for item in edges)
+    current = _edge_distance(edge)
+    best = distances[0]
+    return max(0.0, min(4.0, current - best))
+
+
+def _edge_distance(edge: dict[str, Any]) -> float:
+    features = edge.get("features", {})
+    if not isinstance(features, dict):
+        features = {}
+    return abs(_float(features.get("dx_over_height"))) + abs(_float(features.get("dy_over_height")))
+
+
+def _log_count(value: int) -> float:
+    return math.log1p(max(0, int(value)))
 
 
 def _float(value: object) -> float:
