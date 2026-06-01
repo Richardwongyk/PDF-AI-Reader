@@ -1260,11 +1260,7 @@ def _formula_fusion_report(
         "targeted_r2_queue": [
             {
                 "candidate_id": row["candidate_id"],
-                "reason": (
-                    "low_similarity_after_local_precise"
-                    if row["has_local_precise"]
-                    else "low_similarity_without_local_precise_candidate"
-                ),
+                "reason": "low_similarity_without_local_precise_candidate",
                 "best_similarity": row["best_similarity"],
                 "best_stage": row["best_stage"],
             }
@@ -1674,14 +1670,14 @@ def _persist_fusion_rows(
 def _row_needs_targeted_r2(row: dict[str, object]) -> bool:
     if str(row.get("decision", "")) != "needs_more_evidence":
         return False
+    if bool(row.get("has_local_precise")):
+        return False
     stages = {
         str(stage)
         for stage in row.get("stages", [])
         if str(stage)
     } if isinstance(row.get("stages"), list) else set()
     if stages and stages <= {"inline_spans"}:
-        return False
-    if bool(row.get("has_local_precise")) and float(row.get("best_similarity", 0.0) or 0.0) >= 0.90:
         return False
     return True
 

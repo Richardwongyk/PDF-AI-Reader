@@ -314,14 +314,18 @@ def main_with_args_for_test(argv: list[str] | None = None) -> int:
 
     payload = json.loads(Path(args.input).read_text(encoding="utf-8-sig"))
     raw_items = payload.get("items", [])
-    items = [
-        {
+    items = []
+    for item in raw_items:
+        if not isinstance(item, dict) or not item.get("candidate_id") or not item.get("image_path"):
+            continue
+        normalized: dict[str, Any] = {
             "candidate_id": str(item.get("candidate_id", "")),
             "image_path": str(item.get("image_path", "")),
         }
-        for item in raw_items
-        if isinstance(item, dict) and item.get("candidate_id") and item.get("image_path")
-    ]
+        for key in ("pdf_path", "page_num", "bbox"):
+            if key in item:
+                normalized[key] = item[key]
+        items.append(normalized)
     if args.backend == "paddle_formula":
         results = _run_paddle(items, args.model)
     elif args.backend == "pix2text_formula":

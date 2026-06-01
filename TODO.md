@@ -1,7 +1,7 @@
 # PDF AI Reader — 全版本演化史 · 当前状态 · 重构路线图
 
 > 基于 git 日志 93 次提交 + 12 个新增文件 + 5 个开源项目深度调研
-> 最后更新：2026-05-31 (补记 PDF viewer 缩放裂缝页重渲染与右侧全文问答体验修复)
+> 最后更新：2026-06-01 (补记公式扫描/识别任务链路修复)
 
 ---
 
@@ -76,6 +76,28 @@ QWidget layout + 顶底 spacer 负责实际挂载；普通页走 `_LazyPageWidge
 
 - “有些符号显示不出来”尚未处理；这可能属于 KaTeX 支持范围、模型输出 LaTeX 质量或公式识别质量问题，不应和文字颜色修复混在一起。
 - 未提交 `测试资料/`、日志、缓存或临时测试产物。
+
+## 2026-06-01 公式扫描/识别任务链路修复补记
+
+本轮主攻图片/扫描公式和显式公式精扫的任务链路，没有安装新工具、没有重训模型，也没有改变 born-digital 默认非 OCR 边界。
+
+已完成：
+
+1. 外部公式 worker 入口现在会保留 `pdf_path/page_num/bbox` 等页面上下文，MinerU 这类按 PDF 页面工作的后端不再因为上下文被丢弃而直接返回缺页信息。
+2. 块级公式识别任务和页级公式扫描任务的持久化主键加入 `scan_round`，同一公式或同一页可以分别保留 r1 缓存识别、r2 本地高精度精扫等轮次状态，避免一个轮次覆盖另一个轮次。
+3. 打开旧数据库时会自动迁移任务表主键，并重新确认状态索引；识别结果表和审核记录不清空。
+4. 同一轮次、同一内容 hash 的 queued/running/done 任务保持幂等，避免 fusion 派生 targeted r2 后重复跑已经有本地高精度候选的区域。
+5. targeted r2 现在只给“缺少本地高精度候选”的区域补扫；已有 local precise 但质量不够的区域继续进入 r3/审核，不反复调用同一精扫。
+
+验证：
+
+- `python -m py_compile src\app\formula_index_store.py tools\formula_tool_worker.py tools\formula_multiround_pipeline.py` 通过。
+- `tests/test_formula_multiround_pipeline.py tests/test_external_formula_tools.py tests/test_formula_index_flow.py -q` 通过，合计 69 个公式链路相关测试。
+
+边界：
+
+- 这修的是扫描/识别任务“能正确排队、透传上下文、按轮次落库”的基础链路，不代表公式还原准确率已经达到 99.9%。
+- 没有把低置信候选写入正文、RAG 或 GraphRAG accepted。
 
 ## 2026-05-28 今日性能修复复盘：相对最初基线改了什么、优化了什么、搞坏了什么
 

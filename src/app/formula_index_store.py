@@ -184,7 +184,7 @@ class FormulaIndexStore:
                 attempts     INTEGER NOT NULL DEFAULT 0,
                 created_at   TEXT NOT NULL,
                 updated_at   TEXT NOT NULL,
-                PRIMARY KEY (doc_hash, block_id)
+                PRIMARY KEY (doc_hash, scan_round, block_id)
             )
         """)
         self._conn.execute(
@@ -203,7 +203,7 @@ class FormulaIndexStore:
                 attempts   INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY (doc_hash, page_num)
+                PRIMARY KEY (doc_hash, scan_round, page_num)
             )
         """)
         self._conn.execute(
@@ -311,6 +311,7 @@ class FormulaIndexStore:
             "ON formula_fusion_records(doc_hash, decision, updated_at DESC)"
         )
         self._migrate_schema()
+        self._ensure_indexes()
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -353,33 +354,34 @@ class FormulaIndexStore:
                         continue
                 row = self._conn.execute(
                     """SELECT status, content_hash, scan_round FROM formula_index_jobs
-                       WHERE doc_hash=? AND block_id=?""",
-                    (doc_hash, block.id),
+                       WHERE doc_hash=? AND scan_round=? AND block_id=?""",
+                    (doc_hash, round_name, block.id),
                 ).fetchone()
                 if (
                     row
-                    and row[0] == "done"
                     and row[1] == content_hash
                     and row[2] == round_name
+                    and row[0] in {"queued", "running", "done"}
                 ):
-                    self._enqueue_round_job_locked(
-                        doc_hash=doc_hash,
-                        filepath=filepath,
-                        scan_round=round_name,
-                        target_type="block",
-                        target_id=block.id,
-                        page_num=block.page_num,
-                        priority=priority,
-                        status="done",
-                        now=now,
-                    )
+                    if str(row[0]) == "done":
+                        self._enqueue_round_job_locked(
+                            doc_hash=doc_hash,
+                            filepath=filepath,
+                            scan_round=round_name,
+                            target_type="block",
+                            target_id=block.id,
+                            page_num=block.page_num,
+                            priority=priority,
+                            status="done",
+                            now=now,
+                        )
                     continue
                 self._conn.execute(
                     """INSERT INTO formula_index_jobs
                        (doc_hash, filepath, block_id, page_num, bbox_json, priority,
                         status, content_hash, scan_round, created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
-                       ON CONFLICT(doc_hash, block_id) DO UPDATE SET
+                       ON CONFLICT(doc_hash, scan_round, block_id) DO UPDATE SET
                          filepath=excluded.filepath,
                          page_num=excluded.page_num,
                          bbox_json=excluded.bbox_json,
@@ -392,7 +394,6 @@ class FormulaIndexStore:
                            ELSE 'queued'
                          END,
                          content_hash=excluded.content_hash,
-                         scan_round=excluded.scan_round,
                          error='',
                          updated_at=excluded.updated_at""",
                     (
@@ -454,14 +455,14 @@ class FormulaIndexStore:
                 priority = self.priority_for_page(page_num, priority_pages)
                 row = self._conn.execute(
                     """SELECT status FROM formula_page_scan_jobs
-                       WHERE doc_hash=? AND page_num=?""",
-                    (doc_hash, page_num),
+                       WHERE doc_hash=? AND scan_round=? AND page_num=?""",
+                    (doc_hash, round_name, page_num),
                 ).fetchone()
                 self._conn.execute(
                     """INSERT INTO formula_page_scan_jobs
                        (doc_hash, filepath, page_num, priority, status, scan_round, created_at, updated_at)
                        VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)
-                       ON CONFLICT(doc_hash, page_num) DO UPDATE SET
+                       ON CONFLICT(doc_hash, scan_round, page_num) DO UPDATE SET
                          filepath=excluded.filepath,
                          priority=max(formula_page_scan_jobs.priority, excluded.priority),
                          status=CASE
@@ -469,7 +470,6 @@ class FormulaIndexStore:
                            THEN 'done'
                            ELSE 'queued'
                          END,
-                         scan_round=excluded.scan_round,
                          error='',
                          updated_at=excluded.updated_at""",
                     (doc_hash, filepath, page_num, priority, round_name, now, now),
@@ -588,12 +588,18 @@ class FormulaIndexStore:
         warnings: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         now = _now()
+        round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND block_id=?"
+        params: tuple[object, ...] = (doc_hash, block_id)
+        if round_name is not None:
+            where += " AND scan_round=?"
+            params = (doc_hash, block_id, round_name)
         with self._lock:
             self._conn.execute(
-                """UPDATE formula_index_jobs
+                f"""UPDATE formula_index_jobs
                    SET status='done', latex=?, image_hash=?, model=?, error='', updated_at=?
-                   WHERE doc_hash=? AND block_id=?""",
-                (latex, image_hash, model, now, doc_hash, block_id),
+                   WHERE {where}""",
+                (latex, image_hash, model, now, *params),
             )
             self._update_round_job_for_block_locked(
                 doc_hash,
@@ -623,12 +629,18 @@ class FormulaIndexStore:
         scan_round: str | FormulaScanRound | None = None,
     ) -> None:
         now = _now()
+        round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND block_id=?"
+        params: tuple[object, ...] = (doc_hash, block_id)
+        if round_name is not None:
+            where += " AND scan_round=?"
+            params = (doc_hash, block_id, round_name)
         with self._lock:
             self._conn.execute(
-                """UPDATE formula_index_jobs
+                f"""UPDATE formula_index_jobs
                    SET status='failed', error=?, updated_at=?
-                   WHERE doc_hash=? AND block_id=?""",
-                (error[:500], now, doc_hash, block_id),
+                   WHERE {where}""",
+                (error[:500], now, *params),
             )
             self._update_round_job_for_block_locked(
                 doc_hash,
@@ -648,12 +660,18 @@ class FormulaIndexStore:
         scan_round: str | FormulaScanRound | None = None,
     ) -> None:
         now = _now()
+        round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND block_id=?"
+        params: tuple[object, ...] = (doc_hash, block_id)
+        if round_name is not None:
+            where += " AND scan_round=?"
+            params = (doc_hash, block_id, round_name)
         with self._lock:
             self._conn.execute(
-                """UPDATE formula_index_jobs
+                f"""UPDATE formula_index_jobs
                    SET status='skipped', error=?, updated_at=?
-                   WHERE doc_hash=? AND block_id=?""",
-                (reason[:500], now, doc_hash, block_id),
+                   WHERE {where}""",
+                (reason[:500], now, *params),
             )
             self._update_round_job_for_block_locked(
                 doc_hash,
@@ -695,12 +713,18 @@ class FormulaIndexStore:
         scan_round: str | FormulaScanRound | None = None,
     ) -> None:
         now = _now()
+        round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND page_num=?"
+        params: tuple[object, ...] = (doc_hash, int(page_num))
+        if round_name is not None:
+            where += " AND scan_round=?"
+            params = (doc_hash, int(page_num), round_name)
         with self._lock:
             self._conn.execute(
-                """UPDATE formula_page_scan_jobs
+                f"""UPDATE formula_page_scan_jobs
                    SET status='failed', error=?, updated_at=?
-                   WHERE doc_hash=? AND page_num=?""",
-                (error[:500], now, doc_hash, page_num),
+                   WHERE {where}""",
+                (error[:500], now, *params),
             )
             self._update_round_job_for_page_locked(
                 doc_hash,
@@ -1632,12 +1656,20 @@ class FormulaIndexStore:
         now = _now()
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
         round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND block_id=?"
+        if round_name is not None:
+            where += " AND scan_round=?"
         with self._lock:
             self._conn.executemany(
                 f"""UPDATE formula_index_jobs
                     SET status=?, attempts={attempts_expr}, updated_at=?
-                    WHERE doc_hash=? AND block_id=?""",
-                [(status, now, doc_hash, block_id) for block_id in block_ids],
+                    WHERE {where}""",
+                [
+                    (status, now, doc_hash, block_id, round_name)
+                    if round_name is not None
+                    else (status, now, doc_hash, block_id)
+                    for block_id in block_ids
+                ],
             )
             for block_id in block_ids:
                 self._update_round_job_for_block_locked(
@@ -1663,12 +1695,20 @@ class FormulaIndexStore:
         now = _now()
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
         round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND page_num=?"
+        if round_name is not None:
+            where += " AND scan_round=?"
         with self._lock:
             self._conn.executemany(
                 f"""UPDATE formula_page_scan_jobs
                     SET status=?, attempts={attempts_expr}, updated_at=?
-                    WHERE doc_hash=? AND page_num=?""",
-                [(status, now, doc_hash, int(page_num)) for page_num in page_nums],
+                    WHERE {where}""",
+                [
+                    (status, now, doc_hash, int(page_num), round_name)
+                    if round_name is not None
+                    else (status, now, doc_hash, int(page_num))
+                    for page_num in page_nums
+                ],
             )
             for page_num in page_nums:
                 self._update_round_job_for_page_locked(
@@ -1780,6 +1820,14 @@ class FormulaIndexStore:
             "scan_round",
             "TEXT NOT NULL DEFAULT 'r0_pdf_structure'",
         )
+        self._ensure_primary_key(
+            "formula_index_jobs",
+            ("doc_hash", "scan_round", "block_id"),
+        )
+        self._ensure_primary_key(
+            "formula_page_scan_jobs",
+            ("doc_hash", "scan_round", "page_num"),
+        )
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {
@@ -1788,6 +1836,81 @@ class FormulaIndexStore:
         }
         if column not in columns:
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _ensure_primary_key(self, table: str, columns: tuple[str, ...]) -> None:
+        info = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        pk_columns = tuple(
+            str(row[1])
+            for row in sorted((row for row in info if int(row[5] or 0) > 0), key=lambda row: int(row[5]))
+        )
+        if pk_columns == columns:
+            return
+        temp_table = f"{table}_old_pk"
+        self._conn.execute(f"ALTER TABLE {table} RENAME TO {temp_table}")
+        if table == "formula_index_jobs":
+            self._create_formula_index_jobs_table(table)
+        elif table == "formula_page_scan_jobs":
+            self._create_formula_page_scan_jobs_table(table)
+        else:
+            raise ValueError(f"unsupported primary key migration table: {table}")
+        column_names = [str(row[1]) for row in info]
+        selected_columns = ", ".join(column_names)
+        inserted_columns = ", ".join(column_names)
+        self._conn.execute(
+            f"""INSERT OR REPLACE INTO {table} ({inserted_columns})
+                SELECT {selected_columns} FROM {temp_table}"""
+        )
+        self._conn.execute(f"DROP TABLE {temp_table}")
+
+    def _ensure_indexes(self) -> None:
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_jobs_status "
+            "ON formula_index_jobs(doc_hash, status, priority DESC, page_num ASC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_formula_page_scan_status "
+            "ON formula_page_scan_jobs(doc_hash, status, priority DESC, page_num ASC)"
+        )
+
+    def _create_formula_index_jobs_table(self, table: str = "formula_index_jobs") -> None:
+        self._conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table} (
+                doc_hash     TEXT NOT NULL,
+                filepath     TEXT NOT NULL,
+                block_id     TEXT NOT NULL,
+                page_num     INTEGER NOT NULL,
+                bbox_json    TEXT NOT NULL,
+                priority     REAL NOT NULL DEFAULT 0,
+                status       TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                scan_round   TEXT NOT NULL DEFAULT 'r1_cached_recognition',
+                image_hash   TEXT NOT NULL DEFAULT '',
+                latex        TEXT NOT NULL DEFAULT '',
+                model        TEXT NOT NULL DEFAULT '',
+                error        TEXT NOT NULL DEFAULT '',
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL,
+                PRIMARY KEY (doc_hash, scan_round, block_id)
+            )
+        """)
+
+    def _create_formula_page_scan_jobs_table(self, table: str = "formula_page_scan_jobs") -> None:
+        self._conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table} (
+                doc_hash   TEXT NOT NULL,
+                filepath   TEXT NOT NULL,
+                page_num   INTEGER NOT NULL,
+                priority   REAL NOT NULL DEFAULT 0,
+                status     TEXT NOT NULL,
+                scan_round TEXT NOT NULL DEFAULT 'r0_pdf_structure',
+                error      TEXT NOT NULL DEFAULT '',
+                attempts   INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (doc_hash, scan_round, page_num)
+            )
+        """)
 
     def _enqueue_round_job_locked(
         self,
@@ -1847,15 +1970,21 @@ class FormulaIndexStore:
         error: str = "",
         increment_attempts: bool = False,
     ) -> None:
+        round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND block_id=?"
+        params: tuple[object, ...] = (doc_hash, block_id)
+        if round_name is not None:
+            where += " AND scan_round=?"
+            params = (doc_hash, block_id, round_name)
         row = self._conn.execute(
             """SELECT filepath, page_num, priority, scan_round, content_hash
                FROM formula_index_jobs
-               WHERE doc_hash=? AND block_id=?""",
-            (doc_hash, block_id),
+               WHERE {where}""".format(where=where),
+            params,
         ).fetchone()
         if not row:
             return
-        round_name = _round_value(scan_round) if scan_round is not None else str(row[3])
+        round_name = round_name or str(row[3])
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
         payload_dict = dict(result_json or {})
         payload_dict.setdefault("content_hash", str(row[4]))
@@ -1903,15 +2032,21 @@ class FormulaIndexStore:
         error: str = "",
         increment_attempts: bool = False,
     ) -> None:
+        round_name = _round_value(scan_round) if scan_round is not None else None
+        where = "doc_hash=? AND page_num=?"
+        params: tuple[object, ...] = (doc_hash, page_num)
+        if round_name is not None:
+            where += " AND scan_round=?"
+            params = (doc_hash, page_num, round_name)
         row = self._conn.execute(
             """SELECT filepath, priority, scan_round
                FROM formula_page_scan_jobs
-               WHERE doc_hash=? AND page_num=?""",
-            (doc_hash, page_num),
+               WHERE {where}""".format(where=where),
+            params,
         ).fetchone()
         if not row:
             return
-        round_name = _round_value(scan_round) if scan_round is not None else str(row[2])
+        round_name = round_name or str(row[2])
         attempts_expr = "attempts + 1" if increment_attempts else "attempts"
         payload = json.dumps(result_json or {}, ensure_ascii=False, separators=(",", ":"))
         self._conn.execute(

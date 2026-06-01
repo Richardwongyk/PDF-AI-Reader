@@ -365,7 +365,9 @@ def test_multiround_pipeline_can_run_targeted_r2_after_fusion(monkeypatch, tmp_p
         if item.round == FormulaScanRound.LOCAL_HIGH_PRECISION.value
     ]
     assert len(r2_rounds) == 2
-    assert r2_rounds[-1].status == "done"
+    assert r2_rounds[0].status == "done"
+    assert r2_rounds[-1].status == "skipped"
+    assert r2_rounds[-1].details["reason"] == "no_pending_r2_blocks"
     assert report.recognition_results["local_precise:fake_tool"] == 1
 
 

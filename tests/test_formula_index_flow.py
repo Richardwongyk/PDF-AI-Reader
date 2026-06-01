@@ -805,7 +805,7 @@ def test_formula_index_store_keeps_high_precision_round_after_cached_done(tmp_pa
     )
 
     assert queued == 1
-    assert store.counts("doc-1") == {"queued": 1}
+    assert store.counts("doc-1") == {"done": 1, "queued": 1}
     assert store.list_tasks(
         "doc-1",
         statuses={"queued"},
@@ -815,6 +815,75 @@ def test_formula_index_store_keeps_high_precision_round_after_cached_done(tmp_pa
         "r1_cached_recognition:done": 1,
         "r2_local_high_precision:queued": 1,
     }
+
+
+def test_formula_index_store_keeps_page_scan_rounds_separate(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    store.enqueue_pages(
+        "doc-1",
+        "paper.pdf",
+        [0],
+        scan_round=FormulaScanRound.PDF_STRUCTURE,
+    )
+    store.mark_pages_done("doc-1", [0], scan_round=FormulaScanRound.PDF_STRUCTURE)
+
+    queued = store.enqueue_pages(
+        "doc-1",
+        "paper.pdf",
+        [0],
+        scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
+    )
+
+    assert queued == 1
+    assert store.page_counts("doc-1") == {"done": 1, "queued": 1}
+    assert store.round_counts("doc-1") == {
+        "r0_pdf_structure:done": 1,
+        "r2_local_high_precision:queued": 1,
+    }
+
+
+def test_formula_index_store_migrates_legacy_block_job_primary_key(tmp_path) -> None:
+    db_path = tmp_path / "formula_jobs.db"
+    legacy = FormulaIndexStore(str(db_path))
+    legacy.close()
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE formula_index_jobs RENAME TO formula_index_jobs_new_pk")
+    conn.execute("""
+        CREATE TABLE formula_index_jobs (
+            doc_hash     TEXT NOT NULL,
+            filepath     TEXT NOT NULL,
+            block_id     TEXT NOT NULL,
+            page_num     INTEGER NOT NULL,
+            bbox_json    TEXT NOT NULL,
+            priority     REAL NOT NULL DEFAULT 0,
+            status       TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            scan_round   TEXT NOT NULL DEFAULT 'r1_cached_recognition',
+            image_hash   TEXT NOT NULL DEFAULT '',
+            latex        TEXT NOT NULL DEFAULT '',
+            model        TEXT NOT NULL DEFAULT '',
+            error        TEXT NOT NULL DEFAULT '',
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            PRIMARY KEY (doc_hash, block_id)
+        )
+    """)
+    conn.execute("DROP TABLE formula_index_jobs_new_pk")
+    conn.commit()
+    conn.close()
+
+    store = FormulaIndexStore(str(db_path))
+    pk_columns = [
+        row[1]
+        for row in sorted(
+            (row for row in store._conn.execute("PRAGMA table_info(formula_index_jobs)").fetchall() if row[5]),
+            key=lambda row: row[5],
+        )
+    ]
+    assert pk_columns == ["doc_hash", "scan_round", "block_id"]
 
 
 def test_formula_index_flow_records_high_precision_worker_round(tmp_path) -> None:

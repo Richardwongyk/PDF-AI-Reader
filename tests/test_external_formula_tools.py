@@ -212,3 +212,65 @@ def test_formula_tool_worker_accepts_utf8_bom_input(tmp_path) -> None:
     assert code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["results"][0]["candidate_id"] == "p0_b1"
+
+
+def test_formula_tool_worker_keeps_pdf_page_context(monkeypatch, tmp_path) -> None:
+    input_path = tmp_path / "input.json"
+    output_path = tmp_path / "output.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "candidate_id": "p0_b1",
+                        "image_path": "formula.png",
+                        "pdf_path": "paper.pdf",
+                        "page_num": 2,
+                        "bbox": [10, 20, 30, 40],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: list[dict[str, object]] = []
+
+    def fake_mineru(items, model, output_root):
+        captured.extend(items)
+        return [
+            {
+                "candidate_id": items[0]["candidate_id"],
+                "latex": r"x+y",
+                "score": None,
+                "model": "mineru_hybrid_formula",
+                "model_version": model,
+                "preprocess_version": "pdf-page-txt-v1",
+                "duration_ms": 1,
+                "warnings": [],
+                "raw": {},
+            }
+        ]
+
+    monkeypatch.setattr(formula_tool_worker, "_run_mineru_pdf_page", fake_mineru)
+
+    code = formula_tool_worker.main_with_args_for_test([
+        "--backend",
+        "mineru_pdf_page",
+        "--input",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--model",
+        "hybrid-auto-engine",
+    ])
+
+    assert code == 0
+    assert captured == [
+        {
+            "candidate_id": "p0_b1",
+            "image_path": "formula.png",
+            "pdf_path": "paper.pdf",
+            "page_num": 2,
+            "bbox": [10, 20, 30, 40],
+        }
+    ]
