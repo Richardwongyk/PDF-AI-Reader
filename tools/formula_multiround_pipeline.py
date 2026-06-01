@@ -173,6 +173,7 @@ def run_pipeline_case(
     drain_r5: bool = False,
     run_tinybdmath: bool = False,
     tinybdmath_model: Path | None = None,
+    tinybdmath_graph_parser_model: Path | None = None,
     tinybdmath_edge_model: Path | None = None,
 ) -> MultiRoundPipelineReport:
     started_total = time.perf_counter()
@@ -198,7 +199,7 @@ def run_pipeline_case(
                 filepath=filepath,
                 blocks=blocks,
                 tinybdmath_model=tinybdmath_model,
-                tinybdmath_edge_model=tinybdmath_edge_model,
+                tinybdmath_graph_parser_model=tinybdmath_graph_parser_model,
                 limit=r2_limit,
             )
         )
@@ -516,11 +517,15 @@ def _run_tinybdmath_r2a(
     filepath: str,
     blocks: list[DocumentBlock],
     tinybdmath_model: Path | None,
-    tinybdmath_edge_model: Path | None,
+    tinybdmath_graph_parser_model: Path | None,
     limit: int,
 ) -> RoundReport:
     started = time.perf_counter()
-    service = TinyBDMathCandidateService(store, model_path=tinybdmath_model, edge_model_path=tinybdmath_edge_model)
+    service = TinyBDMathCandidateService(
+        store,
+        model_path=tinybdmath_model,
+        graph_parser_model_path=tinybdmath_graph_parser_model,
+    )
     inline_items = _inline_formula_candidate_items(blocks)
     if int(limit) > 0:
         structure_limit = max(1, int(limit))
@@ -545,7 +550,11 @@ def _run_tinybdmath_r2a(
         "stage": "tinybdmath_structural",
         "model": "tinybdmath",
         "model_version": service.model_version,
-        "relation_model_version": service.relation_model_version,
+        "graph_parser_model_version": service.graph_parser_model_version,
+        "legacy_edge_model": {
+            "enabled": False,
+            "reason": "Graph Parser is the r2a main path; edge scorer is baseline-only.",
+        },
         "preprocess_version": TINYBDMATH_PREPROCESS_VERSION,
         "structure": structure_details,
         "inline": inline_details,
@@ -2358,7 +2367,13 @@ def main() -> int:
         "--tinybdmath-edge-model",
         type=Path,
         default=None,
-        help="Optional edge relation JSON model from tools/tinybdmath_train_edge_baseline.py.",
+        help="Deprecated no-op; legacy edge scorer is baseline-only and is not used by r2a.",
+    )
+    parser.add_argument(
+        "--tinybdmath-graph-parser-model",
+        type=Path,
+        default=None,
+        help="Graph Parser JSON artifact from tools/tinybdmath_train_graph_parser.py.",
     )
     parser.add_argument("--drain-r2", action="store_true", help="Run r2 in bounded batches until no queued r2 jobs remain.")
     parser.add_argument("--drain-r3", action="store_true", help="Run r3 in bounded batches until no queued r3 jobs remain.")
@@ -2403,6 +2418,7 @@ def main() -> int:
             run_cloud_review=bool(args.run_cloud_review),
             run_tinybdmath=bool(args.run_tinybdmath),
             tinybdmath_model=args.tinybdmath_model,
+            tinybdmath_graph_parser_model=args.tinybdmath_graph_parser_model,
             tinybdmath_edge_model=args.tinybdmath_edge_model,
             run_targeted_r2_after_fusion=bool(args.run_targeted_r2_after_fusion),
             drain_r2=bool(args.drain_r2),

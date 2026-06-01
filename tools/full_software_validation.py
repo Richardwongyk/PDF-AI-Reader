@@ -20,12 +20,11 @@ from typing import Any, Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MAIN_PYTHON = Path(r"C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe")
-DEFAULT_TINYBDMATH_EDGE_MODEL = (
+DEFAULT_TINYBDMATH_GRAPH_PARSER_MODEL = (
     ROOT
     / "test_artifacts"
-    / "tinybdmath_relation_pipeline_v4_full_train_all"
-    / "edge_model"
-    / "tinybdmath_edge_baseline_model.json"
+    / "tinybdmath_graph_parser_m1"
+    / "tinybdmath_graph_parser_model.json"
 )
 
 
@@ -65,9 +64,15 @@ QUICK_TESTS = [
     "tests/test_formula_index_flow.py",
     "tests/test_formula_multiround_pipeline.py",
     "tests/test_formula_semantic_review.py",
+    "tests/test_tinybdmath_alignment.py",
+    "tests/test_tinybdmath_alignment_audit.py",
     "tests/test_tinybdmath_candidate_service.py",
+    "tests/test_tinybdmath_cslt_schema.py",
+    "tests/test_tinybdmath_graph_parser.py",
     "tests/test_tinybdmath_relation_scorer.py",
     "tests/test_tinybdmath_structural_candidate.py",
+    "tests/test_tinybdmath_symbol_equivalence.py",
+    "tests/test_tinybdmath_target_tree.py",
 ]
 
 
@@ -96,6 +101,7 @@ class ValidationOptions:
     include_cloud: bool = False
     include_local_tools: bool = False
     strict_logs: bool = False
+    tinybdmath_graph_parser_model: Path | None = None
     tinybdmath_edge_model: Path | None = None
     stress_multiplier: int = 1
 
@@ -314,8 +320,8 @@ def _formula_audit_steps(options: ValidationOptions) -> list[ValidationStep]:
 
 def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
     steps: list[ValidationStep] = []
-    edge_model = options.tinybdmath_edge_model or DEFAULT_TINYBDMATH_EDGE_MODEL
-    has_edge_model = edge_model.exists()
+    graph_parser_model = options.tinybdmath_graph_parser_model or DEFAULT_TINYBDMATH_GRAPH_PARSER_MODEL
+    has_graph_parser_model = graph_parser_model.exists()
     for slice_name, case_name, start_page, pages in _selected_case_slices(
         options.case,
         options.profile,
@@ -365,12 +371,12 @@ def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
             _rel(report),
             "--run-tinybdmath",
         ]
-        notes = ["born-digital-first multiround pipeline"]
-        if has_edge_model:
-            command.extend(["--tinybdmath-edge-model", _rel(edge_model)])
-            notes.append("TinyBDMath edge model is loaded when available")
+        notes = ["born-digital-first multiround pipeline", "TinyBDMath r2a uses Graph Parser as the main path"]
+        if has_graph_parser_model:
+            command.extend(["--tinybdmath-graph-parser-model", _rel(graph_parser_model)])
+            notes.append("TinyBDMath Graph Parser model is loaded")
         else:
-            notes.append("TinyBDMath uses deterministic model fallback because edge model artifact is absent")
+            notes.append("TinyBDMath r2a will abstain because Graph Parser artifact is absent")
         if options.include_local_tools:
             command.append("--auto-local-tools")
             notes.append("explicit local OCR/MFR tool comparison enabled")
@@ -829,11 +835,12 @@ def run_validation(options: ValidationOptions) -> int:
             **asdict(options),
             "output_dir": _rel(options.output_dir),
             "python": str(options.python),
-            "tinybdmath_edge_model": (
-                str(options.tinybdmath_edge_model)
-                if options.tinybdmath_edge_model is not None
-                else str(DEFAULT_TINYBDMATH_EDGE_MODEL)
+            "tinybdmath_graph_parser_model": (
+                str(options.tinybdmath_graph_parser_model)
+                if options.tinybdmath_graph_parser_model is not None
+                else str(DEFAULT_TINYBDMATH_GRAPH_PARSER_MODEL)
             ),
+            "tinybdmath_edge_model": str(options.tinybdmath_edge_model) if options.tinybdmath_edge_model is not None else None,
         },
         "status": "passed" if not required_failures else "failed",
         "elapsed_sec": round(elapsed, 3),
@@ -867,6 +874,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
     parser.add_argument("--include-cloud", action="store_true")
     parser.add_argument("--include-local-tools", action="store_true")
     parser.add_argument("--strict-logs", action="store_true")
+    parser.add_argument("--tinybdmath-graph-parser-model", type=Path)
     parser.add_argument("--tinybdmath-edge-model", type=Path)
     parser.add_argument(
         "--stress-multiplier",
@@ -887,6 +895,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
         include_cloud=args.include_cloud,
         include_local_tools=args.include_local_tools,
         strict_logs=args.strict_logs,
+        tinybdmath_graph_parser_model=args.tinybdmath_graph_parser_model,
         tinybdmath_edge_model=args.tinybdmath_edge_model,
         stress_multiplier=max(1, args.stress_multiplier),
     )

@@ -17,6 +17,7 @@ def _options(tmp_path: Path, **overrides):
         "include_cloud": False,
         "include_local_tools": False,
         "strict_logs": False,
+        "tinybdmath_graph_parser_model": None,
         "tinybdmath_edge_model": None,
         "stress_multiplier": 1,
     }

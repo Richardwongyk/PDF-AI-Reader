@@ -3,7 +3,7 @@
 最后更新：2026-06-01
 
 本文是新会话接手时的短入口。历史流水账已从本文删除，避免把过期状态、
-旧指标和临时路线误当成下一步计划。更细的 TinyBDMath 深度方案见
+旧指标和临时路线误当成下一步计划。TinyBDMath 的白话版执行方案见
 `docs/tiny_born_digital_math_model_engineering.md`。
 
 ## 1. 当前真实目标
@@ -40,7 +40,21 @@
   - 新增 `docs/workspace_inventory.md`。
   - 更新 README/AGENTS/TODO/交接文档。
 
-当前还有一组未提交的 TinyBDMath 试验性代码改动：
+2026-06-01 当前工作树新增了 Graph Parser M1 垂直切片，尚未提交：
+
+- `src/core/tinybdmath_cslt_schema.py`
+- `src/core/tinybdmath_target_tree.py`
+- `src/core/tinybdmath_alignment.py`
+- `src/core/tinybdmath_graph_parser.py`
+- `tools/tinybdmath_build_target_trees.py`
+- `tools/tinybdmath_align_targets.py`
+- `tools/tinybdmath_train_graph_parser.py`
+- `TinyBDMathCandidateService` 已把 r2a 主路径切到 Graph Parser artifact。
+
+旧 edge scorer 现在只作为 legacy baseline/ablation。r2a 不再自动回退到旧 edge
+decoder；缺少 Graph Parser artifact 时会写 candidate-only abstain 和缺模型 warning。
+
+此前可能存在的一组 TinyBDMath 试验性代码改动已经撤回：
 
 - `src/core/tinybdmath_structural_candidate.py`
 - `tools/tinybdmath_eval_decoded_latex.py`
@@ -72,15 +86,15 @@
 
 正确方向：
 
-- 目标树必须能表达这些结构。
-- alignment 必须能把 PDF glyph 对齐到目标树。
-- 模型必须输出 parent/relation/group/text/artifact 等信息。
-- decoder 只做通用合法性约束和 CSLT 序列化。
+- PDF 里的每个小字、小符号、小横线都要进入模型可学习的证据。
+- 模型必须直接判断保留/丢弃、符号身份、父子关系、组边界和结构线条角色。
+- decoder 只做通用合法性检查和 LaTeX 序列化。
+- 低置信时拒绝或只给候选，不用字符串补丁硬凑。
 
 ### 3.3 更高级模型的前提是更高级标签
 
 直接换大模型或自由生成 LaTeX 不是最佳路线。born-digital PDF 已经有结构事实，
-应先建立神经符号训练目标：
+应先建立能让模型学结构的训练目标：
 
 - Canonical Symbol Layout Tree。
 - PDF graph 到 CSLT 的软/硬对齐。
@@ -95,6 +109,9 @@
 
 - 不用 OCR/MFR 解决 born-digital PDF 主问题。
 - 不写样本特化正则、固定论文词表、输出字符串替换。
+- 不在 TinyBDMath 对齐器、decoder 或后处理里维护本地 TeX/Unicode 符号表。
+- 符号等价只能来自 KaTeX/MathML/TeX AST、PDF identity repair、font/cmap、
+  AGL/TeX glyph list、OpenType MATH 等统一证据层。
 - 不在 decoder 中猜根号主体、分数主体、上下标组。
 - 不把低置信 TinyBDMath 输出写 accepted。
 - 不把候选直接写正文、FTS、向量库或 GraphRAG。
@@ -104,20 +121,16 @@
 
 ## 5. 下一步唯一主线
 
-下一步不是继续训练旧 edge model，也不是继续修旧 decoder。主线是建立
-神经符号公式恢复数据链：
+下一步不是继续训练旧 edge model，也不是继续修旧 decoder。主线是：该模型学
+的就放进模型学，后处理只负责整理和拒绝低置信结果。
 
 ```text
-PDF graph
-  -> observation cleaning
-  -> target CSLT from source only for training/audit
-  -> graph/tree alignment
-  -> hard/soft structure labels
-  -> graph parser
-  -> constrained CSLT decode
-  -> layout verifier
-  -> candidate-only production output
-  -> accepted gate / manual revision / r5 update
+PDF 小块证据
+  -> 训练标签
+  -> 模型直接输出公式结构
+  -> 通用合法性检查
+  -> 低置信拒绝或 candidate-only
+  -> 人工/门禁 accepted 后再进知识库
 ```
 
 详细设计见 `docs/tiny_born_digital_math_model_engineering.md`。
@@ -138,7 +151,7 @@ PDF graph
 - 文档写清旧路线边界。
 - git diff 中不混入“看似修好 bug 但实为后处理补丁”的改动。
 
-### Step 2：定义 CSLT schema
+### Step 2：定义 CSLT schema（M1 已完成）
 
 任务：
 
@@ -156,39 +169,52 @@ PDF graph
 
 ### Step 3：生成 target tree
 
-任务：
+M1 已完成：
 
+- 新增 `src/core/tinybdmath_target_tree.py`。
 - 新增 `tools/tinybdmath_build_target_trees.py`。
 - 从 graph rows 的 `label_latex/raw_source_latex` 只在训练/审计阶段生成 CSLT。
-- 第一版可复用 KaTeX parse tree 和 MathML。
+- 第一版复用 KaTeX parse tree。
 - 复杂失败样例记录 parser warning，不丢行。
 
-验收：
+已跑 smoke：
 
-- 先跑 200 行。
-- 输出 target tree JSONL、manifest、failure buckets。
-- 目标树能表达当前失败样例。
+- 20 行真实 graph rows：success_rows=20，failed_rows=0。
+- warning：`target_tree_unsupported_katex_type:font` 4 次，已分桶。
 
 ### Step 4：实现 alignment
 
-任务：
+M1 已完成：
 
 - 新增 `src/core/tinybdmath_alignment.py`。
+- 新增 `tools/tinybdmath_align_targets.py`。
 - 实现 PDF leaf 到 CSLT leaf 的 matching。
-- 实现 text run、script、fraction、radical 的 group alignment。
+- 实现 script/radical/text/artifact 的初版 hard/soft/ignore 标签。
 - 输出 hard/soft/ignore 标签。
 
-验收：
+已跑 smoke：
 
-- 200 行 alignment audit 可解释。
-- top failures 有分桶原因。
-- artifact/spacing/marker 不再无解释进入 hard supervision。
+- 20 行真实 graph rows：rows_with_hard_labels=13，avg_hard_alignment_rate=0.894048。
+- warning：`alignment_low_hard_coverage` 3 次，`alignment_unmatched_target_nodes` 1 次。
+- relation_counts：BASE=8、CHILD=43、NEXT=43、SUB=12。
+
+2026-06-02 重新按“无 TinyBDMath 本地符号表”边界跑了 200 行审计：
+
+- 输出目录：`test_artifacts/tinybdmath_graph_parser_audit_200_no_local_symbol_map/`
+  仅为临时产物，不提交。
+- target tree：rows=200，success_rows=199，failed_rows=1。
+- alignment：rows_with_hard_labels=148，avg_hard_alignment_rate=0.940763。
+- audit：hard_row_rate=0.915，relation_row_rate=0.74，gate passed。
+- 主要失败桶：`\cong`/`\mapsto` 等复合 glyph、`\cdot`/根号 glyph、
+  KaTeX alignment 源码解析失败、个别 text/operator 顺序冲突。
+- 处理原则：这些失败必须进入 PDF identity repair、font/cmap、MathML/AST
+  target alias 或观测图清洗层；禁止回到 alignment/decoder 写局部符号表。
 
 ### Step 5：扩大到 2000 行
 
 任务：
 
-- 跑 2000 行 target tree + alignment。
+- 已完成 200 行 target tree + alignment 审计，下一步跑 2000 行。
 - 输出 per-structure coverage。
 - 与旧 weak relation labels 对比。
 
@@ -198,16 +224,23 @@ PDF graph
 - sub/sup/fraction/radical/text/fence/operator 至少都有分项指标。
 - 未覆盖结构明确列入 ignore/abstain，而不是错误 hard label。
 
-### Step 6：训练 Graph Parser M1
+### Step 6：训练 Graph Parser M1（代码已完成，正式训练未完成）
 
-任务：
+M1 已完成：
 
 - 新增 `src/core/tinybdmath_graph_parser.py`。
-- 用 PyTorch 训练 node mask、parent pointer、relation type。
+- 新增 `tools/tinybdmath_train_graph_parser.py`。
+- 用 PyTorch 训练 relation type / parent edge 初版。
 - 处理类别不平衡：class weight、focal loss 或 balanced sampling。
 - 导出主程序可读 artifact。
 
-验收：
+已跑 smoke：
+
+- `science` 环境 PyTorch 2.5.1 可用。
+- 20 行 alignment、2 epochs、CPU 训练成功，导出 `tinybdmath_graph_parser_model.json`。
+- smoke validation accuracy 约 0.527、positive_recall 约 0.389；这只证明链路可跑，不代表质量达标。
+
+正式验收仍是：
 
 - 2000 行 dev formula exact/near 明显超过旧 direct eval 抽样基线。
 - 失败样例不依赖 decoder 猜。
@@ -229,10 +262,16 @@ PDF graph
 
 ### Step 8：r2a 集成与全量评估
 
-任务：
+M1 已完成：
 
-- `TinyBDMathCandidateService` 支持新 graph parser artifact。
-- evidence JSON 写入 graph/model/decode/verifier 版本。
+- `TinyBDMathCandidateService` 支持并要求 Graph Parser artifact 作为 r2a 主路径。
+- 缺少 Graph Parser artifact 时写 abstain，不回退旧 edge decoder。
+- evidence JSON 写入 graph_parser、relation_scoring、structural_candidate、decoded_latex。
+- `tools/formula_multiround_pipeline.py` 新增 `--tinybdmath-graph-parser-model`。
+- `tools/full_software_validation.py` 默认寻找 Graph Parser artifact。
+
+仍需完成：
+
 - Attention/Napkin 限页 pipeline 验证二次打开跳过。
 - 全量评估 formula-level exact/near/tree edit/render match。
 
@@ -264,20 +303,44 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
   tests/test_tinybdmath_eval_decoded_latex.py -q
 ```
 
-后续新增神经符号流水线后，应改用：
+TinyBDMath Graph Parser M1 测试：
 
 ```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
-  tools\tinybdmath_build_target_trees.py --limit 200 --output-dir test_artifacts\tinybdmath_cslt_target_200
-
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
-  tools\tinybdmath_align_targets.py --limit 200 --output-dir test_artifacts\tinybdmath_alignment_200
-
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe `
-  tools\tinybdmath_audit_alignment.py --input test_artifacts\tinybdmath_alignment_200\alignment_rows.jsonl
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
+  tests/test_tinybdmath_symbol_equivalence.py `
+  tests/test_tinybdmath_cslt_schema.py `
+  tests/test_tinybdmath_target_tree.py `
+  tests/test_tinybdmath_alignment.py `
+  tests/test_tinybdmath_alignment_audit.py `
+  tests/test_tinybdmath_graph_parser.py `
+  tests/test_tinybdmath_candidate_service.py `
+  tests/test_formula_multiround_pipeline.py `
+  tests/test_full_software_validation.py -q
 ```
 
-这些新命令目前是计划目标，未实现前不要假装已经跑过。
+20 行 smoke 命令：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\tinybdmath_build_target_trees.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --output-dir test_artifacts\tinybdmath_graph_parser_smoke\target_trees `
+  --limit 20
+
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\tinybdmath_align_targets.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --target-trees test_artifacts\tinybdmath_graph_parser_smoke\target_trees\tinybdmath_target_trees.jsonl `
+  --output-dir test_artifacts\tinybdmath_graph_parser_smoke\alignment `
+  --limit 20
+
+C:\Users\WYK\.conda\envs\science\python.exe tools\tinybdmath_train_graph_parser.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --alignment-rows test_artifacts\tinybdmath_graph_parser_smoke\alignment\tinybdmath_alignment_rows.jsonl `
+  --output-dir test_artifacts\tinybdmath_graph_parser_smoke\model `
+  --limit 20 --epochs 2 --batch-size 128 --hidden-units 32 --hidden-layers 1 --device cpu
+```
+
+200 行无本地符号表审计已跑过。下一步同一路线扩大到 2000 行，输出到新的
+`test_artifacts/` 临时目录，不提交产物。
 
 ## 8. 停止做的事
 
@@ -311,8 +374,8 @@ rg -n "额外署名|来源标记|生成工具署名|自动署名" . -S `
 
 除非同时满足以下条件，否则不要继续长时间训练：
 
-1. CSLT target tree 已生成并审计。
-2. PDF graph 到 CSLT alignment 已通过 200/2000 行审计。
+1. 目标公式结构树已生成并审计。
+2. PDF 小块到目标结构的标签已通过 200/2000 行审计。
 3. hard/soft/ignore 标签分层明确。
 4. 旧 baseline 对比指标已固定。
 5. 训练目标是 graph parser，而不是旧 edge softmax。

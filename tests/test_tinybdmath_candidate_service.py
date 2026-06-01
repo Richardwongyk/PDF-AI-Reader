@@ -2,10 +2,10 @@ from pathlib import Path
 
 from src.app.formula_index_store import FormulaIndexStore
 from src.app.tinybdmath_candidate_service import TINYBDMATH_PREPROCESS_VERSION, TinyBDMathCandidateService
-from src.core.tinybdmath_edge_baseline import train_edge_baseline
+from src.core.tinybdmath_graph_parser import GRAPH_PARSER_FEATURES, GRAPH_PARSER_RELATIONS, TinyBDGraphParserArtifact
 
 
-def test_tinybdmath_candidate_service_writes_relation_evidence(tmp_path: Path) -> None:
+def test_tinybdmath_candidate_service_requires_graph_parser_and_abstains_without_it(tmp_path: Path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula.db"))
     store.put_recognition_result(
         doc_hash="doc",
@@ -38,15 +38,7 @@ def test_tinybdmath_candidate_service_writes_relation_evidence(tmp_path: Path) -
         },
         accepted=False,
     )
-    model, _report = train_edge_baseline([
-        _edge_sample("e1", "subscript_zone", "SUB"),
-        _edge_sample("e2", "right_neighbor", "HORIZONTAL"),
-        _edge_sample("e3", "far_context", "NO_RELATION"),
-    ], epochs=2)
-    edge_model_path = tmp_path / "edge_model.json"
-    model.save(edge_model_path)
-
-    summary = TinyBDMathCandidateService(store, edge_model_path=edge_model_path).process_doc("doc", filepath="fake.pdf")
+    summary = TinyBDMathCandidateService(store).process_doc("doc", filepath="fake.pdf")
 
     assert summary["processed"] == 1
     result = store.get_recognition_result(
@@ -54,29 +46,25 @@ def test_tinybdmath_candidate_service_writes_relation_evidence(tmp_path: Path) -
         candidate_id="c1",
         stage="tinybdmath_structural",
         model="tinybdmath",
-        model_version="tinybdmath_feature_audit_no_model_v0",
+        model_version="tinybdmath_graph_parser_required_v1",
         preprocess_version=TINYBDMATH_PREPROCESS_VERSION,
         input_hash=store.list_recognition_results("doc", stage="tinybdmath_structural")[0].input_hash,
     )
     assert result is not None
     assert result.accepted is False
-    assert result.evidence["relation_scoring"]["model_version"] == model.version
+    assert result.evidence["graph_parser"]["warnings"] == ["tinybdmath_graph_parser_model_missing"]
+    assert result.evidence["relation_scoring"]["legacy_edge_model"]["enabled"] is False
     assert result.evidence["structural_candidate"]["candidate_only"] is True
-    assert result.evidence["structural_candidate"]["selected_relations"]
+    assert result.evidence["structural_candidate"]["abstain"] is True
     assert result.evidence["decoded_latex"]["candidate_only"] is True
 
 
 def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula.db"))
-    model, _report = train_edge_baseline([
-        _edge_sample("e1", "subscript_zone", "SUB"),
-        _edge_sample("e2", "right_neighbor", "HORIZONTAL"),
-        _edge_sample("e3", "far_context", "NO_RELATION"),
-    ], epochs=2)
-    edge_model_path = tmp_path / "edge_model.json"
-    model.save(edge_model_path)
+    graph_parser_path = tmp_path / "graph_parser.json"
+    _toy_graph_parser_artifact("NEXT").save(graph_parser_path)
 
-    summary = TinyBDMathCandidateService(store, edge_model_path=edge_model_path).process_inline_candidates(
+    summary = TinyBDMathCandidateService(store, graph_parser_model_path=graph_parser_path).process_inline_candidates(
         "doc",
         [
             {
@@ -101,7 +89,8 @@ def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Pa
     result = store.list_recognition_results("doc", candidate_id="p0_b1_inline_0", stage="tinybdmath_structural")[0]
     assert result.evidence["source"] == "tinybdmath_r2a_inline_structural_candidate"
     assert result.evidence["inline_pdf_evidence"]["has_script_size"] is True
-    assert result.evidence["relation_scoring"]["relation_scores"]
+    assert result.evidence["graph_parser"]["model_version"] == "toy_graph_parser"
+    assert result.evidence["relation_scoring"]["legacy_edge_model"]["enabled"] is False
     assert result.evidence["structural_candidate"]["candidate_only"] is True
     assert result.evidence["decoded_latex"]["candidate_only"] is True
 
@@ -143,22 +132,43 @@ def test_tinybdmath_candidate_service_carries_vector_rule_nodes(tmp_path: Path) 
         },
         accepted=False,
     )
-    model, _report = train_edge_baseline([
-        _edge_sample("e1", "above_rule_candidate", "ABOVE"),
-        _edge_sample("e2", "below_rule_candidate", "BELOW"),
-        _edge_sample("e3", "fraction_bar_candidate", "FRACTION_BAR"),
-        _edge_sample("e4", "far_context", "NO_RELATION"),
-    ], epochs=2)
-    edge_model_path = tmp_path / "edge_model.json"
-    model.save(edge_model_path)
+    graph_parser_path = tmp_path / "graph_parser.json"
+    _toy_graph_parser_artifact("NEXT").save(graph_parser_path)
 
-    summary = TinyBDMathCandidateService(store, edge_model_path=edge_model_path).process_doc("doc", filepath="fake.pdf")
+    summary = TinyBDMathCandidateService(store, graph_parser_model_path=graph_parser_path).process_doc("doc", filepath="fake.pdf")
 
     assert summary["processed"] == 1
     result = store.list_recognition_results("doc", candidate_id="frac1", stage="tinybdmath_structural")[0]
     assert result.evidence["vectors"]
     assert any(edge["hint"] == "fraction_bar_candidate" for edge in result.evidence["candidate_edges"])
+    assert result.evidence["graph_parser"]["model_version"] == "toy_graph_parser"
     assert result.evidence["decoded_latex"]["latex"]
+
+
+def _toy_graph_parser_artifact(preferred_relation: str) -> TinyBDGraphParserArtifact:
+    feature_count = len(GRAPH_PARSER_FEATURES)
+    weights = []
+    for relation in GRAPH_PARSER_RELATIONS:
+        row = [0.0 for _ in range(feature_count)]
+        if relation == preferred_relation:
+            row[GRAPH_PARSER_FEATURES.index("bias")] = 8.0
+            row[GRAPH_PARSER_FEATURES.index("dx")] = 1.0
+        weights.append(tuple(row))
+    return TinyBDGraphParserArtifact(
+        version="tinybdmath_graph_parser_m1_json_v1",
+        model_version="toy_graph_parser",
+        feature_version="tinybdmath_graph_parser_features_v1",
+        feature_names=GRAPH_PARSER_FEATURES,
+        relation_labels=GRAPH_PARSER_RELATIONS,
+        means=tuple(0.0 for _ in range(feature_count)),
+        scales=tuple(1.0 for _ in range(feature_count)),
+        hidden_weights=(),
+        hidden_biases=(),
+        output_weights=tuple(weights),
+        output_bias=tuple(0.0 for _ in GRAPH_PARSER_RELATIONS),
+        threshold=0.20,
+        train_config={"mode": "toy"},
+    )
 
 
 def _glyph(node_id: str, text: str, x0: float, y0: float, x1: float, y1: float, *, size: float) -> dict:
@@ -182,19 +192,3 @@ def _glyph(node_id: str, text: str, x0: float, y0: float, x1: float, y1: float, 
         },
     }
 
-
-def _edge_sample(edge_id: str, hint: str, label: str) -> dict:
-    return {
-        "row_id": "r",
-        "edge_id": edge_id,
-        "hint": hint,
-        "label": label,
-        "features": {
-            "dx_over_height": 0.4,
-            "dy_over_height": 0.5 if hint == "subscript_zone" else 0.0,
-            "x_overlap": 0.0,
-            "y_overlap": 0.5,
-            "size_ratio": 0.8,
-            "same_font": 1,
-        },
-    }
