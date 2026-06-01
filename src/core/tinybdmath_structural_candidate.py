@@ -53,7 +53,7 @@ class TinyBDStructuralCandidate:
     candidate_only: bool = True
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        return _json_compatible(asdict(self))
 
 
 def build_structural_candidate(
@@ -115,19 +115,15 @@ def build_structural_candidates(
         for row in candidates
         for relation in row.get("selected_relations", [])
     )
-    manifest = {
-        "schema_version": "tinybdmath_structural_candidate_manifest_v2_vector_rule_radical",
-        "decoder_version": STRUCTURAL_DECODER_VERSION,
-        "rows": len(candidates),
-        "selected_relations": sum(len(row.get("selected_relations", [])) for row in candidates),
-        "abstain_rows": sum(1 for row in candidates if row.get("abstain")),
-        "relation_counts": dict(sorted(relation_counts.items())),
-        "warning_counts": dict(sorted(warnings.items())),
-        "min_confidence": float(min_confidence),
-        "max_outgoing_per_source": int(max_outgoing_per_source),
-        "candidate_only": True,
-        "accepted_latex_emitted": False,
-    }
+    manifest = _structural_manifest(
+        rows=len(candidates),
+        selected_relations=sum(len(row.get("selected_relations", [])) for row in candidates),
+        abstain_rows=sum(1 for row in candidates if row.get("abstain")),
+        relation_counts=relation_counts,
+        warning_counts=warnings,
+        min_confidence=min_confidence,
+        max_outgoing_per_source=max_outgoing_per_source,
+    )
     return candidates, manifest
 
 
@@ -155,6 +151,145 @@ def write_structural_candidates(rows: list[dict[str, Any]], manifest: dict[str, 
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+class TinyBDStructuralCandidateStreamWriter:
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        min_confidence: float = 0.70,
+        max_outgoing_per_source: int = 4,
+        source: str = "scored_rows_stream",
+    ) -> None:
+        self.output_dir = output_dir
+        self.min_confidence = float(min_confidence)
+        self.max_outgoing_per_source = int(max_outgoing_per_source)
+        self.source = str(source)
+        self._warnings: Counter[str] = Counter()
+        self._relation_counts: Counter[str] = Counter()
+        self._row_count = 0
+        self._selected_count = 0
+        self._abstain_count = 0
+        self._closed = False
+        self._manifest: dict[str, Any] | None = None
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._handle = (self.output_dir / "tinybdmath_structural_candidates.jsonl").open("w", encoding="utf-8")
+
+    def write_scored_rows(self, scored_rows: list[dict[str, Any]]) -> None:
+        if self._closed:
+            raise RuntimeError("structural candidate stream writer is closed")
+        for value in scored_rows:
+            if not isinstance(value, dict):
+                continue
+            candidate = build_structural_candidate(
+                value,
+                min_confidence=self.min_confidence,
+                max_outgoing_per_source=self.max_outgoing_per_source,
+            ).to_json()
+            self._handle.write(json.dumps(candidate, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._row_count += 1
+            selected = candidate.get("selected_relations", [])
+            self._selected_count += len(selected)
+            self._abstain_count += 1 if candidate.get("abstain") else 0
+            self._warnings.update(candidate.get("verifier_warnings", []))
+            self._relation_counts.update(str(item.get("relation", "")) for item in selected if isinstance(item, dict))
+
+    def close(self) -> dict[str, Any]:
+        if self._manifest is not None:
+            return self._manifest
+        if not self._closed:
+            self._handle.close()
+            self._closed = True
+        self._manifest = _structural_manifest(
+            rows=self._row_count,
+            selected_relations=self._selected_count,
+            abstain_rows=self._abstain_count,
+            relation_counts=self._relation_counts,
+            warning_counts=self._warnings,
+            min_confidence=self.min_confidence,
+            max_outgoing_per_source=self.max_outgoing_per_source,
+            streaming=True,
+            source=self.source,
+        )
+        (self.output_dir / "tinybdmath_structural_candidate_manifest.json").write_text(
+            json.dumps(self._manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return self._manifest
+
+    def __enter__(self) -> "TinyBDStructuralCandidateStreamWriter":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        if _exc_type is not None:
+            if not self._closed:
+                self._handle.close()
+                self._closed = True
+            return
+        self.close()
+
+
+def build_structural_candidates_stream(
+    scores_path: Path,
+    output_dir: Path,
+    *,
+    limit: int = 0,
+    min_confidence: float = 0.70,
+    max_outgoing_per_source: int = 4,
+) -> dict[str, Any]:
+    row_count = 0
+    row_limit = int(limit or 0)
+    with TinyBDStructuralCandidateStreamWriter(
+        output_dir,
+        min_confidence=min_confidence,
+        max_outgoing_per_source=max_outgoing_per_source,
+        source="score_jsonl_stream",
+    ) as writer, scores_path.open("r", encoding="utf-8") as source:
+        for line in source:
+            text = line.strip()
+            if not text:
+                continue
+            value = json.loads(text)
+            if not isinstance(value, dict):
+                continue
+            writer.write_scored_rows([value])
+            row_count += 1
+            if row_limit > 0 and row_count >= row_limit:
+                break
+        return writer.close()
+
+
+def _structural_manifest(
+    *,
+    rows: int,
+    selected_relations: int,
+    abstain_rows: int,
+    relation_counts: Counter[str],
+    warning_counts: Counter[str],
+    min_confidence: float,
+    max_outgoing_per_source: int,
+    streaming: bool = False,
+    source: str = "",
+) -> dict[str, Any]:
+    manifest = {
+        "schema_version": "tinybdmath_structural_candidate_manifest_v2_vector_rule_radical",
+        "decoder_version": STRUCTURAL_DECODER_VERSION,
+        "rows": int(rows),
+        "selected_relations": int(selected_relations),
+        "abstain_rows": int(abstain_rows),
+        "relation_counts": dict(sorted(relation_counts.items())),
+        "warning_counts": dict(sorted(warning_counts.items())),
+        "min_confidence": float(min_confidence),
+        "max_outgoing_per_source": int(max_outgoing_per_source),
+        "candidate_only": True,
+        "accepted_latex_emitted": False,
+    }
+    if streaming:
+        manifest["streaming"] = True
+    if source:
+        manifest["source"] = source
+    return manifest
 
 
 def _select_relations(
@@ -453,3 +588,13 @@ def _float(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _json_compatible(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, list):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    return value

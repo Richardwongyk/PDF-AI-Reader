@@ -4,7 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-from src.core.tinybdmath_structural_eval import evaluate_structural_candidates, read_jsonl, write_eval_report
+from src.core.tinybdmath_structural_eval import (
+    evaluate_structural_candidates,
+    evaluate_structural_candidates_stream,
+    read_jsonl,
+    write_eval_report,
+)
 
 
 def main() -> int:
@@ -14,11 +19,20 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--hard-only", action="store_true", help="Exclude weak labels from the comparison.")
+    parser.add_argument("--stream", action="store_true", help="Join candidates and labels incrementally in file order.")
     args = parser.parse_args()
 
-    candidates = read_jsonl(args.candidates, limit=args.limit)
-    labels = read_jsonl(args.relation_labels, limit=args.limit)
-    report = evaluate_structural_candidates(candidates, labels, include_weak=not args.hard_only)
+    if args.stream:
+        report = evaluate_structural_candidates_stream(
+            args.candidates,
+            args.relation_labels,
+            limit=args.limit,
+            include_weak=not args.hard_only,
+        )
+    else:
+        candidates = read_jsonl(args.candidates, limit=args.limit)
+        labels = read_jsonl(args.relation_labels, limit=args.limit)
+        report = evaluate_structural_candidates(candidates, labels, include_weak=not args.hard_only)
     write_eval_report(report, args.output)
     summary = {
         "schema_version": report["schema_version"],

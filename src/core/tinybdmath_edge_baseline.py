@@ -258,23 +258,68 @@ def add_graph_context_features(edges: list[dict[str, Any]]) -> list[dict[str, An
     for edge in prepared:
         source_edges[str(edge.get("source", ""))].append(edge)
         target_edges[str(edge.get("target", ""))].append(edge)
+    edge_distance_by_id = {id(edge): _edge_distance(edge) for edge in prepared}
+    family_cache = {id(edge): _hint_family(str(edge.get("hint", ""))) for edge in prepared}
+    source_same_by_edge: dict[int, list[dict[str, Any]]] = {}
+    target_same_by_edge: dict[int, list[dict[str, Any]]] = {}
+    rank_cache: dict[tuple[str, int], float] = {}
+    margin_cache: dict[tuple[str, int], float] = {}
+
+    def same_relation_edges(group: list[dict[str, Any]], family: str) -> list[dict[str, Any]]:
+        return [item for item in group if family_cache.get(id(item), "") == family]
+
+    def rank_fraction_cached(group_key: str, edges_for_relation: list[dict[str, Any]], edge: dict[str, Any]) -> float:
+        key = (group_key, id(edge))
+        cached = rank_cache.get(key)
+        if cached is not None:
+            return cached
+        if not edges_for_relation:
+            rank_cache[key] = 0.0
+            return 0.0
+        ordered = sorted(
+            edges_for_relation,
+            key=lambda item: (edge_distance_by_id.get(id(item), 0.0), str(item.get("edge_id", ""))),
+        )
+        edge_id = str(edge.get("edge_id", ""))
+        result = 1.0
+        for index, item in enumerate(ordered):
+            if str(item.get("edge_id", "")) == edge_id:
+                result = index / max(1, len(ordered) - 1)
+                break
+        rank_cache[key] = result
+        return result
+
+    def best_margin_cached(group_key: str, edges_for_relation: list[dict[str, Any]], edge: dict[str, Any]) -> float:
+        key = (group_key, id(edge))
+        cached = margin_cache.get(key)
+        if cached is not None:
+            return cached
+        if not edges_for_relation:
+            margin_cache[key] = 0.0
+            return 0.0
+        best = min(edge_distance_by_id.get(id(item), 0.0) for item in edges_for_relation)
+        current = edge_distance_by_id.get(id(edge), 0.0)
+        result = max(0.0, min(4.0, current - best))
+        margin_cache[key] = result
+        return result
+
     for edge in prepared:
         source = str(edge.get("source", ""))
         target = str(edge.get("target", ""))
-        hint = str(edge.get("hint", ""))
+        family = family_cache.get(id(edge), "")
         source_group = source_edges.get(source, [])
         target_group = target_edges.get(target, [])
-        source_same = _same_relation_edges(source_group, hint)
-        target_same = _same_relation_edges(target_group, hint)
+        source_same = source_same_by_edge.setdefault(id(edge), same_relation_edges(source_group, family))
+        target_same = target_same_by_edge.setdefault(id(edge), same_relation_edges(target_group, family))
         context = {
             "source_candidate_count": _log_count(len(source_group)),
             "target_candidate_count": _log_count(len(target_group)),
             "source_same_relation_count": _log_count(len(source_same)),
             "target_same_relation_count": _log_count(len(target_same)),
-            "source_relation_rank": _rank_fraction(source_same, edge),
-            "target_relation_rank": _rank_fraction(target_same, edge),
-            "source_best_relation_margin": _best_margin(source_same, edge),
-            "target_best_relation_margin": _best_margin(target_same, edge),
+            "source_relation_rank": rank_fraction_cached(f"source:{source}:{family}", source_same, edge),
+            "target_relation_rank": rank_fraction_cached(f"target:{target}:{family}", target_same, edge),
+            "source_best_relation_margin": best_margin_cached(f"source:{source}:{family}", source_same, edge),
+            "target_best_relation_margin": best_margin_cached(f"target:{target}:{family}", target_same, edge),
             "source_has_fraction_bar": 1.0 if any(str(item.get("hint", "")) == "fraction_bar_candidate" for item in source_group) else 0.0,
             "source_has_above_candidate": 1.0 if any(str(item.get("hint", "")) in {"above_zone", "above_rule_candidate"} for item in source_group) else 0.0,
             "source_has_below_candidate": 1.0 if any(str(item.get("hint", "")) in {"below_zone", "below_rule_candidate"} for item in source_group) else 0.0,

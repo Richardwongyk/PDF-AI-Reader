@@ -1,4 +1,7 @@
-from src.core.tinybdmath_structural_eval import evaluate_structural_candidates
+import json
+from pathlib import Path
+
+from src.core.tinybdmath_structural_eval import evaluate_structural_candidates, evaluate_structural_candidates_stream
 
 
 def test_structural_eval_reports_relation_metrics() -> None:
@@ -40,3 +43,35 @@ def test_structural_eval_can_exclude_weak_labels() -> None:
     )
 
     assert report["micro"]["fn"] == 0
+
+
+def test_structural_eval_stream_matches_batch(tmp_path: Path) -> None:
+    candidates = [
+        {
+            "row_id": "r1",
+            "selected_relations": [{"source": "g0", "target": "g1", "relation": "SUB"}],
+            "verifier_warnings": ["candidate_warning"],
+        },
+        {"row_id": "r2", "selected_relations": []},
+    ]
+    labels = [
+        {
+            "row_id": "r1",
+            "edge_labels": [{"source": "g0", "target": "g1", "label": "SUB", "quality": "medium"}],
+        },
+        {
+            "row_id": "r2",
+            "edge_labels": [{"source": "a", "target": "b", "label": "SUP", "quality": "weak"}],
+        },
+    ]
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    candidates_path.write_text("\n".join(json.dumps(row) for row in candidates) + "\n", encoding="utf-8")
+    labels_path.write_text("\n".join(json.dumps(row) for row in labels) + "\n", encoding="utf-8")
+
+    batch = evaluate_structural_candidates(candidates, labels)
+    stream = evaluate_structural_candidates_stream(candidates_path, labels_path)
+    stream_without_flag = dict(stream)
+    stream_without_flag.pop("streaming", None)
+
+    assert stream_without_flag == batch

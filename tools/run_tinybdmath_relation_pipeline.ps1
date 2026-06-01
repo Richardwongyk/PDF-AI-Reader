@@ -10,7 +10,16 @@ param(
     [ValidateSet("candidate_relation_f1", "accepted_precision")]
     [string]$TorchCalibrationObjective = "candidate_relation_f1",
     [double]$TorchCandidateThreshold = 0.70,
-    [string]$TorchPython = "C:\Users\WYK\.conda\envs\science\python.exe"
+    [string]$TorchPython = "C:\Users\WYK\.conda\envs\science\python.exe",
+    [switch]$FastTorchScoring,
+    [switch]$CompactScores,
+    [int]$ScoreBatchRows = 2048,
+    [string]$ScoreTorchDevice = "cpu",
+    [switch]$StreamStructuralDecode,
+    [switch]$DirectStructuralDecode,
+    [switch]$NoScoreJsonl,
+    [switch]$StreamStructuralEval,
+    [switch]$StreamDecodedLatexEval
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,10 +59,71 @@ if ($UseTorchEdge) {
 } else {
     & $Python tools\tinybdmath_train_edge_baseline.py --graph-rows $GraphRows --relation-labels (Join-Path $labels "tinybdmath_relation_label_rows.jsonl") --output-dir $edgeModel --limit $Limit --epochs $Epochs
 }
-& $Python tools\tinybdmath_score_relations.py --rows $GraphRows --model (Join-Path $edgeModel "tinybdmath_edge_baseline_model.json") --output-dir $scores --limit $Limit --min-confidence 0.55 --stream
-& $Python tools\tinybdmath_decode_structural_candidates.py --scores (Join-Path $scores "tinybdmath_relation_scores.jsonl") --output-dir $structural --limit $Limit --min-confidence $MinConfidence
-& $Python tools\tinybdmath_eval_structural_candidates.py --candidates (Join-Path $structural "tinybdmath_structural_candidates.jsonl") --relation-labels (Join-Path $labels "tinybdmath_relation_label_rows.jsonl") --output $evalReport --limit $Limit
-& $Python tools\tinybdmath_eval_decoded_latex.py --graph-rows $GraphRows --candidates (Join-Path $structural "tinybdmath_structural_candidates.jsonl") --output $decodedEvalReport --limit $Limit
+$scoreArgs = @(
+    "tools\tinybdmath_score_relations.py",
+    "--rows", $GraphRows,
+    "--model", (Join-Path $edgeModel "tinybdmath_edge_baseline_model.json"),
+    "--output-dir", $scores,
+    "--limit", $Limit,
+    "--min-confidence", "0.55",
+    "--stream"
+)
+if ($FastTorchScoring) {
+    $scoreArgs += "--fast-torch"
+    $scoreArgs += "--batch-rows"
+    $scoreArgs += "$ScoreBatchRows"
+    $scoreArgs += "--torch-device"
+    $scoreArgs += $ScoreTorchDevice
+}
+if ($CompactScores) {
+    $scoreArgs += "--compact-output"
+}
+if ($DirectStructuralDecode) {
+    $scoreArgs += "--direct-structural-output-dir"
+    $scoreArgs += $structural
+    $scoreArgs += "--structural-min-confidence"
+    $scoreArgs += "$MinConfidence"
+}
+if ($NoScoreJsonl) {
+    $scoreArgs += "--no-score-jsonl"
+}
+& $Python @scoreArgs
+
+if (-not $DirectStructuralDecode) {
+    $decodeArgs = @(
+        "tools\tinybdmath_decode_structural_candidates.py",
+        "--scores", (Join-Path $scores "tinybdmath_relation_scores.jsonl"),
+        "--output-dir", $structural,
+        "--limit", $Limit,
+        "--min-confidence", $MinConfidence
+    )
+    if ($StreamStructuralDecode) {
+        $decodeArgs += "--stream"
+    }
+    & $Python @decodeArgs
+}
+$structuralEvalArgs = @(
+    "tools\tinybdmath_eval_structural_candidates.py",
+    "--candidates", (Join-Path $structural "tinybdmath_structural_candidates.jsonl"),
+    "--relation-labels", (Join-Path $labels "tinybdmath_relation_label_rows.jsonl"),
+    "--output", $evalReport,
+    "--limit", $Limit
+)
+if ($StreamStructuralEval) {
+    $structuralEvalArgs += "--stream"
+}
+& $Python @structuralEvalArgs
+$decodedEvalArgs = @(
+    "tools\tinybdmath_eval_decoded_latex.py",
+    "--graph-rows", $GraphRows,
+    "--candidates", (Join-Path $structural "tinybdmath_structural_candidates.jsonl"),
+    "--output", $decodedEvalReport,
+    "--limit", $Limit
+)
+if ($StreamDecodedLatexEval) {
+    $decodedEvalArgs += "--stream"
+}
+& $Python @decodedEvalArgs
 
 function Read-JsonObject([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
@@ -80,6 +150,23 @@ $payload = [PSCustomObject]@{
     edge_calibration = $(if ($CalibrateTorchEdge) { "logit_scale" } else { "" })
     edge_calibration_objective = $(if ($CalibrateTorchEdge) { $TorchCalibrationObjective } else { "" })
     edge_candidate_threshold = $TorchCandidateThreshold
+    scoring = [PSCustomObject]@{
+        fast_torch = [bool]$FastTorchScoring
+        compact_scores = [bool]$CompactScores
+        batch_rows = $ScoreBatchRows
+        torch_device = $ScoreTorchDevice
+    }
+    structural_decode = [PSCustomObject]@{
+        streaming = [bool]$StreamStructuralDecode
+        direct_from_fast_scoring = [bool]$DirectStructuralDecode
+        score_jsonl_written = -not [bool]$NoScoreJsonl
+    }
+    decoded_latex_eval_config = [PSCustomObject]@{
+        streaming = [bool]$StreamDecodedLatexEval
+    }
+    structural_eval_config = [PSCustomObject]@{
+        streaming = [bool]$StreamStructuralEval
+    }
     mathml = Read-JsonObject (Join-Path $mathml "latex_mathml_manifest.json")
     relation_labels = Read-JsonObject (Join-Path $labels "tinybdmath_relation_label_manifest.json")
     edge_model = Read-FirstJsonObject @(

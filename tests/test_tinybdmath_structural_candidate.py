@@ -1,8 +1,12 @@
+import json
+from pathlib import Path
+
 from src.core.tinybdmath_structural_candidate import (
     SLT_SKELETON_VERSION,
     STRUCTURAL_CANDIDATE_SCHEMA_VERSION,
     build_structural_candidate,
     build_structural_candidates,
+    build_structural_candidates_stream,
 )
 
 
@@ -79,6 +83,31 @@ def test_structural_candidate_manifest_is_candidate_only() -> None:
     assert manifest["candidate_only"] is True
     assert manifest["accepted_latex_emitted"] is False
     assert manifest["rows"] == 1
+
+
+def test_streaming_structural_candidates_match_batch(tmp_path: Path) -> None:
+    scored_rows = [
+        {"row_id": "r", "relation_scores": [_score("e", "g0", "g1", "right_neighbor", "HORIZONTAL", 0.9)]},
+        {"row_id": "empty", "relation_scores": []},
+    ]
+    scores_path = tmp_path / "scores.jsonl"
+    scores_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in scored_rows) + "\n",
+        encoding="utf-8",
+    )
+
+    batch_rows, batch_manifest = build_structural_candidates(scored_rows)
+    stream_manifest = build_structural_candidates_stream(scores_path, tmp_path / "stream")
+    stream_rows = [
+        json.loads(line)
+        for line in (tmp_path / "stream" / "tinybdmath_structural_candidates.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    stream_without_flag = dict(stream_manifest)
+    stream_without_flag.pop("streaming", None)
+    stream_without_flag.pop("source", None)
+    assert stream_without_flag == batch_manifest
+    assert stream_rows == batch_rows
 
 
 def test_structural_candidate_detects_multiple_parent_conflict() -> None:

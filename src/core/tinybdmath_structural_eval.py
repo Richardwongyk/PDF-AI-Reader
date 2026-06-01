@@ -66,6 +66,81 @@ def evaluate_structural_candidates(
     }
 
 
+class TinyBDStructuralEvalAccumulator:
+    def __init__(self, *, include_weak: bool = True) -> None:
+        self.include_weak = bool(include_weak)
+        self.totals = {
+            label: {"tp": 0, "fp": 0, "fn": 0}
+            for label in EVAL_LABELS
+        }
+        self.row_reports: list[dict[str, Any]] = []
+        self.warnings: Counter[str] = Counter()
+        self.labeled_rows = 0
+
+    def add_pair(self, candidate: dict[str, Any], label_row: dict[str, Any]) -> None:
+        row_id = str(candidate.get("row_id", ""))
+        predicted = _selected_relation_set(candidate)
+        expected = _label_relation_set(label_row, include_weak=self.include_weak)
+        self.row_reports.append(_row_report(row_id, predicted, expected, candidate))
+        self.warnings.update(candidate.get("verifier_warnings", []))
+        if label_row:
+            self.labeled_rows += 1
+        for label in EVAL_LABELS:
+            pred_edges = {edge for edge in predicted if edge[2] == label}
+            gold_edges = {edge for edge in expected if edge[2] == label}
+            self.totals[label]["tp"] += len(pred_edges & gold_edges)
+            self.totals[label]["fp"] += len(pred_edges - gold_edges)
+            self.totals[label]["fn"] += len(gold_edges - pred_edges)
+
+    def to_report(self, *, streaming: bool = False) -> dict[str, Any]:
+        metrics = {label: _metrics(values) for label, values in self.totals.items()}
+        micro_counts = Counter()
+        for values in self.totals.values():
+            micro_counts.update(values)
+        return {
+            "schema_version": EVAL_SCHEMA_VERSION,
+            "candidate_only": True,
+            "rows": len(self.row_reports),
+            "labeled_rows": self.labeled_rows,
+            "include_weak": self.include_weak,
+            "streaming": bool(streaming),
+            "micro": _metrics(micro_counts),
+            "per_relation": metrics,
+            "warning_counts": dict(sorted(self.warnings.items())),
+            "row_reports": self.row_reports,
+            "notes": [
+                "Metrics compare selected relation candidates with relation labels.",
+                "Weak labels are development supervision only; this report is not product accuracy.",
+                "Accepted formula quality still requires SLT/MathML hard labels, decoder, and verifier gates.",
+            ],
+        }
+
+
+def evaluate_structural_candidates_stream(
+    candidates_path: Path,
+    relation_labels_path: Path,
+    *,
+    limit: int = 0,
+    include_weak: bool = True,
+) -> dict[str, Any]:
+    accumulator = TinyBDStructuralEvalAccumulator(include_weak=include_weak)
+    row_limit = int(limit or 0)
+    with candidates_path.open("r", encoding="utf-8") as candidate_handle, relation_labels_path.open("r", encoding="utf-8") as label_handle:
+        while row_limit <= 0 or len(accumulator.row_reports) < row_limit:
+            candidate = _read_next_json_object(candidate_handle)
+            label_row = _read_next_json_object(label_handle)
+            if candidate is None or label_row is None:
+                break
+            if str(candidate.get("row_id", "")) != str(label_row.get("row_id", "")):
+                candidate = dict(candidate)
+                warnings = list(candidate.get("verifier_warnings", []) or [])
+                warnings.append("stream_row_id_mismatch")
+                candidate["verifier_warnings"] = warnings
+                label_row = {}
+            accumulator.add_pair(candidate, label_row)
+    return accumulator.to_report(streaming=True)
+
+
 def read_jsonl(path: Path, *, limit: int = 0) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -79,6 +154,17 @@ def read_jsonl(path: Path, *, limit: int = 0) -> list[dict[str, Any]]:
             if limit > 0 and len(rows) >= limit:
                 break
     return rows
+
+
+def _read_next_json_object(handle: Any) -> dict[str, Any] | None:
+    for line in handle:
+        text = line.strip()
+        if not text:
+            continue
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    return None
 
 
 def write_eval_report(report: dict[str, Any], output: Path) -> None:
