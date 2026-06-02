@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
@@ -46,6 +46,10 @@ class TinyBDNodeAlignment:
     label: str
     reason: str
     target_key: str = ""
+    target_node_type: str = ""
+    target_value: str = ""
+    target_latex: str = ""
+    target_attrs: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -71,6 +75,7 @@ class TinyBDAlignmentResult:
     alignment_version: str
     node_alignments: tuple[TinyBDNodeAlignment, ...]
     relation_labels: tuple[TinyBDRelationLabel, ...]
+    structure_labels: tuple[dict[str, Any], ...]
     ignored_pdf_nodes: tuple[dict[str, Any], ...]
     unmatched_target_nodes: tuple[dict[str, Any], ...]
     warnings: tuple[str, ...]
@@ -84,6 +89,7 @@ class TinyBDAlignmentResult:
             "alignment_version": self.alignment_version,
             "node_alignments": [item.to_json() for item in self.node_alignments],
             "relation_labels": [item.to_json() for item in self.relation_labels],
+            "structure_labels": list(self.structure_labels),
             "ignored_pdf_nodes": list(self.ignored_pdf_nodes),
             "unmatched_target_nodes": list(self.unmatched_target_nodes),
             "warnings": list(self.warnings),
@@ -122,8 +128,17 @@ class TinyBDAlignmentBuilder:
             for leaf in target_leaves
             if leaf.key not in used_target_ids
         )
+        structure_labels = _structure_labels(tree, node_alignments)
         relation_labels = _relation_labels(tree, node_alignments)
-        stats = _stats(pdf_nodes, target_leaves, node_alignments, relation_labels, ignored_pdf_nodes, unmatched_target_nodes)
+        stats = _stats(
+            pdf_nodes,
+            target_leaves,
+            node_alignments,
+            relation_labels,
+            structure_labels,
+            ignored_pdf_nodes,
+            unmatched_target_nodes,
+        )
         if stats["hard_alignment_rate"] < 0.70:
             warnings.add("alignment_low_hard_coverage")
         if unmatched_target_nodes:
@@ -141,6 +156,7 @@ class TinyBDAlignmentBuilder:
             alignment_version=ALIGNMENT_BUILDER_VERSION,
             node_alignments=tuple(node_alignments),
             relation_labels=tuple(relation_labels),
+            structure_labels=tuple(structure_labels),
             ignored_pdf_nodes=ignored_pdf_nodes,
             unmatched_target_nodes=unmatched_target_nodes,
             warnings=tuple(sorted(warnings)),
@@ -156,6 +172,7 @@ class TinyBDAlignmentBuilder:
         output: list[dict[str, Any]] = []
         warnings: Counter[str] = Counter()
         relation_counts: Counter[str] = Counter()
+        structure_counts: Counter[str] = Counter()
         hard_rates: list[float] = []
         for graph_row in graph_rows:
             row_id = str(graph_row.get("row_id", "") or "")
@@ -168,15 +185,18 @@ class TinyBDAlignmentBuilder:
             output.append(payload)
             warnings.update(str(item) for item in result.warnings if item)
             relation_counts.update(str(item.get("relation", "")) for item in payload.get("relation_labels", []) if item)
+            structure_counts.update(str(item.get("role", "")) for item in payload.get("structure_labels", []) if item)
             hard_rates.append(float(payload.get("stats", {}).get("hard_alignment_rate", 0.0)))
         manifest = {
             "schema_version": "tinybdmath_alignment_manifest_v1",
             "alignment_version": ALIGNMENT_BUILDER_VERSION,
             "rows": len(output),
             "rows_with_hard_labels": sum(1 for item in output if item.get("relation_labels")),
+            "rows_with_structure_labels": sum(1 for item in output if item.get("structure_labels")),
             "avg_hard_alignment_rate": round(sum(hard_rates) / len(hard_rates), 6) if hard_rates else 0.0,
             "warnings": dict(sorted(warnings.items())),
             "relation_counts": dict(sorted(relation_counts.items())),
+            "structure_counts": dict(sorted(structure_counts.items())),
             "notes": [
                 "Alignment labels are training/audit supervision.",
                 "Low-confidence or unmatched nodes are ignore labels, not decoder repairs.",
@@ -302,6 +322,10 @@ def _align_leaf_units(
                 label=label,
                 reason="symbol_text_order_match" if label == "hard" else "weak_symbol_text_order_match",
                 target_key=leaf.key,
+                target_node_type=leaf.node.node_type,
+                target_value=leaf.node.value,
+                target_latex=leaf.node.latex,
+                target_attrs=dict(leaf.node.attrs or {}),
             )
         )
         used_pdf_ids.add(str(pdf_node["node_id"]))
@@ -342,6 +366,78 @@ def _relation_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment])
         )
     labels.extend(_sequence_next_labels(tree, leaves_by_subtree))
     return _dedupe_relation_labels(labels)
+
+
+def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]) -> list[dict[str, Any]]:
+    pdf_by_target: defaultdict[str, list[TinyBDNodeAlignment]] = defaultdict(list)
+    for item in node_alignments:
+        if item.label in {"hard", "soft"}:
+            pdf_by_target[item.target_node_id].append(item)
+    leaves_by_subtree = _aligned_leaves_by_subtree(tree, pdf_by_target)
+    labels: list[dict[str, Any]] = []
+    for node in tree.nodes:
+        if node.node_type == "fraction":
+            numerator = _structure_child_leaves(tree, node.node_id, "numerator", leaves_by_subtree)
+            denominator = _structure_child_leaves(tree, node.node_id, "denominator", leaves_by_subtree)
+            if numerator and denominator:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_FRACTION_SEPARATOR_EVIDENCE",
+                        "above_pdf_node_ids": _pdf_ids(numerator),
+                        "below_pdf_node_ids": _pdf_ids(denominator),
+                        "confidence": _structure_confidence(numerator + denominator),
+                        "supervision": _structure_supervision(numerator + denominator),
+                    }
+                )
+        elif node.node_type == "radical":
+            body = _structure_child_leaves(tree, node.node_id, "radical_body", leaves_by_subtree)
+            radical_marks = [
+                item
+                for item in leaves_by_subtree.get(node.node_id, [])
+                if item.target_node_id == node.node_id
+            ]
+            if body:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_RADICAL_MARK_EVIDENCE",
+                        "body_pdf_node_ids": _pdf_ids(body),
+                        "mark_pdf_node_ids": _pdf_ids(radical_marks),
+                        "confidence": _structure_confidence(body + radical_marks),
+                        "supervision": _structure_supervision(body + radical_marks),
+                    }
+                )
+    return labels
+
+
+def _structure_child_leaves(
+    tree: CSLTTree,
+    source: str,
+    relation: str,
+    leaves_by_subtree: dict[str, list[TinyBDNodeAlignment]],
+) -> list[TinyBDNodeAlignment]:
+    output: list[TinyBDNodeAlignment] = []
+    for edge in tree.edges:
+        if edge.source == source and edge.relation == relation:
+            output.extend(leaves_by_subtree.get(edge.target, []))
+    return output
+
+
+def _pdf_ids(items: list[TinyBDNodeAlignment]) -> list[str]:
+    return sorted({item.pdf_node_id for item in items})
+
+
+def _structure_confidence(items: list[TinyBDNodeAlignment]) -> float:
+    if not items:
+        return 0.0
+    return round(min(item.confidence for item in items), 6)
+
+
+def _structure_supervision(items: list[TinyBDNodeAlignment]) -> str:
+    if not items:
+        return "missing"
+    return "hard" if all(item.label == "hard" for item in items) else "soft"
 
 
 def _source_anchor_leaf(
@@ -492,6 +588,7 @@ def _stats(
     target_leaves: list[_TargetLeafUnit],
     alignments: list[TinyBDNodeAlignment],
     relation_labels: list[TinyBDRelationLabel],
+    structure_labels: list[dict[str, Any]],
     ignored_pdf_nodes: tuple[dict[str, Any], ...],
     unmatched_target_nodes: tuple[dict[str, Any], ...],
 ) -> dict[str, Any]:
@@ -511,6 +608,7 @@ def _stats(
         "leaf_alignment_rate": round((hard + soft) / target_count, 6) if target_count else 0.0,
         "pdf_coverage_rate": round((hard + soft) / pdf_count, 6) if pdf_count else 0.0,
         "relation_labels": len(relation_labels),
+        "structure_labels": len(structure_labels),
         "relation_counts": dict(sorted(relation_counter.items())),
     }
 
@@ -534,6 +632,7 @@ def _empty_result(
         alignment_version=ALIGNMENT_BUILDER_VERSION,
         node_alignments=(),
         relation_labels=(),
+        structure_labels=(),
         ignored_pdf_nodes=(),
         unmatched_target_nodes=(),
         warnings=(warning,),
@@ -546,6 +645,7 @@ def _empty_result(
             "leaf_alignment_rate": 0.0,
             "pdf_coverage_rate": 0.0,
             "relation_labels": 0,
+            "structure_labels": 0,
         },
     )
 

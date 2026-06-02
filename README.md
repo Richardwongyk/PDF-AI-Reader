@@ -83,9 +83,12 @@ python src\main.py
 - `docs/next_session_handoff.md`
 - `docs/current_goal_and_next_steps.md`
 - `docs/tiny_born_digital_math_model_engineering.md`
+- `docs/tinybdmath_ai_math_latex_structure_scope.md`
 - `docs/workspace_inventory.md`
 
-详细的公式、知识库、测试和工程设计文档都在 `docs/` 目录中。
+当前公式主线先聚焦 born-digital AI/Math 论文的 LaTeX 数学排版结构恢复；
+图片/扫描公式和 TikZ/化学结构/复杂图示走候选或 unsupported 路由。详细的公式、
+知识库、测试和工程设计文档都在 `docs/` 目录中。
 
 ## 注意
 

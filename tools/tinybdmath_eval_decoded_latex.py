@@ -18,7 +18,7 @@ from tools.formula_latex_audit import _formula_similarity, _normalize_formula_fo
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate TinyBDMath decoded LaTeX candidates against graph-row labels.")
     parser.add_argument("--graph-rows", type=Path, required=True)
-    parser.add_argument("--candidates", type=Path, required=True, help="tinybdmath_structural_candidates.jsonl")
+    parser.add_argument("--candidates", type=Path, required=True, help="Graph Parser structural candidate JSONL")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(

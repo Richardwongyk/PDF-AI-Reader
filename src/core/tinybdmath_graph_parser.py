@@ -7,17 +7,17 @@ PyTorch runtime dependency.
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 
 GRAPH_PARSER_ARTIFACT_VERSION = "tinybdmath_graph_parser_m1_json_v1"
-GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v1"
+GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v2"
 
 GRAPH_PARSER_RELATIONS = (
     "NONE",
@@ -36,6 +36,9 @@ GRAPH_PARSER_RELATIONS = (
     "MATRIX_ROW",
     "MATRIX_CELL",
     "CELL_CONTENT",
+    "FRACTION_BAR",
+    "ABOVE",
+    "BELOW",
 )
 
 GRAPH_PARSER_FEATURES = (
@@ -59,6 +62,54 @@ GRAPH_PARSER_FEATURES = (
     "same_font",
     "source_index",
     "target_index",
+)
+
+GRAPH_PARSER_NODE_LABELS = (
+    "UNKNOWN",
+    "SYMBOL",
+    "TEXT",
+    "OPERATOR",
+    "SPACING",
+    "HORIZONTAL_RULE",
+    "VERTICAL_RULE",
+)
+GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD = 0.80
+GRAPH_PARSER_OPERATOR_KATEX_TYPES = (
+    "op",
+    "bin",
+    "rel",
+    "open",
+    "close",
+    "punct",
+)
+
+GRAPH_PARSER_NODE_FEATURES = (
+    "bias",
+    "width",
+    "height",
+    "area",
+    "aspect_ratio",
+    "relative_width",
+    "relative_height",
+    "x_span_ratio",
+    "y_span_ratio",
+    "center_x",
+    "center_y",
+    "text_length",
+    "text_is_blank",
+    "text_is_single_char",
+    "text_is_ascii",
+    "text_has_letter",
+    "text_has_number",
+    "text_has_symbol",
+    "text_has_punctuation",
+    "text_has_separator",
+    "text_has_mark",
+    "is_math",
+    "is_rule",
+    "font_size",
+    "font_size_ratio",
+    "order_index",
 )
 
 
@@ -88,6 +139,15 @@ class TinyBDGraphParserArtifact:
     output_bias: tuple[float, ...]
     threshold: float
     train_config: dict[str, Any]
+    node_feature_names: tuple[str, ...] = GRAPH_PARSER_NODE_FEATURES
+    node_label_names: tuple[str, ...] = GRAPH_PARSER_NODE_LABELS
+    node_means: tuple[float, ...] = ()
+    node_scales: tuple[float, ...] = ()
+    node_hidden_weights: tuple[tuple[tuple[float, ...], ...], ...] = field(default_factory=tuple)
+    node_hidden_biases: tuple[tuple[float, ...], ...] = field(default_factory=tuple)
+    node_output_weights: tuple[tuple[float, ...], ...] = ()
+    node_output_bias: tuple[float, ...] = ()
+    node_filter_threshold: float = GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,6 +174,24 @@ class TinyBDGraphParserArtifact:
             output_bias=tuple(float(value) for value in payload.get("output_bias", [])),
             threshold=float(payload.get("threshold", 0.50) or 0.50),
             train_config=dict(payload.get("train_config", {}) or {}),
+            node_feature_names=tuple(str(item) for item in payload.get("node_feature_names", GRAPH_PARSER_NODE_FEATURES)),
+            node_label_names=tuple(str(item) for item in payload.get("node_label_names", GRAPH_PARSER_NODE_LABELS)),
+            node_means=tuple(float(item) for item in payload.get("node_means", [])),
+            node_scales=tuple(float(item) for item in payload.get("node_scales", [])),
+            node_hidden_weights=tuple(
+                tuple(tuple(float(value) for value in row) for row in layer)
+                for layer in payload.get("node_hidden_weights", [])
+            ),
+            node_hidden_biases=tuple(
+                tuple(float(value) for value in layer)
+                for layer in payload.get("node_hidden_biases", [])
+            ),
+            node_output_weights=tuple(tuple(float(value) for value in row) for row in payload.get("node_output_weights", [])),
+            node_output_bias=tuple(float(value) for value in payload.get("node_output_bias", [])),
+            node_filter_threshold=float(
+                payload.get("node_filter_threshold", GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD)
+                or GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
+            ),
         )
 
     @classmethod
@@ -133,7 +211,8 @@ class TinyBDGraphParser:
         return cls(TinyBDGraphParserArtifact.load(path))
 
     def predict_row(self, graph_row: dict[str, Any], *, threshold: float | None = None) -> dict[str, Any]:
-        nodes = graph_nodes(graph_row)
+        all_nodes = graph_nodes(graph_row, include_blank=True)
+        nodes = [node for node in all_nodes if node.get("node_type") == "vector" or str(node.get("text", "") or "").strip()]
         pairs = candidate_pairs(nodes)
         predictions: list[TinyBDGraphParserPrediction] = []
         cutoff = self.artifact.threshold if threshold is None else float(threshold)
@@ -155,6 +234,7 @@ class TinyBDGraphParser:
                     confidence=round(confidence, 6),
                 )
             )
+        node_predictions = self._predict_node_labels(all_nodes)
         return {
             "schema_version": "tinybdmath_graph_parser_predictions_v1",
             "model_version": self.artifact.model_version,
@@ -162,37 +242,104 @@ class TinyBDGraphParser:
             "input_hash": _stable_hash({"graph_input_hash": graph_row.get("input_hash", ""), "model": self.artifact.model_version}),
             "node_count": len(nodes),
             "candidate_pairs": len(pairs),
+            "node_predictions": node_predictions,
+            "node_filter_threshold": float(self.artifact.node_filter_threshold),
             "predictions": [item.to_json() for item in sorted(predictions, key=lambda item: (item.source, item.target, item.relation))],
             "candidate_only": True,
         }
 
     def _predict_probabilities(self, features: dict[str, float]) -> list[float]:
-        values = [
-            (float(features.get(name, 0.0)) - mean) / (scale if abs(scale) > 1e-12 else 1.0)
-            for name, mean, scale in zip(self.artifact.feature_names, self.artifact.means, self.artifact.scales)
-        ]
-        activations = values
-        for weights, biases in zip(self.artifact.hidden_weights, self.artifact.hidden_biases):
-            next_values: list[float] = []
-            for row, bias in zip(weights, biases):
-                value = float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
-                next_values.append(max(0.0, value))
-            activations = next_values
-        logits = [
-            float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
-            for row, bias in zip(self.artifact.output_weights, self.artifact.output_bias)
-        ]
-        return _softmax(logits)
+        return _feed_forward_probabilities(
+            features,
+            feature_names=self.artifact.feature_names,
+            means=self.artifact.means,
+            scales=self.artifact.scales,
+            hidden_weights=self.artifact.hidden_weights,
+            hidden_biases=self.artifact.hidden_biases,
+            output_weights=self.artifact.output_weights,
+            output_bias=self.artifact.output_bias,
+        )
+
+    def _predict_node_probabilities(self, features: dict[str, float]) -> list[float]:
+        if not self.artifact.node_output_weights:
+            return []
+        return _feed_forward_probabilities(
+            features,
+            feature_names=self.artifact.node_feature_names,
+            means=self.artifact.node_means,
+            scales=self.artifact.node_scales,
+            hidden_weights=self.artifact.node_hidden_weights,
+            hidden_biases=self.artifact.node_hidden_biases,
+            output_weights=self.artifact.node_output_weights,
+            output_bias=self.artifact.node_output_bias,
+        )
+
+    def _predict_node_labels(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self.artifact.node_output_weights:
+            return []
+        output: list[dict[str, Any]] = []
+        for node in nodes:
+            probabilities = self._predict_node_probabilities(graph_parser_node_features(node, nodes))
+            if not probabilities:
+                continue
+            best_index = max(range(len(probabilities)), key=lambda index: probabilities[index])
+            label = self.artifact.node_label_names[best_index]
+            output.append(
+                {
+                    "node_id": str(node.get("node_id", "") or ""),
+                    "label": label,
+                    "confidence": round(float(probabilities[best_index]), 6),
+                }
+            )
+        return output
 
 
-def graph_nodes(row: dict[str, Any]) -> list[dict[str, Any]]:
+def _feed_forward_probabilities(
+    features: dict[str, float],
+    *,
+    feature_names: tuple[str, ...],
+    means: tuple[float, ...],
+    scales: tuple[float, ...],
+    hidden_weights: tuple[tuple[tuple[float, ...], ...], ...],
+    hidden_biases: tuple[tuple[float, ...], ...],
+    output_weights: tuple[tuple[float, ...], ...],
+    output_bias: tuple[float, ...],
+) -> list[float]:
+    if not output_weights:
+        return []
+    padded_means = means or tuple(0.0 for _ in feature_names)
+    padded_scales = scales or tuple(1.0 for _ in feature_names)
+    if len(padded_means) < len(feature_names):
+        padded_means = tuple(padded_means) + tuple(0.0 for _ in range(len(feature_names) - len(padded_means)))
+    if len(padded_scales) < len(feature_names):
+        padded_scales = tuple(padded_scales) + tuple(1.0 for _ in range(len(feature_names) - len(padded_scales)))
+    values = [
+        (float(features.get(name, 0.0)) - mean) / (scale if abs(scale) > 1e-12 else 1.0)
+        for name, mean, scale in zip(feature_names, padded_means, padded_scales)
+    ]
+    activations = values
+    for weights, biases in zip(hidden_weights, hidden_biases):
+        next_values: list[float] = []
+        for row, bias in zip(weights, biases):
+            value = float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
+            next_values.append(max(0.0, value))
+        activations = next_values
+    logits = [
+        float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
+        for row, bias in zip(output_weights, output_bias)
+    ]
+    return _softmax(logits)
+
+
+def graph_nodes(row: dict[str, Any], *, include_blank: bool = False) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
-    for index, item in enumerate(row.get("glyph_nodes", []) or []):
+    glyph_nodes = row.get("glyph_nodes", []) or []
+    for index, item in enumerate(glyph_nodes):
         if isinstance(item, dict):
             node = _normalize_node(item, index=index, node_type="glyph")
-            if str(node.get("text", "")).strip():
+            if include_blank or str(node.get("text", "")).strip():
                 nodes.append(node)
-    offset = len(nodes)
+    offset = len(glyph_nodes)
     for index, item in enumerate(row.get("vector_nodes", []) or []):
         if isinstance(item, dict):
             nodes.append(_normalize_node(item, index=offset + index, node_type="vector"))
@@ -203,6 +350,8 @@ def candidate_pairs(nodes: list[dict[str, Any]], *, max_neighbors: int = 16) -> 
     pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     ordered = sorted(nodes, key=lambda item: (item["bbox"][0], item["bbox"][1], item["node_id"]))
     for source_index, source in enumerate(ordered):
+        if source.get("node_type") == "vector":
+            pairs.append((source, source))
         local: list[tuple[float, dict[str, Any]]] = []
         for target_index, target in enumerate(ordered):
             if source["node_id"] == target["node_id"]:
@@ -253,6 +402,50 @@ def graph_parser_features(source: dict[str, Any], target: dict[str, Any], nodes:
     }
 
 
+def graph_parser_node_features(node: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    x0, y0, x1, y1 = node["bbox"]
+    width = max(0.0, float(x1) - float(x0))
+    height = max(0.0, float(y1) - float(y0))
+    area = width * height
+    span = _nodes_bbox(nodes)
+    span_width = max(1e-6, span[2] - span[0])
+    span_height = max(1e-6, span[3] - span[1])
+    text = str(node.get("text", "") or "")
+    flags = _unicode_category_flags(text)
+    font_size = float(node.get("size", 0.0) or 0.0)
+    sizes = [float(item.get("size", 0.0) or 0.0) for item in nodes if float(item.get("size", 0.0) or 0.0) > 0]
+    mean_size = sum(sizes) / len(sizes) if sizes else 0.0
+    order_index = float(node.get("order_index", 0))
+    return {
+        "bias": 1.0,
+        "width": width,
+        "height": height,
+        "area": area,
+        "aspect_ratio": min(1000.0, width / max(height, 1e-6)),
+        "relative_width": width / span_width,
+        "relative_height": height / span_height,
+        "x_span_ratio": _overlap(x0, x1, span[0], span[2]) / span_width,
+        "y_span_ratio": _overlap(y0, y1, span[1], span[3]) / span_height,
+        "center_x": float(node.get("center", [0.0, 0.0])[0]),
+        "center_y": float(node.get("center", [0.0, 0.0])[1]),
+        "text_length": float(len(text)),
+        "text_is_blank": 1.0 if not text.strip() else 0.0,
+        "text_is_single_char": 1.0 if len(text) == 1 else 0.0,
+        "text_is_ascii": 1.0 if text and all(ord(char) < 128 for char in text) else 0.0,
+        "text_has_letter": flags["letter"],
+        "text_has_number": flags["number"],
+        "text_has_symbol": flags["symbol"],
+        "text_has_punctuation": flags["punctuation"],
+        "text_has_separator": flags["separator"],
+        "text_has_mark": flags["mark"],
+        "is_math": 1.0 if node.get("is_math_font") else 0.0,
+        "is_rule": 1.0 if node.get("node_type") == "vector" else 0.0,
+        "font_size": font_size,
+        "font_size_ratio": font_size / max(mean_size, 1e-6) if font_size > 0 and mean_size > 0 else 0.0,
+        "order_index": order_index / max(1.0, len(nodes) - 1),
+    }
+
+
 def training_samples_from_rows(
     graph_rows: list[dict[str, Any]],
     alignment_rows: list[dict[str, Any]],
@@ -278,6 +471,16 @@ def training_samples_from_rows(
             if current is None or confidence > current[1]:
                 positive[(source, target)] = (relation, confidence)
         nodes = graph_nodes(row)
+        for label in _structure_relation_labels_from_structure(nodes, alignment):
+            relation = str(label.get("relation", "") or "")
+            if relation not in GRAPH_PARSER_RELATIONS or relation == "NONE":
+                continue
+            source = str(label.get("source", "") or "")
+            target = str(label.get("target", "") or "")
+            confidence = float(label.get("confidence", 0.0) or 0.0)
+            current = positive.get((source, target))
+            if current is None or confidence > current[1]:
+                positive[(source, target)] = (relation, confidence)
         for source, target in candidate_pairs(nodes):
             key = (str(source["node_id"]), str(target["node_id"]))
             relation, confidence = positive.get(key, ("NONE", 1.0))
@@ -294,6 +497,172 @@ def training_samples_from_rows(
     return samples
 
 
+def node_training_samples_from_rows(
+    graph_rows: list[dict[str, Any]],
+    alignment_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    alignment_by_row_id = {str(row.get("row_id", "") or ""): row for row in alignment_rows}
+    samples: list[dict[str, Any]] = []
+    for row in graph_rows:
+        row_id = str(row.get("row_id", "") or "")
+        alignment = alignment_by_row_id.get(row_id)
+        if alignment is None:
+            continue
+        aligned: dict[str, dict[str, Any]] = {}
+        for item in alignment.get("node_alignments", []) or []:
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("pdf_node_id", "") or "")
+            if not node_id:
+                continue
+            confidence = float(item.get("confidence", 0.0) or 0.0)
+            current = aligned.get(node_id)
+            if current is None or confidence > float(current.get("confidence", 0.0) or 0.0):
+                aligned[node_id] = item
+        ignored: dict[str, str] = {}
+        for item in alignment.get("ignored_pdf_nodes", []) or []:
+            if isinstance(item, dict):
+                node_id = str(item.get("pdf_node_id", "") or "")
+                if node_id:
+                    ignored[node_id] = str(item.get("reason", "") or "")
+        nodes = graph_nodes(row, include_blank=True)
+        for node in nodes:
+            node_id = str(node.get("node_id", "") or "")
+            label = "UNKNOWN"
+            confidence = 0.25
+            if node.get("node_type") == "vector":
+                label, confidence = _generic_rule_node_label(node)
+            elif node_id in aligned:
+                label = _node_label_from_alignment(aligned[node_id])
+                confidence = float(aligned[node_id].get("confidence", 0.0) or 0.0)
+            elif ignored.get(node_id) == "spacing_or_blank":
+                label = "SPACING"
+                confidence = 1.0
+            samples.append(
+                {
+                    "row_id": row_id,
+                    "node_id": node_id,
+                    "label": label,
+                    "confidence": confidence,
+                    "features": graph_parser_node_features(node, nodes),
+                }
+            )
+    return samples
+
+
+def _node_label_from_alignment(alignment: dict[str, Any]) -> str:
+    target_node_type = str(alignment.get("target_node_type", "") or "")
+    attrs = alignment.get("target_attrs", {})
+    if not isinstance(attrs, dict):
+        attrs = {}
+    katex_type = str(attrs.get("katex_type", "") or "")
+    family = str(attrs.get("family", "") or "")
+    if target_node_type == "text_run":
+        return "TEXT"
+    if target_node_type == "symbol" and (
+        katex_type in GRAPH_PARSER_OPERATOR_KATEX_TYPES or family in GRAPH_PARSER_OPERATOR_KATEX_TYPES
+    ):
+        return "OPERATOR"
+    return "SYMBOL"
+
+
+def _generic_rule_node_label(node: dict[str, Any]) -> tuple[str, float]:
+    x0, y0, x1, y1 = node.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    width = max(0.0, float(x1) - float(x0))
+    height = max(0.0, float(y1) - float(y0))
+    if width <= 0.0 and height <= 0.0:
+        return "UNKNOWN", 0.25
+    if width >= height:
+        return "HORIZONTAL_RULE", 1.0
+    return "VERTICAL_RULE", 1.0
+
+
+def _structure_relation_labels_from_structure(
+    nodes: list[dict[str, Any]],
+    alignment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    vectors = [node for node in nodes if node.get("node_type") == "vector"]
+    if not vectors:
+        return []
+    node_by_id = {str(node.get("node_id", "") or ""): node for node in nodes}
+    output: list[dict[str, Any]] = []
+    for item in alignment.get("structure_labels", []) or []:
+        if not isinstance(item, dict) or str(item.get("role", "") or "") != "TARGET_FRACTION_SEPARATOR_EVIDENCE":
+            continue
+        above_nodes = _nodes_for_ids(node_by_id, item.get("above_pdf_node_ids", []))
+        below_nodes = _nodes_for_ids(node_by_id, item.get("below_pdf_node_ids", []))
+        scored = [(_fraction_separator_evidence_score(vector, above_nodes, below_nodes), vector) for vector in vectors]
+        score, vector = max(scored, key=lambda pair: (pair[0], str(pair[1].get("node_id", "") or "")), default=(0.0, {}))
+        if score < 0.45:
+            continue
+        vector_id = str(vector.get("node_id", "") or "")
+        confidence = round(score * float(item.get("confidence", 1.0) or 1.0), 6)
+        output.append(_training_relation(vector_id, vector_id, "FRACTION_BAR", confidence))
+        for node in above_nodes:
+            output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), "ABOVE", confidence))
+        for node in below_nodes:
+            output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), "BELOW", confidence))
+    return output
+
+
+def _training_relation(source: str, target: str, relation: str, confidence: float) -> dict[str, Any]:
+    return {
+        "source": source,
+        "target": target,
+        "relation": relation,
+        "confidence": confidence,
+    }
+
+
+def _nodes_for_ids(node_by_id: dict[str, dict[str, Any]], node_ids: Any) -> list[dict[str, Any]]:
+    if not isinstance(node_ids, (list, tuple, set)):
+        return []
+    return [
+        node_by_id[node_id]
+        for node_id in (str(item) for item in node_ids)
+        if node_id in node_by_id
+    ]
+
+
+def _fraction_separator_evidence_score(
+    vector: dict[str, Any],
+    above_nodes: list[dict[str, Any]],
+    below_nodes: list[dict[str, Any]],
+) -> float:
+    if vector.get("node_type") != "vector" or not above_nodes or not below_nodes:
+        return 0.0
+    vx0, vy0, vx1, vy1 = vector["bbox"]
+    v_width = max(0.0, vx1 - vx0)
+    v_height = max(0.0, vy1 - vy0)
+    above_bbox = _nodes_bbox(above_nodes)
+    below_bbox = _nodes_bbox(below_nodes)
+    above_center_y = _bbox_center_y(above_bbox)
+    below_center_y = _bbox_center_y(below_bbox)
+    if above_center_y >= below_center_y:
+        return 0.0
+    combined_bbox = _merge_bbox(above_bbox, below_bbox)
+    vertical_gap = max(1e-6, below_center_y - above_center_y)
+    vector_center_y = (vy0 + vy1) / 2.0
+    between = 1.0 - min(1.0, abs(vector_center_y - ((above_center_y + below_center_y) / 2.0)) / vertical_gap)
+    if above_center_y <= vector_center_y <= below_center_y:
+        between = max(between, 0.85)
+    span = _overlap(vx0, vx1, combined_bbox[0], combined_bbox[2]) / max(1e-6, combined_bbox[2] - combined_bbox[0])
+    shape = _horizontal_rule_score(v_width, v_height)
+    return round(max(0.0, min(1.0, (0.35 * shape) + (0.35 * between) + (0.30 * span))), 6)
+
+
+def _unicode_category_flags(text: str) -> dict[str, float]:
+    categories = [unicodedata.category(char) for char in str(text or "")]
+    return {
+        "letter": 1.0 if any(category.startswith("L") for category in categories) else 0.0,
+        "number": 1.0 if any(category.startswith("N") for category in categories) else 0.0,
+        "symbol": 1.0 if any(category.startswith("S") for category in categories) else 0.0,
+        "punctuation": 1.0 if any(category.startswith("P") for category in categories) else 0.0,
+        "separator": 1.0 if any(category.startswith("Z") for category in categories) else 0.0,
+        "mark": 1.0 if any(category.startswith("M") for category in categories) else 0.0,
+    }
+
+
 def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]) -> dict[str, Any]:
     relation_map = {
         "NEXT": "HORIZONTAL",
@@ -302,6 +671,9 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
         "RADICAL_BODY": "RADICAL_BODY",
         "NUMERATOR": "ABOVE",
         "DENOMINATOR": "BELOW",
+        "FRACTION_BAR": "FRACTION_BAR",
+        "ABOVE": "ABOVE",
+        "BELOW": "BELOW",
     }
     selected = []
     for index, item in enumerate(predictions.get("predictions", []) or []):
@@ -321,11 +693,20 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
                 "reason": "graph_parser_m1_prediction",
             }
         )
+    selected = _dedupe_selected_relations(selected)
+    warnings: list[str] = []
+    if not selected:
+        warnings.append("graph_parser_no_selected_relations")
     return {
         "candidate_only": True,
         "abstain": not bool(selected),
         "selected_relations": selected,
-        "verifier_warnings": [] if selected else ["graph_parser_no_selected_relations"],
+        "node_predictions": list(predictions.get("node_predictions", []) or []),
+        "node_filter_threshold": float(
+            predictions.get("node_filter_threshold", GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD)
+            or GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
+        ),
+        "verifier_warnings": sorted(set(warnings)),
         "model_version": str(predictions.get("model_version", "") or ""),
     }
 
@@ -341,6 +722,7 @@ def _normalize_node(item: dict[str, Any], *, index: int, node_type: str) -> dict
         "text": str(item.get("unicode", "") or item.get("text", "") or ""),
         "latex": str(item.get("latex", "") or item.get("text", "") or ""),
         "font": str(item.get("font", "") or item.get("normalized_font", "") or ""),
+        "size": float(item.get("size", 0.0) or 0.0),
         "bbox": bbox_values,
         "center": [
             (bbox_values[0] + bbox_values[2]) / 2.0,
@@ -349,6 +731,67 @@ def _normalize_node(item: dict[str, Any], *, index: int, node_type: str) -> dict
         "is_math_font": bool(item.get("is_math_font", False)),
         "order_index": index,
     }
+
+
+def _dedupe_selected_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    best: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in relations:
+        key = (
+            str(item.get("source", "") or ""),
+            str(item.get("target", "") or ""),
+            str(item.get("relation", "") or ""),
+        )
+        current = best.get(key)
+        if current is None or float(item.get("confidence", 0.0) or 0.0) > float(current.get("confidence", 0.0) or 0.0):
+            best[key] = item
+    output = []
+    for index, item in enumerate(sorted(best.values(), key=lambda value: (value["source"], value["target"], value["relation"]))):
+        payload = dict(item)
+        payload["edge_id"] = str(payload.get("edge_id", "") or f"gp{index:05d}")
+        output.append(payload)
+    return output
+
+
+def _nodes_bbox(nodes: list[dict[str, Any]]) -> list[float]:
+    boxes = [
+        node.get("bbox", [0.0, 0.0, 0.0, 0.0])
+        for node in nodes
+        if isinstance(node.get("bbox", None), (list, tuple)) and len(node.get("bbox", [])) == 4
+    ]
+    if not boxes:
+        return [0.0, 0.0, 1.0, 1.0]
+    return [
+        min(float(box[0]) for box in boxes),
+        min(float(box[1]) for box in boxes),
+        max(float(box[2]) for box in boxes),
+        max(float(box[3]) for box in boxes),
+    ]
+
+
+def _merge_bbox(first: list[float], second: list[float]) -> list[float]:
+    return [
+        min(float(first[0]), float(second[0])),
+        min(float(first[1]), float(second[1])),
+        max(float(first[2]), float(second[2])),
+        max(float(first[3]), float(second[3])),
+    ]
+
+
+def _bbox_center_y(bbox: list[float]) -> float:
+    return (float(bbox[1]) + float(bbox[3])) / 2.0
+
+
+def _horizontal_rule_score(width: float, height: float) -> float:
+    if width <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - (height / max(width, 1e-6))))
+
+
+def _node_sort_key(node: dict[str, Any]) -> tuple[float, float, str]:
+    bbox = node.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        bbox = [0.0, 0.0, 0.0, 0.0]
+    return (float(bbox[0]), float(bbox[1]), str(node.get("node_id", "") or ""))
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:

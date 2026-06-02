@@ -186,15 +186,19 @@ class _KaTeXToCSLT:
         if node_type in {"mathord", "textord", "atom", "op", "bin", "rel", "open", "close", "punct"}:
             text = _symbol_text(node)
             aliases = self._consume_mathml_aliases(text)
+            attrs = {
+                "katex_type": node_type,
+                "mode": str(node.get("mode", "") or ""),
+                "identity_aliases": aliases,
+            }
+            family = str(node.get("family", "") or "")
+            if family:
+                attrs["family"] = family
             return self.builder.add_node(
                 "symbol",
                 value=text,
                 latex=_symbol_latex(text),
-                attrs={
-                    "katex_type": node_type,
-                    "mode": str(node.get("mode", "") or ""),
-                    "identity_aliases": aliases,
-                },
+                attrs=attrs,
             )
         if node_type == "supsub":
             return self._script(node)

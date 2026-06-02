@@ -1,8 +1,8 @@
 # Formula OCR Performance Design
 
-> 公式“判断/抽取”的完整调研与迁移路线见
-> [formula_extraction_research.md](formula_extraction_research.md)。本文件只保留 OCR
-> 性能策略；后续不要再把普通 born-digital PDF 的公式判断继续堆到单个启发式函数里。
+本文件只保留 OCR/MFR 性能策略。普通 born-digital PDF 的公式判断走 PDF 结构事实、
+CSLT alignment 和 Graph Parser；图片、扫描、无文本层或低证据区域才进入 OCR/MFR
+候选轮。
 
 2026-05-28 状态补充：外部 OCR/MFR 工具仍只作为 r1/r2 候选后端；accepted/rejected
 审核、manual revision、evidence 预览、PDF bbox 定位和 r5 写回已经接线，但这些不改变

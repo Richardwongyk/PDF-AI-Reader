@@ -157,7 +157,7 @@ PDF / OCR / MFR
 - `KnowledgeEngine` 可通过 `rag.backend=sqlite_fts` 切换。
 - `build_services()` 在无真实 embedding、仅哈希兜底时自动使用 `sqlite_fts`，真实 embedding 可用时仍按配置走 Chroma/其他向量后端。
 - `sqlite_fts` 路径不再初始化 `ChromaRepo`，避免 FTS fallback 仍承担 Chroma 启动和 SQLite client 开销。
-- `tools/knowledge_backend_benchmark.py` 可对 Attention/Napkin 做后端对比。
+- 统一通过 `tools/full_software_validation.py` 和知识库后端 pytest 做回归。
 
 ### Phase 3: Qdrant 混合检索
 

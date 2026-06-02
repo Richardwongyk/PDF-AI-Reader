@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from src.core.symbol_identity_repair import latex_for_unicode_text
+from src.core.tinybdmath_graph_parser import GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
 
 
 TINYBDMATH_LATEX_DECODER_VERSION = "tinybdmath_slt_latex_candidate_v2_relation_only_radical"
@@ -38,15 +39,24 @@ def decode_latex_candidate(
     vectors: list[dict[str, Any]] | None = None,
     fallback_text: str = "",
 ) -> TinyBDDecodedLatex:
-    glyph_by_id = {_node_id(glyph): glyph for glyph in glyphs if _node_id(glyph)}
-    vector_by_id = {_node_id(vector): vector for vector in vectors or [] if _node_id(vector)}
+    filtered_node_ids = _model_filtered_node_ids(structural_candidate)
+    glyph_by_id = {_node_id(glyph): glyph for glyph in glyphs if _node_id(glyph) and _node_id(glyph) not in filtered_node_ids}
+    vector_by_id = {
+        _node_id(vector): vector
+        for vector in vectors or []
+        if _node_id(vector) and _node_id(vector) not in filtered_node_ids
+    }
     node_by_id: dict[str, dict[str, Any]] = {**glyph_by_id, **vector_by_id}
     relations = [
         relation
         for relation in structural_candidate.get("selected_relations", [])
         if isinstance(relation, dict)
+        and str(relation.get("source", "") or "") not in filtered_node_ids
+        and str(relation.get("target", "") or "") not in filtered_node_ids
     ]
     warnings = set(str(item) for item in structural_candidate.get("verifier_warnings", []) if item)
+    if filtered_node_ids:
+        warnings.add("decoder_filtered_spacing_nodes")
     if not glyph_by_id:
         return _fallback(fallback_text, warnings | {"decoder_no_glyphs"})
     if not relations:
@@ -242,6 +252,29 @@ def _glyph_sort_key(glyph: dict[str, Any]) -> tuple[float, float, str]:
 
 def _node_id(glyph: dict[str, Any]) -> str:
     return str(glyph.get("node_id", "") or glyph.get("id", "") or "")
+
+
+def _model_filtered_node_ids(structural_candidate: dict[str, Any]) -> set[str]:
+    output: set[str] = set()
+    threshold = _float(
+        structural_candidate.get(
+            "node_filter_threshold",
+            GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD,
+        )
+    )
+    if threshold <= 0:
+        threshold = GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
+    for item in structural_candidate.get("node_predictions", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("label", "") or "") != "SPACING":
+            continue
+        if _float(item.get("confidence")) < threshold:
+            continue
+        node_id = str(item.get("node_id", "") or "")
+        if node_id:
+            output.add(node_id)
+    return output
 
 
 def _compact_part(text: str) -> str:

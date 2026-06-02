@@ -69,8 +69,6 @@ QUICK_TESTS = [
     "tests/test_tinybdmath_candidate_service.py",
     "tests/test_tinybdmath_cslt_schema.py",
     "tests/test_tinybdmath_graph_parser.py",
-    "tests/test_tinybdmath_relation_scorer.py",
-    "tests/test_tinybdmath_structural_candidate.py",
     "tests/test_tinybdmath_symbol_equivalence.py",
     "tests/test_tinybdmath_target_tree.py",
 ]
@@ -102,7 +100,6 @@ class ValidationOptions:
     include_local_tools: bool = False
     strict_logs: bool = False
     tinybdmath_graph_parser_model: Path | None = None
-    tinybdmath_edge_model: Path | None = None
     stress_multiplier: int = 1
 
 
@@ -840,7 +837,6 @@ def run_validation(options: ValidationOptions) -> int:
                 if options.tinybdmath_graph_parser_model is not None
                 else str(DEFAULT_TINYBDMATH_GRAPH_PARSER_MODEL)
             ),
-            "tinybdmath_edge_model": str(options.tinybdmath_edge_model) if options.tinybdmath_edge_model is not None else None,
         },
         "status": "passed" if not required_failures else "failed",
         "elapsed_sec": round(elapsed, 3),
@@ -875,7 +871,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
     parser.add_argument("--include-local-tools", action="store_true")
     parser.add_argument("--strict-logs", action="store_true")
     parser.add_argument("--tinybdmath-graph-parser-model", type=Path)
-    parser.add_argument("--tinybdmath-edge-model", type=Path)
     parser.add_argument(
         "--stress-multiplier",
         type=int,
@@ -896,7 +891,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
         include_local_tools=args.include_local_tools,
         strict_logs=args.strict_logs,
         tinybdmath_graph_parser_model=args.tinybdmath_graph_parser_model,
-        tinybdmath_edge_model=args.tinybdmath_edge_model,
         stress_multiplier=max(1, args.stress_multiplier),
     )
 

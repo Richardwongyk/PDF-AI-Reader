@@ -1,8 +1,8 @@
-"""Feature generation for TinyBDMath relation models.
+"""Feature generation for TinyBDMath PDF graph models.
 
 This module converts Enriched Glyph Graph nodes into pairwise relation
 candidates and numeric features.  It does not decode formulas or emit LaTeX;
-the output is training/inference input for later MLP/GNN relation scorers.
+the output is training/inference input for the Graph Parser path.
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ class TinyBDEdgeCandidate:
 
 @dataclass(frozen=True)
 class TinyBDFeatureGraph:
-    """Feature graph passed to future TinyBDMath scorers."""
+    """Feature graph passed to TinyBDMath graph parsing."""
 
     schema_version: str
     enriched_input_hash: str

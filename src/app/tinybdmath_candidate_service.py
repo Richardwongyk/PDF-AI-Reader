@@ -1,7 +1,7 @@
 """TinyBDMath r2a structural candidate service.
 
 This service consumes r0/r0.5 born-digital evidence already persisted in
-``formula_recognition_results`` and writes TinyBDMath quality candidates back to
+``formula_recognition_results`` and writes TinyBDMath structural candidates back to
 the same candidate table.  It is non-visual, candidate-only, and cacheable by
 input hash/model version.
 """
@@ -19,13 +19,11 @@ from src.core.models import BlockType, DocumentBlock
 from src.core.tinybdmath_features import TINYBDMATH_FEATURE_SCHEMA_VERSION, TinyBDFeatureExtractor
 from src.core.tinybdmath_graph_parser import TinyBDGraphParser, graph_parser_predictions_to_structural_candidate
 from src.core.tinybdmath_latex_decoder import decode_latex_candidate
-from src.core.tinybdmath_scorer import TinyBDCandidateQualityScorer
 
 
 TINYBDMATH_R2A_ROUND = "r2a_tinybdmath_structural"
 TINYBDMATH_STRUCTURAL_STAGE = "tinybdmath_structural"
-TINYBDMATH_PREPROCESS_VERSION = "tinybdmath_feature_row_from_r0_evidence_v2_vector_rule_radical"
-TINYBDMATH_NO_MODEL_VERSION = "tinybdmath_feature_audit_no_model_v0"
+TINYBDMATH_PREPROCESS_VERSION = "tinybdmath_feature_row_from_r0_evidence_v3_graph_parser"
 TINYBDMATH_GRAPH_PARSER_REQUIRED_VERSION = "tinybdmath_graph_parser_required_v1"
 
 
@@ -36,20 +34,11 @@ class TinyBDMathCandidateService:
         self,
         store: FormulaIndexStore,
         *,
-        model_path: Path | None = None,
         graph_parser_model_path: Path | None = None,
-        edge_model_path: Path | None = None,
     ) -> None:
         self._store = store
-        self._model_path = model_path
-        self._edge_model_path = edge_model_path
         self._graph_parser_model_path = graph_parser_model_path
         self._feature_extractor = TinyBDFeatureExtractor()
-        self._scorer = (
-            TinyBDCandidateQualityScorer.from_model_path(model_path)
-            if model_path is not None and model_path.exists()
-            else None
-        )
         self._graph_parser = (
             TinyBDGraphParser.load(graph_parser_model_path)
             if graph_parser_model_path is not None and graph_parser_model_path.exists()
@@ -97,8 +86,6 @@ class TinyBDMathCandidateService:
                 result = self._score_payload(record.candidate_id, payload)
                 decoded = result.get("decoded_latex", {})
                 warnings = list(result["warnings"])
-                if self._scorer is None:
-                    warnings.append("tinybdmath_model_missing_feature_audit_only")
                 if self._graph_parser is None:
                     warnings.append("tinybdmath_graph_parser_model_missing")
                 self._store.put_recognition_result(
@@ -121,7 +108,6 @@ class TinyBDMathCandidateService:
                         "source_input_hash": record.input_hash,
                         "feature_schema_version": TINYBDMATH_FEATURE_SCHEMA_VERSION,
                         **payload,
-                        "quality": result["quality"],
                         "graph_parser": result["graph_parser"],
                         "relation_scoring": result["relation_scoring"],
                         "structural_candidate": result["structural_candidate"],
@@ -208,8 +194,6 @@ class TinyBDMathCandidateService:
                 result = self._score_payload(candidate_id, payload)
                 decoded = result.get("decoded_latex", {})
                 warnings = list(result["warnings"])
-                if self._scorer is None:
-                    warnings.append("tinybdmath_model_missing_feature_audit_only")
                 if self._graph_parser is None:
                     warnings.append("tinybdmath_graph_parser_model_missing")
                 latex = str(item.get("latex", "") or "")
@@ -231,7 +215,6 @@ class TinyBDMathCandidateService:
                         "source_stage": "inline_spans",
                         "feature_schema_version": TINYBDMATH_FEATURE_SCHEMA_VERSION,
                         **payload,
-                        "quality": result["quality"],
                         "graph_parser": result["graph_parser"],
                         "relation_scoring": result["relation_scoring"],
                         "structural_candidate": result["structural_candidate"],
@@ -274,13 +257,7 @@ class TinyBDMathCandidateService:
     def model_version(self) -> str:
         if self._graph_parser is None:
             return TINYBDMATH_GRAPH_PARSER_REQUIRED_VERSION
-        if self._scorer is None:
-            return self._graph_parser.artifact.model_version
-        return self._scorer.model.model_version
-
-    @property
-    def relation_model_version(self) -> str:
-        return self.graph_parser_model_version
+        return self._graph_parser.artifact.model_version
 
     @property
     def graph_parser_model_version(self) -> str:
@@ -407,54 +384,11 @@ class TinyBDMathCandidateService:
         }
 
     def _score_payload(self, candidate_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        row = {
-            "candidate_id": candidate_id,
-            "glyph_count": payload["glyph_count"],
-            "edge_count": payload["edge_count"],
-            "edge_hint_counts": payload["edge_hint_counts"],
-            "feature_density": payload["feature_density"],
-            "structural_signal_count": payload["structural_signal_count"],
-            "unknown_glyph_rate": payload["unknown_glyph_rate"],
-            "repaired_count": payload["repaired_count"],
-            "pdf_text": payload["pdf_text"],
-        }
-        if self._scorer is None:
-            warnings = []
-            if payload["unknown_glyph_rate"] > 0:
-                warnings.append("unknown_glyphs_remaining")
-            if payload["edge_count"] <= 0:
-                warnings.append("empty_or_edge_less_feature_graph")
-            graph_parser = self._graph_parser_payload(candidate_id, payload)
-            structural_candidate = graph_parser_predictions_to_structural_candidate(graph_parser)
-            relation_scoring = self._relation_payload(graph_parser, structural_candidate)
-            decoded_latex = decode_latex_candidate(
-                list(payload.get("glyphs", [])),
-                structural_candidate,
-                vectors=list(payload.get("vectors", [])),
-                fallback_text=str(payload.get("pdf_text", "") or ""),
-            ).to_json()
-            return {
-                "score": None,
-                "warnings": warnings + list(structural_candidate.get("verifier_warnings", [])) + list(decoded_latex.get("warnings", [])),
-                "graph_parser": graph_parser,
-                "quality": {
-                    "candidate_id": candidate_id,
-                    "model_version": TINYBDMATH_NO_MODEL_VERSION,
-                    "predicted_label": "feature_audit_only",
-                    "confidence": 0.0,
-                    "probabilities": {},
-                    "gate": {"accepted_candidate": False, "reason": "no_model"},
-                    "feature_summary": {
-                        "glyph_count": payload["glyph_count"],
-                        "edge_count": payload["edge_count"],
-                        "unknown_glyph_rate": payload["unknown_glyph_rate"],
-                    },
-                },
-                "relation_scoring": relation_scoring,
-                "structural_candidate": structural_candidate,
-                "decoded_latex": decoded_latex,
-            }
-        score = self._scorer.score_row(row)
+        warnings = []
+        if payload["unknown_glyph_rate"] > 0:
+            warnings.append("unknown_glyphs_remaining")
+        if payload["edge_count"] <= 0:
+            warnings.append("empty_or_edge_less_feature_graph")
         graph_parser = self._graph_parser_payload(candidate_id, payload)
         structural_candidate = graph_parser_predictions_to_structural_candidate(graph_parser)
         relation_scoring = self._relation_payload(graph_parser, structural_candidate)
@@ -465,10 +399,9 @@ class TinyBDMathCandidateService:
             fallback_text=str(payload.get("pdf_text", "") or ""),
         ).to_json()
         return {
-            "score": score.confidence,
-            "warnings": list(score.warnings) + list(structural_candidate.get("verifier_warnings", [])) + list(decoded_latex.get("warnings", [])),
+            "score": None,
+            "warnings": warnings + list(structural_candidate.get("verifier_warnings", [])) + list(decoded_latex.get("warnings", [])),
             "graph_parser": graph_parser,
-            "quality": score.to_json(),
             "relation_scoring": relation_scoring,
             "structural_candidate": structural_candidate,
             "decoded_latex": decoded_latex,
@@ -482,10 +415,6 @@ class TinyBDMathCandidateService:
             "relation_scores": [],
             "graph_parser_predictions": predictions.get("predictions", []),
             "verifier_warnings": list(structural.get("verifier_warnings", [])),
-            "legacy_edge_model": {
-                "enabled": False,
-                "reason": "Graph Parser is the TinyBDMath r2a main path; legacy edge scorer is baseline-only.",
-            },
         }
 
     def _graph_parser_payload(self, candidate_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -543,7 +472,6 @@ class TinyBDMathCandidateService:
             "preprocess_version": TINYBDMATH_PREPROCESS_VERSION,
             "candidate_id": candidate_id,
             "feature_graph_hash": str(payload.get("feature_graph_hash", "") or ""),
-            "quality": result.get("quality", {}),
             "graph_parser": result.get("graph_parser", {}),
             "relation_scoring": result.get("relation_scoring", {}),
             "structural_candidate": result.get("structural_candidate", {}),

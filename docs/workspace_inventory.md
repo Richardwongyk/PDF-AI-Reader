@@ -1,6 +1,6 @@
 # Workspace Inventory
 
-Last updated: 2026-06-01.
+Last updated: 2026-06-02.
 
 This file records the practical workspace layout. It is about local cleanup and
 handoff, not product design.
@@ -28,26 +28,13 @@ handoff, not product design.
 
 ## Current Large Test Artifacts
 
-Kept after the 2026-06-01 cleanup:
+Kept after the 2026-06-02 cleanup:
 
 - `test_artifacts/tinybdmath_graph_unique_color_components_v3_20260601`
   contains full graph rows for Attention + Napkin instrumented formulas.
-- `test_artifacts/tinybdmath_relation_pipeline_full_v3_20260601_184126`
-  contains MathML rows, relation labels, and the edge model reused by eval.
 - `test_artifacts/instrumented_full_unique_color_components_v3_20260601`
   contains final instrumented JSONL training/evidence rows. Its temporary
   `work/` directory was removed.
-- `test_artifacts/tinybdmath_direct_full_eval_20260601`
-  contains the current direct structural/decode evaluation result.
-
-Removed in the 2026-06-01 cleanup:
-
-- old fast compact relation score outputs,
-- temporary direct/stream/fast probe output directories,
-- May formula audit, OCR benchmark, multiround, stress, crash-repro and log
-  files,
-- Chroma/FTS knowledge-base runtime caches,
-- Python bytecode/test caches where permissions allowed.
 
 `.pytest_cache` currently has unreadable permissions and near-zero size, so it
 was left in place instead of force-changing ACLs.
@@ -58,16 +45,9 @@ Use these for new work:
 
 - `tools/run_instrumented_dataset_background.ps1`
 - `tools/run_tinybdmath_instrumented_graph_dataset.ps1`
-- `tools/run_tinybdmath_relation_pipeline.ps1`
-- `tools/tinybdmath_score_relations.py`
-- `tools/tinybdmath_decode_structural_candidates.py`
-- `tools/tinybdmath_eval_structural_candidates.py`
+- `tools/tinybdmath_build_target_trees.py`
+- `tools/tinybdmath_align_targets.py`
+- `tools/tinybdmath_audit_alignment.py`
+- `tools/tinybdmath_train_graph_parser.py`
 - `tools/tinybdmath_eval_decoded_latex.py`
-
-Deleted legacy entrypoints:
-
-- `tools/tinybdmath_realdata_pipeline.py`
-- `tools/tinybdmath_score_candidates.py`
-- `tools/run_tinybdmath_realdata.ps1`
-- `tools/run_tinybdmath_torch_science.ps1`
-
+- `tools/formula_multiround_pipeline.py --run-tinybdmath --tinybdmath-graph-parser-model <model>`

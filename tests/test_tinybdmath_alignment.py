@@ -23,7 +23,21 @@ def test_alignment_ignores_unmatched_pdf_artifacts_and_tracks_radical_body() -> 
 
     assert result["stats"]["hard_node_alignments"] >= 2
     assert any(item["relation"] == "RADICAL_BODY" for item in result["relation_labels"])
+    assert any(item["role"] == "TARGET_RADICAL_MARK_EVIDENCE" for item in result["structure_labels"])
     assert result["ignored_pdf_nodes"]
+
+
+def test_alignment_records_fraction_structure_labels() -> None:
+    graph_row = _graph_row("r5", ["x", "y"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\frac{x}{y}", row_id="r5").to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    labels = [item for item in result["structure_labels"] if item["role"] == "TARGET_FRACTION_SEPARATOR_EVIDENCE"]
+    assert labels
+    assert labels[0]["above_pdf_node_ids"] == ["g0000"]
+    assert labels[0]["below_pdf_node_ids"] == ["g0001"]
+    assert result["stats"]["structure_labels"] == 1
 
 
 def test_alignment_uses_parser_identity_for_tex_command_symbols() -> None:
@@ -44,6 +58,7 @@ def test_alignment_splits_text_run_against_pdf_glyphs() -> None:
 
     assert result["stats"]["hard_alignment_rate"] == 1.0
     assert any(item["relation"] == "SUB" for item in result["relation_labels"])
+    assert any(item["target_node_type"] == "text_run" for item in result["node_alignments"])
 
 
 def test_alignment_rows_manifest_counts_missing_targets() -> None:

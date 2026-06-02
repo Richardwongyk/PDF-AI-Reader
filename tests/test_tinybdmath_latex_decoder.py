@@ -32,6 +32,30 @@ def test_decoder_uses_ordered_glyphs_when_no_relations() -> None:
     assert "decoder_no_selected_relations" in decoded.warnings
 
 
+def test_decoder_uses_model_spacing_node_predictions_before_linear_fallback() -> None:
+    decoded = decode_latex_candidate(
+        [
+            {"node_id": "g0", "latex": "x", "bbox": [0, 0, 8, 10]},
+            {"node_id": "g1", "latex": r"\,", "bbox": [8, 0, 9, 10]},
+            {"node_id": "g2", "latex": "y", "bbox": [10, 0, 18, 10]},
+        ],
+        {
+            "selected_relations": [
+                {"source": "g0", "target": "g1", "relation": "HORIZONTAL", "confidence": 0.95},
+                {"source": "g1", "target": "g2", "relation": "HORIZONTAL", "confidence": 0.95},
+            ],
+            "node_predictions": [
+                {"node_id": "g1", "label": "SPACING", "confidence": 0.95},
+            ],
+            "node_filter_threshold": 0.90,
+        },
+        fallback_text="x y",
+    )
+
+    assert decoded.latex == "xy"
+    assert "decoder_filtered_spacing_nodes" in decoded.warnings
+
+
 def test_decoder_maps_unicode_math_glyphs_to_standard_latex() -> None:
     decoded = decode_latex_candidate(
         [
@@ -47,7 +71,7 @@ def test_decoder_maps_unicode_math_glyphs_to_standard_latex() -> None:
     assert "decoder_no_selected_relations" in decoded.warnings
 
 
-def test_decoder_builds_fraction_candidate_from_rule_relations() -> None:
+def test_decoder_builds_fraction_candidate_from_structure_relations() -> None:
     decoded = decode_latex_candidate(
         [
             {"node_id": "g0", "latex": "a", "bbox": [2, 0, 7, 6]},

@@ -1,9 +1,9 @@
 # 新会话交接文档
 
-最后更新：2026-06-01
+最后更新：2026-06-02
 
-本文件是新终端/新 AI 助手接手项目时的交接入口。旧版长篇流水账已删除，
-历史执行记录从 git、`TODO.md` 和测试产物中查。当前真实下一步以本文和
+本文件是新终端/新 AI 助手接手项目时的交接入口。旧版长篇流水账已删除。
+当前真实下一步以本文、`TODO.md` 和
 `docs/current_goal_and_next_steps.md` 为准。
 
 ## 1. 必读顺序
@@ -11,9 +11,10 @@
 1. `AGENTS.md`
 2. `docs/current_goal_and_next_steps.md`
 3. `docs/tiny_born_digital_math_model_engineering.md`
-4. `docs/async_formula_indexing_design.md`
-5. `docs/workspace_inventory.md`
-6. `TODO.md` 只作为历史索引，不再作为精确下一步计划
+4. `docs/tinybdmath_ai_math_latex_structure_scope.md`
+5. `docs/async_formula_indexing_design.md`
+6. `docs/workspace_inventory.md`
+7. `TODO.md`
 
 不要先安装工具，不要先训练，不要先改 decoder。先确认工作树、环境、后台
 进程和当前文档边界。
@@ -34,20 +35,42 @@
 
 - `5b5b38e Optimize TinyBDMath relation scoring pipeline`
 - `a258fe2 Clean legacy TinyBDMath tooling and docs`
+- `1cbb9e1 Document neural symbolic TinyBDMath plan`
+- `c75d919 Add TinyBDMath graph parser pipeline`
+- Clean legacy TinyBDMath scope（本轮提交）
 
-当前工作树新增 Graph Parser M1 垂直切片，尚未提交：
+本轮提交已在 Graph Parser M1 基础上提交节点保留/丢弃学习和当前范围收口：
 
-- CSLT schema：`src/core/tinybdmath_cslt_schema.py`
-- target tree：`src/core/tinybdmath_target_tree.py`、
-  `tools/tinybdmath_build_target_trees.py`
-- alignment：`src/core/tinybdmath_alignment.py`、`tools/tinybdmath_align_targets.py`
-- Graph Parser：`src/core/tinybdmath_graph_parser.py`、
-  `tools/tinybdmath_train_graph_parser.py`
-- r2a 集成：`TinyBDMathCandidateService` 以 Graph Parser artifact 为主路径，
-  缺 artifact 时 abstain，不再自动回退旧 edge decoder。
+- `src/core/tinybdmath_graph_parser.py`
+  - artifact 新增节点分类头。
+  - 节点标签已升级为 `SYMBOL`、`TEXT`、`OPERATOR`、`SPACING`、`UNKNOWN`、
+    `HORIZONTAL_RULE`、`VERTICAL_RULE`。
+  - 节点特征加入 Unicode 大类、单字符标记、相对字号等通用证据。
+  - 推理输出 `node_predictions` 和 `node_filter_threshold`。
+- `tools/tinybdmath_train_graph_parser.py`
+  - 同时训练关系头和节点头。
+  - 用样本 confidence 加权训练，弱 `UNKNOWN` 不再被当成强标签。
+  - 节点头使用 class weight 召回 TEXT/OPERATOR，但不放大弱 `UNKNOWN`。
+- `src/core/tinybdmath_target_tree.py`、`src/core/tinybdmath_alignment.py`
+  - target tree 保存 KaTeX `family`。
+  - alignment 在节点对齐里写入 `target_node_type` 和 `target_attrs`。
+- `src/core/tinybdmath_latex_decoder.py`
+  - 只按模型高置信 `SPACING` 节点过滤 glyph/relation。
+  - 不写字符映射，不猜根号/分数/上下标。
+- 对应测试：
+  - `tests/test_tinybdmath_graph_parser.py`
+  - `tests/test_tinybdmath_latex_decoder.py`
+- 旧 TinyBDMath quality/edge/sharded/gold/review 路线和孤立历史文档已清理。
 
-旧全局 parent forest/decoded eval canonicalization 试验已撤回。旧 edge scorer
-只保留为 baseline/ablation，不再作为 r2a 默认推理路径。
+当前 r2a 默认推理路径只保留 Graph Parser artifact。缺模型时写 candidate-only
+abstain 和缺模型 warning。
+
+2026-06-02 进一步收束：第一阶段目标不是开放科学记号识别，而是 AI/Math 论文
+中的通用数学排版结构恢复。数学公式不能按内容枚举；应按 LaTeX/amsmath/
+mathtools/unicode-math 支持的递归二维排版组合器建 CSLT，例如 sequence、
+script、under/over、fraction、radical、accent、fence、matrix/aligned、
+operator、text run、style/mathvariant 和 equation tag。详见
+`docs/tinybdmath_ai_math_latex_structure_scope.md`。
 
 ## 3. 当前核心结论
 
@@ -101,7 +124,6 @@ PDF 小块证据
   `identity_aliases`。
 - 用通用数学排版语法约束。
 - 用 verifier 做 evidence-based reject/abstain。
-- 把旧 edge model 作为 baseline、pretrain 或 ablation。
 
 ## 5. 多轮公式解析要求
 
@@ -131,10 +153,10 @@ PDF 小块证据
 
 ## 6. 下一步具体工作
 
-### 6.1 不要继续做旧 decoder 补丁
+### 6.1 固定 r2a 边界
 
-如果看到全局 parent forest 试验，先把它标记为 baseline/ablation。不要继续往
-旧 decoder 添加个案逻辑。
+r2a 只加载 Graph Parser artifact。decoder 只做结构序列化、合法性检查和
+candidate-only 输出；结构缺失或低置信时 abstain。
 
 ### 6.2 CSLT schema（M1 已完成）
 
@@ -152,6 +174,17 @@ PDF 小块证据
 - 简单矩阵/cases/aligned 的骨架
 - artifact/spacing 节点
 
+2026-06-02 起，schema 验收不再停留在这些示例公式。AI/Math M0 必须按组合器
+覆盖审计：
+
+- 基础：symbol、text_run、sequence、group、spacing_artifact。
+- 附着：script、prescript、under_over、accent_annotation。
+- 分隔/包围：fraction、radical、fence、基础 enclosure evidence。
+- 网格/多行：matrix_grid、aligned_display、equation_tag。
+- 身份/样式：operator、style_variant、mathvariant、font_identity。
+
+样本清单只用于验收覆盖，不能变成公式类型枚举或 decoder 规则。
+
 ### 6.3 target tree builder（M1 已完成）
 
 已新增：
@@ -167,7 +200,7 @@ PDF 小块证据
 - 解析失败保留 failure bucket，不丢样本。
 - 输出 CSLT JSONL，不直接追作者源码 exact。
 
-### 6.4 alignment（M1 已完成，待扩大到 2000 行）
+### 6.4 alignment（M1 已完成，2000 行审计已完成）
 
 已新增：
 
@@ -181,7 +214,7 @@ PDF 小块证据
 - 对 artifact、spacing、marker、unknown 节点给出原因。
 - 已跑 20 行 smoke：rows_with_hard_labels=13，avg_hard_alignment_rate=0.894048。
 - 已跑 200 行无本地符号表审计，gate passed。
-- 下一步扩大到 2000 行。
+- 已跑 2000 行无本地符号表审计，gate passed。
 - 未通过 alignment audit 前不要训练大模型。
 
 2026-06-02 已按无 TinyBDMath 本地符号表的写法重跑 200 行审计：
@@ -194,7 +227,17 @@ PDF 小块证据
 - 失败样例集中在 `\cong`、`\mapsto`、`\cdot`、根号 glyph 等 identity/字体
   证据不足，不得在 alignment/decoder 中补表或拆固定 glyph 序列。
 
-### 6.5 Graph Parser（M1 代码已完成，正式训练未完成）
+2026-06-02 同一路线已扩大到 2000 行：
+
+- 临时目录：`test_artifacts/tinybdmath_graph_parser_audit_2000_no_local_symbol_map/`
+  不提交。
+- target tree：rows=2000，success_rows=1993，failed_rows=7。
+- alignment：rows_with_hard_labels=1269，avg_hard_alignment_rate=0.950611。
+- audit：hard_row_rate=0.9395，relation_row_rate=0.6345，gate passed。
+- 结论：标签足以继续小规模模型实验，但 relation_row_rate 仍说明 group/text/operator/
+  vector role 监督不足，不能直接长训后宣称质量完成。
+
+### 6.5 Graph Parser（M1 已提交，节点头正在完善）
 
 已新增：
 
@@ -209,27 +252,45 @@ PDF 小块证据
 - 谁是谁的父节点。
 - 父子关系类型。
 - 哪些小块组成同一组。
-- 哪些线条是根号线、分数线或其他结构线条。
+- 哪些横向/竖向 vector 是低层结构证据。
+- 哪些 target tree 结构关系由 edge/group head 学出；decoder 不能从 node label
+  直接合成分数、根号或矩阵。
 
 已跑 smoke：
 
 - `science` 环境 PyTorch 2.5.1 可用。
 - 20 行 alignment、2 epochs、CPU 训练成功并导出 JSON artifact。
 - 该 smoke 只证明链路可跑，质量未达标。
+- 200 行、1 epoch 节点头曾全部预测 `UNKNOWN`，已定位为弱标签训练方式不稳。
+- 三分类节点头已升级为 role-label 五分类节点头。
+- 200 行 role-label smoke 目录：
+  `test_artifacts/tinybdmath_graph_parser_role_labels_smoke/`，不提交。
+- role-label smoke：
+  - relation validation accuracy=0.763872。
+  - relation positive_recall=0.688172。
+  - node label counts：OPERATOR=196、SPACING=336、SYMBOL=711、TEXT=96、UNKNOWN=252。
+  - node_validation accuracy=0.642857。
+  - node recall：OPERATOR=0.46875、SPACING=1.0、SYMBOL=0.684685、TEXT=1.0、UNKNOWN=0.0。
+  - node precision：OPERATOR=0.681818、SPACING=0.92、SYMBOL=0.697248、TEXT=0.280702。
+- 结论：TEXT/OPERATOR 已进入模型学习路径，但 TEXT precision 偏低、UNKNOWN
+  暂不预测；下一步要扩大样本、校准阈值，并补 vector role/group boundary。
 
 正式训练前提：
 
 - CSLT target tree 已通过审计。
 - alignment rows 已通过 200/2000 行审计。
 - hard/soft/ignore 分层明确。
-- 旧 direct eval baseline 固定。
+- 2026-06-01 direct eval 数字固定为历史对照。
+- 节点头、关系头、group/text/operator/vector role 标签要纳入同一评估报告。
+- 已完成 100 个 AI/Math LaTeX 结构覆盖审计，输出 `ready_for_model`、
+  `needs_identity_repair`、`needs_schema_extension`、`needs_image_mfr`、
+  `route_unsupported`、`abstain` 分桶。
 
 ### 6.6 r2a 主路径
 
 - `tools/formula_multiround_pipeline.py` 支持 `--tinybdmath-graph-parser-model`。
 - `tools/full_software_validation.py` 默认寻找
   `test_artifacts/tinybdmath_graph_parser_m1/tinybdmath_graph_parser_model.json`。
-- `--tinybdmath-edge-model` 是 deprecated no-op；旧 edge scorer 不再参与 r2a 默认推理。
 
 ## 7. 环境检查命令
 
@@ -276,15 +337,6 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
   tests/test_smoke.py -q
 ```
 
-TinyBDMath 旧 baseline 测试：
-
-```powershell
-C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
-  tests/test_tinybdmath_structural_candidate.py `
-  tests/test_tinybdmath_latex_decoder.py `
-  tests/test_tinybdmath_eval_decoded_latex.py -q
-```
-
 Graph Parser M1 测试：
 
 ```powershell
@@ -295,10 +347,29 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
   tests/test_tinybdmath_alignment.py `
   tests/test_tinybdmath_alignment_audit.py `
   tests/test_tinybdmath_graph_parser.py `
+  tests/test_tinybdmath_latex_decoder.py `
+  tests/test_tinybdmath_eval_decoded_latex.py `
   tests/test_tinybdmath_candidate_service.py `
   tests/test_formula_multiround_pipeline.py `
   tests/test_full_software_validation.py -q
 ```
+
+本轮已验证：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
+  tests/test_tinybdmath_symbol_equivalence.py `
+  tests/test_tinybdmath_alignment.py `
+  tests/test_tinybdmath_alignment_audit.py `
+  tests/test_tinybdmath_target_tree.py `
+  tests/test_tinybdmath_graph_parser.py `
+  tests/test_tinybdmath_latex_decoder.py `
+  tests/test_tinybdmath_candidate_service.py `
+  tests/test_formula_multiround_pipeline.py `
+  tests/test_full_software_validation.py -q
+```
+
+结果：57 passed。
 
 ## 9. 提交前检查
 
@@ -320,7 +391,7 @@ rg -n "额外署名|来源标记|生成工具署名|自动署名" . -S `
 1. CSLT schema 能表达主要失败结构。
 2. target tree builder 有 200 行审计报告。
 3. alignment 有 200/2000 行审计报告。
-4. graph parser 在 formula-level eval 上超过旧 baseline。
+4. graph parser 在 formula-level eval 上超过 2026-06-01 direct eval 对照。
 5. constrained decoder/verifier 能拒绝明显错误候选。
 6. r2a 仍 candidate-only，accepted gate 独立校准。
 

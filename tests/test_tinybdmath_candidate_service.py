@@ -53,7 +53,8 @@ def test_tinybdmath_candidate_service_requires_graph_parser_and_abstains_without
     assert result is not None
     assert result.accepted is False
     assert result.evidence["graph_parser"]["warnings"] == ["tinybdmath_graph_parser_model_missing"]
-    assert result.evidence["relation_scoring"]["legacy_edge_model"]["enabled"] is False
+    assert result.evidence["relation_scoring"]["source"] == "tinybdmath_graph_parser_m1"
+    assert result.evidence["relation_scoring"]["relation_scores"] == []
     assert result.evidence["structural_candidate"]["candidate_only"] is True
     assert result.evidence["structural_candidate"]["abstain"] is True
     assert result.evidence["decoded_latex"]["candidate_only"] is True
@@ -90,7 +91,7 @@ def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Pa
     assert result.evidence["source"] == "tinybdmath_r2a_inline_structural_candidate"
     assert result.evidence["inline_pdf_evidence"]["has_script_size"] is True
     assert result.evidence["graph_parser"]["model_version"] == "toy_graph_parser"
-    assert result.evidence["relation_scoring"]["legacy_edge_model"]["enabled"] is False
+    assert result.evidence["relation_scoring"]["source"] == "tinybdmath_graph_parser_m1"
     assert result.evidence["structural_candidate"]["candidate_only"] is True
     assert result.evidence["decoded_latex"]["candidate_only"] is True
 
@@ -191,4 +192,3 @@ def _glyph(node_id: str, text: str, x0: float, y0: float, x1: float, y1: float, 
             "confidence": 1.0,
         },
     }
-

@@ -3,7 +3,7 @@
 The input is produced by ``tools/tinybdmath_instrumented_latex_dataset.py``.
 Those rows already have exact source LaTeX labels and exact PDF color-capture
 bboxes.  This script keeps that gold alignment intact and converts each formula
-into a reusable graph-style dataset for TinyBDMath relation/quality models.
+into reusable graph rows for TinyBDMath CSLT alignment and Graph Parser training.
 
 It does not train a model and it does not use source LaTeX in production
 parsing.  Source LaTeX is used here only as dataset supervision.
