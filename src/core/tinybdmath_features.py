@@ -17,7 +17,7 @@ from typing import Any, Literal
 from src.core.symbol_identity_repair import EnrichedGlyphGraph, EnrichedGlyphNode
 
 
-TINYBDMATH_FEATURE_SCHEMA_VERSION = "tinybdmath_edge_candidates_v2_vector_rule_radical"
+TINYBDMATH_FEATURE_SCHEMA_VERSION = "tinybdmath_edge_candidates_v3_vector_rule_orientation"
 
 RelationHint = Literal[
     "right_neighbor",
@@ -29,8 +29,11 @@ RelationHint = Literal[
     "far_context",
     "above_rule_candidate",
     "below_rule_candidate",
+    "left_rule_candidate",
+    "right_rule_candidate",
     "fraction_bar_candidate",
     "overline_candidate",
+    "vertical_boundary_candidate",
     "radical_body_candidate",
 ]
 
@@ -69,6 +72,7 @@ class TinyBDVectorFeature:
     aspect_ratio: float
     page_num: int
     is_horizontal_rule_candidate: bool
+    is_vertical_rule_candidate: bool
 
 
 @dataclass(frozen=True)
@@ -216,18 +220,26 @@ class TinyBDFeatureExtractor:
             ]
             edges.extend(sorted(radical_candidates, key=_edge_sort_key)[: self.config.max_candidates_per_node])
         for vector in vectors:
-            if not vector.is_horizontal_rule_candidate:
-                continue
-            above = [glyph for glyph in glyphs if _glyph_overlaps_rule(glyph, vector) and glyph.center[1] < vector.center[1]]
-            below = [glyph for glyph in glyphs if _glyph_overlaps_rule(glyph, vector) and glyph.center[1] > vector.center[1]]
-            for glyph in sorted(above, key=lambda item: (item.center[0], item.center[1], item.node_id))[:24]:
-                edges.append(_edge_candidate(vector, glyph, "above_rule_candidate"))
-            for glyph in sorted(below, key=lambda item: (item.center[0], item.center[1], item.node_id))[:24]:
-                edges.append(_edge_candidate(vector, glyph, "below_rule_candidate"))
-            if above and below:
-                edges.append(_edge_candidate(vector, vector, "fraction_bar_candidate"))
-            elif above:
-                edges.append(_edge_candidate(vector, vector, "overline_candidate"))
+            if vector.is_horizontal_rule_candidate:
+                above = [glyph for glyph in glyphs if _glyph_overlaps_horizontal_rule(glyph, vector) and glyph.center[1] < vector.center[1]]
+                below = [glyph for glyph in glyphs if _glyph_overlaps_horizontal_rule(glyph, vector) and glyph.center[1] > vector.center[1]]
+                for glyph in sorted(above, key=lambda item: (item.center[0], item.center[1], item.node_id))[:24]:
+                    edges.append(_edge_candidate(vector, glyph, "above_rule_candidate"))
+                for glyph in sorted(below, key=lambda item: (item.center[0], item.center[1], item.node_id))[:24]:
+                    edges.append(_edge_candidate(vector, glyph, "below_rule_candidate"))
+                if above and below:
+                    edges.append(_edge_candidate(vector, vector, "fraction_bar_candidate"))
+                elif above:
+                    edges.append(_edge_candidate(vector, vector, "overline_candidate"))
+            if vector.is_vertical_rule_candidate:
+                left = [glyph for glyph in glyphs if _glyph_overlaps_vertical_rule(glyph, vector) and glyph.center[0] < vector.center[0]]
+                right = [glyph for glyph in glyphs if _glyph_overlaps_vertical_rule(glyph, vector) and glyph.center[0] > vector.center[0]]
+                for glyph in sorted(left, key=lambda item: (item.center[1], item.center[0], item.node_id))[:24]:
+                    edges.append(_edge_candidate(vector, glyph, "left_rule_candidate"))
+                for glyph in sorted(right, key=lambda item: (item.center[1], item.center[0], item.node_id))[:24]:
+                    edges.append(_edge_candidate(vector, glyph, "right_rule_candidate"))
+                if left or right:
+                    edges.append(_edge_candidate(vector, vector, "vertical_boundary_candidate"))
         edges = _dedupe_edges(edges)
         for edge in edges:
             if edge.source not in node_by_id or edge.target not in node_by_id:
@@ -324,6 +336,7 @@ def _vector_feature(node: Any) -> TinyBDVectorFeature:
         aspect_ratio=round(aspect, 6),
         page_num=_json_int(getattr(node, "page_num", 0)),
         is_horizontal_rule_candidate=_is_horizontal_rule(width, height),
+        is_vertical_rule_candidate=_is_vertical_rule(width, height),
     )
 
 
@@ -351,6 +364,7 @@ def _vector_feature_from_json(item: dict[str, Any]) -> TinyBDVectorFeature | Non
         aspect_ratio=round(aspect, 6),
         page_num=_json_int(item.get("page_num")),
         is_horizontal_rule_candidate=bool(item.get("is_horizontal_rule_candidate")) or _is_horizontal_rule(width, height),
+        is_vertical_rule_candidate=bool(item.get("is_vertical_rule_candidate")) or _is_vertical_rule(width, height),
     )
 
 
@@ -482,12 +496,20 @@ def _mark_script_size(glyphs: tuple[TinyBDGlyphFeature, ...]) -> tuple[TinyBDGly
     )
 
 
-def _glyph_overlaps_rule(glyph: TinyBDGlyphFeature, vector: TinyBDVectorFeature) -> bool:
+def _glyph_overlaps_horizontal_rule(glyph: TinyBDGlyphFeature, vector: TinyBDVectorFeature) -> bool:
     return _overlap_ratio((glyph.bbox[0], glyph.bbox[2]), (vector.bbox[0], vector.bbox[2])) >= 0.05
+
+
+def _glyph_overlaps_vertical_rule(glyph: TinyBDGlyphFeature, vector: TinyBDVectorFeature) -> bool:
+    return _overlap_ratio((glyph.bbox[1], glyph.bbox[3]), (vector.bbox[1], vector.bbox[3])) >= 0.05
 
 
 def _is_horizontal_rule(width: float, height: float) -> bool:
     return width / max(height, 1e-6) >= 6.0 and height <= max(width * 0.08, 2.0)
+
+
+def _is_vertical_rule(width: float, height: float) -> bool:
+    return height / max(width, 1e-6) >= 6.0 and width <= max(height * 0.08, 2.0)
 
 
 def _overlap_ratio(
@@ -513,8 +535,11 @@ def _edge_sort_key(edge: TinyBDEdgeCandidate) -> tuple[int, float, str]:
         "radical_body_candidate": 1,
         "above_rule_candidate": 5,
         "below_rule_candidate": 5,
+        "left_rule_candidate": 5,
+        "right_rule_candidate": 5,
         "fraction_bar_candidate": 6,
         "overline_candidate": 6,
+        "vertical_boundary_candidate": 6,
     }[edge.hint]
     dx = abs(float(edge.features.get("dx_over_height", 0.0) or 0.0))
     dy = abs(float(edge.features.get("dy_over_height", 0.0) or 0.0))

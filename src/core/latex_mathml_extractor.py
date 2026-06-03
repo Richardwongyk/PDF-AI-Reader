@@ -277,6 +277,38 @@ const fs = require('fs');
 const katex = require('{js_path}');
 const payload = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
 const warnings = [];
+function cleanAst(value, seen) {{
+  if (value === null || value === undefined) {{
+    return value;
+  }}
+  if (typeof value !== 'object') {{
+    return value;
+  }}
+  if (!seen) {{
+    seen = new WeakSet();
+  }}
+  if (seen.has(value)) {{
+    return undefined;
+  }}
+  seen.add(value);
+  if (Array.isArray(value)) {{
+    return value.map((item) => cleanAst(item, seen)).filter((item) => item !== undefined);
+  }}
+  const output = {{}};
+  for (const [key, item] of Object.entries(value)) {{
+    if (key === 'loc' || key === 'lexer' || key === 'settings' || key === 'tokenRegex' || key === 'catcodes') {{
+      continue;
+    }}
+    if (typeof item === 'function') {{
+      continue;
+    }}
+    const cleaned = cleanAst(item, seen);
+    if (cleaned !== undefined) {{
+      output[key] = cleaned;
+    }}
+  }}
+  return output;
+}}
 let mathml = '';
 let parseTree = [];
 try {{
@@ -295,6 +327,7 @@ try {{
     throwOnError: false,
     strict: 'ignore'
   }});
+  parseTree = cleanAst(parseTree);
 }} catch (err) {{
   warnings.push('katex_parse_error:' + String(err && err.message || err).slice(0, 160));
 }}
@@ -313,6 +346,38 @@ def _node_batch_script(katex_js: Path) -> str:
 const fs = require('fs');
 const katex = require('{js_path}');
 const payload = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+function cleanAst(value, seen) {{
+  if (value === null || value === undefined) {{
+    return value;
+  }}
+  if (typeof value !== 'object') {{
+    return value;
+  }}
+  if (!seen) {{
+    seen = new WeakSet();
+  }}
+  if (seen.has(value)) {{
+    return undefined;
+  }}
+  seen.add(value);
+  if (Array.isArray(value)) {{
+    return value.map((item) => cleanAst(item, seen)).filter((item) => item !== undefined);
+  }}
+  const output = {{}};
+  for (const [key, item] of Object.entries(value)) {{
+    if (key === 'loc' || key === 'lexer' || key === 'settings' || key === 'tokenRegex' || key === 'catcodes') {{
+      continue;
+    }}
+    if (typeof item === 'function') {{
+      continue;
+    }}
+    const cleaned = cleanAst(item, seen);
+    if (cleaned !== undefined) {{
+      output[key] = cleaned;
+    }}
+  }}
+  return output;
+}}
 function extract(item) {{
   const warnings = [];
   let mathml = '';
@@ -333,6 +398,7 @@ function extract(item) {{
       throwOnError: false,
       strict: 'ignore'
     }});
+    parseTree = cleanAst(parseTree);
   }} catch (err) {{
     warnings.push('katex_parse_error:' + String(err && err.message || err).slice(0, 160));
   }}

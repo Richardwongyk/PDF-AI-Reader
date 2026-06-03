@@ -27,6 +27,21 @@ def test_alignment_ignores_unmatched_pdf_artifacts_and_tracks_radical_body() -> 
     assert result["ignored_pdf_nodes"]
 
 
+def test_alignment_tracks_radical_index() -> None:
+    graph_row = _graph_row("radical-index", [r"\sqrt", "3", "x"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\sqrt[3]{x}", row_id="radical-index").to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    relations = {(item["source"], item["target"], item["relation"]) for item in result["relation_labels"]}
+    assert ("g0000", "g0001", "RADICAL_INDEX") in relations
+    assert ("g0000", "g0002", "RADICAL_BODY") in relations
+    radical = [item for item in result["structure_labels"] if item["role"] == "TARGET_RADICAL_MARK_EVIDENCE"][0]
+    assert radical["mark_pdf_node_ids"] == ["g0000"]
+    assert radical["index_pdf_node_ids"] == ["g0001"]
+    assert radical["body_pdf_node_ids"] == ["g0002"]
+
+
 def test_alignment_records_fraction_structure_labels() -> None:
     graph_row = _graph_row("r5", ["x", "y"])
     target = TinyBDTargetTreeBuilder().build_from_latex(r"\frac{x}{y}", row_id="r5").to_json()
@@ -59,6 +74,65 @@ def test_alignment_splits_text_run_against_pdf_glyphs() -> None:
     assert result["stats"]["hard_alignment_rate"] == 1.0
     assert any(item["relation"] == "SUB" for item in result["relation_labels"])
     assert any(item["target_node_type"] == "text_run" for item in result["node_alignments"])
+    text_runs = [item for item in result["structure_labels"] if item["role"] == "TARGET_TEXT_RUN_EVIDENCE"]
+    assert text_runs
+    assert text_runs[0]["text_pdf_node_ids"] == ["g0001", "g0002", "g0003", "g0004", "g0005"]
+
+
+def test_alignment_records_operator_text_run_structure_evidence() -> None:
+    graph_row = _graph_row("operator", ["f", "o", "o", "(", "x", ")"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\operatorname{foo}(x)", row_id="operator").to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    operator_runs = [
+        item
+        for item in result["structure_labels"]
+        if item["role"] == "TARGET_OPERATOR_TEXT_RUN_EVIDENCE"
+    ]
+    assert operator_runs
+    assert operator_runs[0]["text_pdf_node_ids"] == ["g0000", "g0001", "g0002"]
+
+
+def test_alignment_labels_large_operator_under_over_relations() -> None:
+    graph_row = _graph_row("limits", [r"\sum", "i", "=", "1", "n", "x", "i"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\sum_{i=1}^{n} x_i", row_id="limits", display_mode=True).to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    relations = {item["relation"] for item in result["relation_labels"]}
+    assert "UNDER" in relations
+    assert "OVER" in relations
+    assert any(item["role"] == "TARGET_UNDER_OVER_EVIDENCE" for item in result["structure_labels"])
+
+
+def test_alignment_labels_left_attachment_relations() -> None:
+    graph_row = _graph_row("left-script", ["a", "b", "X"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"{}^a_b X", row_id="left-script", display_mode=True).to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    relations = {(item["source"], item["target"], item["relation"]) for item in result["relation_labels"]}
+    assert ("g0002", "g0000", "PRE_SUP") in relations
+    assert ("g0002", "g0001", "PRE_SUB") in relations
+    assert any(item["role"] == "TARGET_LEFT_ATTACHMENT_EVIDENCE" for item in result["structure_labels"])
+
+
+def test_alignment_records_standard_structure_evidence_labels() -> None:
+    cases = [
+        (r"\overline{x}", ["x"], "TARGET_ACCENT_ANNOTATION_EVIDENCE"),
+        (r"\left(x\right)", ["(", "x", ")"], "TARGET_FENCE_EVIDENCE"),
+        (r"\boxed{x}", ["x"], "TARGET_ENCLOSURE_EVIDENCE"),
+        (r"\begin{matrix}x&y\\z&w\end{matrix}", ["x", "y", "z", "w"], "TARGET_MATRIX_GRID_EVIDENCE"),
+        (r"\begin{equation}\tag{1}a=b\end{equation}", ["a", "=", "b", "(", "1", ")"], "TARGET_EQUATION_TAG_EVIDENCE"),
+    ]
+
+    for latex, glyphs, expected_role in cases:
+        target = TinyBDTargetTreeBuilder().build_from_latex(latex, row_id=expected_role, display_mode=True).to_json()
+        result = TinyBDAlignmentBuilder().align_row(_graph_row(expected_role, glyphs), target).to_json()
+        roles = {item["role"] for item in result["structure_labels"]}
+
+        assert expected_role in roles
 
 
 def test_alignment_rows_manifest_counts_missing_targets() -> None:

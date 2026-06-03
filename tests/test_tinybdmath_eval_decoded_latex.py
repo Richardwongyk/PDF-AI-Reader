@@ -38,8 +38,48 @@ def test_decoded_latex_stream_matches_batch(tmp_path: Path) -> None:
     stream_rows, stream_warnings = _decode_rows_stream(graph_path, candidates_path)
 
     assert stream_rows == batch_rows
-    assert _build_report(stream_rows, stream_warnings, streaming=True)["metrics"] == _build_report(
-        batch_rows,
-        batch_warnings,
-        streaming=False,
-    )["metrics"]
+    stream_report = _build_report(stream_rows, stream_warnings, streaming=True)
+    batch_report = _build_report(batch_rows, batch_warnings, streaming=False)
+
+    assert stream_report["metrics"] == batch_report["metrics"]
+    assert stream_report["layout_gate"] == batch_report["layout_gate"]
+    assert stream_report["layout_gate"]["status_counts"] == {"pass": 2}
+
+
+def test_decoded_latex_eval_reports_n_best_oracle_without_replacing_rank_one() -> None:
+    graph_row = {
+        "row_id": "r1",
+        "kind": "inline",
+        "label_latex": "x^{i}",
+        "glyph_nodes": [
+            {"node_id": "g0", "latex": "x", "bbox": [0, 0, 8, 10]},
+            {"node_id": "g1", "latex": "i", "bbox": [9, 4, 12, 10]},
+        ],
+    }
+    candidate = {
+        "row_id": "r1",
+        "selected_relations": [
+            {"source": "g0", "target": "g1", "relation": "SUB", "confidence": 0.91},
+        ],
+        "relation_alternatives": [
+            {
+                "source": "g0",
+                "target": "g1",
+                "alternatives": [
+                    {"relation": "SUB", "confidence": 0.91},
+                    {"relation": "SUP", "confidence": 0.42},
+                ],
+            }
+        ],
+        "verifier_warnings": [],
+    }
+
+    rows, warnings = _decode_rows([candidate], {"r1": graph_row})
+    report = _build_report(rows, warnings, streaming=False)
+
+    assert rows[0]["decoded_latex"] == "x_{i}"
+    assert rows[0]["n_best_similarity"] == 1.0
+    assert [item["latex"] for item in rows[0]["latex_candidates"]] == ["x_{i}", "x^{i}"]
+    assert report["metrics"]["exact_match_rate"] == 0.0
+    assert report["n_best_oracle_metrics"]["oracle_exact_match_rate"] == 1.0
+    assert report["accepted_latex_emitted"] is False

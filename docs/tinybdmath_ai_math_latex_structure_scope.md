@@ -287,15 +287,21 @@ M2 或智能路由后处理：
 ## 6. 与当前代码的关系
 
 当前已提交 Graph Parser M1 和节点头/范围收口改动只能作为审计链路和历史对照，
-不代表上述结构已经完成。
+不代表上述结构已经全部完成。
 
 重要边界：
 
 - `HORIZONTAL_RULE`、`VERTICAL_RULE` 可以作为 PDF 侧低层事实节点标签。
 - PDF node label 不能编码“这是分数线”“这是根号线”这类公式语义。
-- 分数 separator、根号 mark 等只能表示 target tree 派生的训练结构证据，
-  当前使用 `TARGET_FRACTION_SEPARATOR_EVIDENCE`、
-  `TARGET_RADICAL_MARK_EVIDENCE` 等中性 role。
+- 分数 separator、根号 mark、上下标注、重音线、围栏、矩阵行列、enclosure
+  和 equation tag 等只能表示 target tree 派生的训练结构证据；文本串和算子
+  文本串组边界同样只作为训练监督。当前使用
+  `TARGET_TEXT_RUN_EVIDENCE`、`TARGET_OPERATOR_TEXT_RUN_EVIDENCE`、
+  `TARGET_FRACTION_SEPARATOR_EVIDENCE`、`TARGET_RADICAL_MARK_EVIDENCE`、
+  `TARGET_UNDER_OVER_EVIDENCE`、`TARGET_ACCENT_ANNOTATION_EVIDENCE`、
+  `TARGET_FENCE_EVIDENCE`、`TARGET_MATRIX_GRID_EVIDENCE`、
+  `TARGET_MATRIX_ROW_EVIDENCE`、`TARGET_MATRIX_CELL_EVIDENCE`、
+  `TARGET_ENCLOSURE_EVIDENCE`、`TARGET_EQUATION_TAG_EVIDENCE` 等中性 role。
 - decoder 不得从 node label 直接合成分数、根号、矩阵等结构。
 - relation/group/parser 输出必须承担结构恢复责任，verifier 负责拒绝低置信。
 
@@ -322,6 +328,52 @@ M2 或智能路由后处理：
    - `route_unsupported`
    - `abstain`
 5. 只有 `ready_for_model` 和标签质量达到门槛后，才训练或改 decoder。
+
+当前审计入口：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe tools\tinybdmath_audit_structure_scope.py `
+  --graph-rows test_artifacts\tinybdmath_graph_unique_color_components_v3_20260601\tinybdmath_graph_rows.jsonl `
+  --output test_artifacts\tinybdmath_structure_scope_audit_100.json `
+  --limit 100
+```
+
+如果已经生成 target tree 和 alignment，可显式传入 `--target-trees` 和
+`--alignment-rows`；否则工具会在训练/审计上下文中临时生成，不进入生产推理。
+
+2026-06-03 已跑首个 100 行结构覆盖审计，并移除了按 LaTeX 字符串模式
+推断 schema 缺口的口径；当前分桶只依据 parser summary、target tree warnings、
+PDF-to-CSLT alignment、PDF glyph evidence 和显式 route metadata：
+
+- 输出：`test_artifacts/tinybdmath_structure_scope_audit_100.json`，不提交。
+- 分桶：`ready_for_model=84`、`needs_identity_repair=15`、
+  `needs_schema_extension=1`。
+- target tree：100 行中 99 行成功，1 行 KaTeX 解析失败。
+- alignment：avg_hard_alignment_rate=0.951277，rows_with_hard_labels=76，
+  rows_with_structure_labels=16。
+- 审计报告记录 `parser_type_counts`、`mathml_tag_counts`、`blocker_counts`
+  和 `blocked_rows`，用于定位下一步该补 parser/container、identity repair
+  还是 PDF-to-target alignment。
+- 已覆盖：`symbol`、`group`、`sequence`、`script`、`text_run`、
+  `font_identity`、`mathvariant`、`fraction`、`radical`、`operator`、
+  `matrix_grid`、`aligned_display`、`under_over`。
+- 已补标准 KaTeX AST 结构：`cr` 行断点、large operator/operatorname
+  limits、operatorname、overline/underline/horizBrace、boxed/fbox、left/right/
+  middle/sized delimiters、equation tag、phantom/smash/lap/color layout/style
+  evidence。未知命令产生的 KaTeX error color 节点会进入 schema blocker，
+  不进入 ready 训练样本。
+- 已补标准结构训练通道：Graph Parser relation labels 接住 `UNDER`、`OVER`、
+  `ACCENT_BASE`、`TEXT_RUN_NEXT`、`OVERLINE`、`UNDERLINE`，并从 target-derived
+  structure labels 生成文本串组边界、根号主体、围栏 open/body/close、矩阵行/
+  单元格内容和 over/under line 的通用关系监督；简易 decoder 只序列化已支持关系，
+  对暂未支持的 fence/matrix 等关系给 warning 和低置信。
+- `fraction`、`radical`、`matrix_grid`、`aligned_display` 已出现，但本批没有进入
+  `ready_for_model` 分桶；后续仍要先看 identity/alignment 失败，而不是改
+  decoder。剩余 1 个 `needs_schema_extension` 是未包裹 display alignment 的
+  KaTeX 解析失败，不允许在 decoder 里用输出字符串替换解决。
+- 新增 `tests/test_tinybdmath_no_hardcoded_patterns.py`：扫描 TinyBDMath 主线
+  和相关测试，并用 synthetic 反例确认可拦截宏注入、正则解析、LaTeX 命令
+  分支和样本术语硬编码。
 
 ## 8. 路由字段初稿
 

@@ -21,6 +21,10 @@ STRUCTURE_RELATION_TO_LABEL = {
     "base": "BASE",
     "sub": "SUB",
     "sup": "SUP",
+    "pre_sub": "PRE_SUB",
+    "pre_sup": "PRE_SUP",
+    "under": "UNDER",
+    "over": "OVER",
     "numerator": "NUMERATOR",
     "denominator": "DENOMINATOR",
     "radical_body": "RADICAL_BODY",
@@ -266,6 +270,10 @@ def _target_leaf_units(tree: CSLTTree) -> list[_TargetLeafUnit]:
             for index, char in enumerate(str(node.value or "")):
                 output.append(_TargetLeafUnit(node=node, text=char, order=len(output), key=f"{node.node_id}:{index}"))
             return
+        if node.node_type == "equation_number":
+            for index, char in enumerate(str(node.value or "")):
+                output.append(_TargetLeafUnit(node=node, text=char, order=len(output), key=f"{node.node_id}:{index}"))
+            return
         if node.node_type == "radical":
             output.append(_TargetLeafUnit(node=node, text=r"\sqrt", order=len(output), key=node.node_id))
         if node.node_type == "artifact":
@@ -376,7 +384,37 @@ def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]
     leaves_by_subtree = _aligned_leaves_by_subtree(tree, pdf_by_target)
     labels: list[dict[str, Any]] = []
     for node in tree.nodes:
-        if node.node_type == "fraction":
+        if node.node_type == "text_run":
+            text_run = _ordered_alignments_for_target(node_alignments, node.node_id)
+            if text_run:
+                role = "TARGET_OPERATOR_TEXT_RUN_EVIDENCE" if bool(node.attrs.get("operator")) else "TARGET_TEXT_RUN_EVIDENCE"
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": role,
+                        "text_pdf_node_ids": [item.pdf_node_id for item in text_run],
+                        "confidence": _structure_confidence(text_run),
+                        "supervision": _structure_supervision(text_run),
+                    }
+                )
+        elif node.node_type == "script" and str(node.attrs.get("placement", "") or "") == "left_attachment":
+            base = _structure_child_leaves(tree, node.node_id, "base", leaves_by_subtree)
+            pre_sub = _structure_child_leaves(tree, node.node_id, "pre_sub", leaves_by_subtree)
+            pre_sup = _structure_child_leaves(tree, node.node_id, "pre_sup", leaves_by_subtree)
+            observed = base + pre_sub + pre_sup
+            if base and (pre_sub or pre_sup):
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_LEFT_ATTACHMENT_EVIDENCE",
+                        "base_pdf_node_ids": _pdf_ids(base),
+                        "pre_sub_pdf_node_ids": _pdf_ids(pre_sub),
+                        "pre_sup_pdf_node_ids": _pdf_ids(pre_sup),
+                        "confidence": _structure_confidence(observed),
+                        "supervision": _structure_supervision(observed),
+                    }
+                )
+        elif node.node_type == "fraction":
             numerator = _structure_child_leaves(tree, node.node_id, "numerator", leaves_by_subtree)
             denominator = _structure_child_leaves(tree, node.node_id, "denominator", leaves_by_subtree)
             if numerator and denominator:
@@ -392,6 +430,7 @@ def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]
                 )
         elif node.node_type == "radical":
             body = _structure_child_leaves(tree, node.node_id, "radical_body", leaves_by_subtree)
+            index = _structure_child_leaves(tree, node.node_id, "radical_index", leaves_by_subtree)
             radical_marks = [
                 item
                 for item in leaves_by_subtree.get(node.node_id, [])
@@ -403,12 +442,167 @@ def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]
                         "target_node_id": node.node_id,
                         "role": "TARGET_RADICAL_MARK_EVIDENCE",
                         "body_pdf_node_ids": _pdf_ids(body),
+                        "index_pdf_node_ids": _pdf_ids(index),
                         "mark_pdf_node_ids": _pdf_ids(radical_marks),
-                        "confidence": _structure_confidence(body + radical_marks),
-                        "supervision": _structure_supervision(body + radical_marks),
+                        "confidence": _structure_confidence(body + index + radical_marks),
+                        "supervision": _structure_supervision(body + index + radical_marks),
+                    }
+                )
+        elif node.node_type == "under_over":
+            base = _structure_child_leaves(tree, node.node_id, "base", leaves_by_subtree)
+            under = _structure_child_leaves(tree, node.node_id, "under", leaves_by_subtree)
+            over = _structure_child_leaves(tree, node.node_id, "over", leaves_by_subtree)
+            observed = base + under + over
+            if base and (under or over):
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_UNDER_OVER_EVIDENCE",
+                        "base_pdf_node_ids": _pdf_ids(base),
+                        "under_pdf_node_ids": _pdf_ids(under),
+                        "over_pdf_node_ids": _pdf_ids(over),
+                        "confidence": _structure_confidence(observed),
+                        "supervision": _structure_supervision(observed),
+                    }
+                )
+        elif node.node_type == "accent":
+            base = _structure_child_leaves(tree, node.node_id, "accent_base", leaves_by_subtree)
+            if base:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_ACCENT_ANNOTATION_EVIDENCE",
+                        "base_pdf_node_ids": _pdf_ids(base),
+                        "annotation_position": str(node.attrs.get("annotation_position", "") or ""),
+                        "confidence": _structure_confidence(base),
+                        "supervision": _structure_supervision(base),
+                    }
+                )
+        elif node.node_type == "fence":
+            body = _structure_child_leaves(tree, node.node_id, "fence_body", leaves_by_subtree)
+            open_delimiter = _structure_child_leaves(tree, node.node_id, "fence_open", leaves_by_subtree)
+            close_delimiter = _structure_child_leaves(tree, node.node_id, "fence_close", leaves_by_subtree)
+            observed = body + open_delimiter + close_delimiter
+            if body:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_FENCE_EVIDENCE",
+                        "body_pdf_node_ids": _pdf_ids(body),
+                        "open_pdf_node_ids": _pdf_ids(open_delimiter),
+                        "close_pdf_node_ids": _pdf_ids(close_delimiter),
+                        "confidence": _structure_confidence(observed),
+                        "supervision": _structure_supervision(observed),
+                    }
+                )
+        elif node.node_type == "matrix":
+            labels.extend(_matrix_structure_labels(tree, node.node_id, leaves_by_subtree))
+        elif node.node_type == "group" and str(node.attrs.get("role", "") or "") == "enclosure":
+            body = [
+                item
+                for item in _structure_child_leaves(tree, node.node_id, "child", leaves_by_subtree)
+                if item.target_node_type != "artifact"
+            ]
+            if body:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_ENCLOSURE_EVIDENCE",
+                        "body_pdf_node_ids": _pdf_ids(body),
+                        "confidence": _structure_confidence(body),
+                        "supervision": _structure_supervision(body),
+                    }
+                )
+        elif node.node_type == "equation_number":
+            tag = leaves_by_subtree.get(node.node_id, [])
+            if tag:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_EQUATION_TAG_EVIDENCE",
+                        "tag_pdf_node_ids": _pdf_ids(tag),
+                        "confidence": _structure_confidence(tag),
+                        "supervision": _structure_supervision(tag),
                     }
                 )
     return labels
+
+
+def _matrix_structure_labels(
+    tree: CSLTTree,
+    matrix_id: str,
+    leaves_by_subtree: dict[str, list[TinyBDNodeAlignment]],
+) -> list[dict[str, Any]]:
+    labels: list[dict[str, Any]] = []
+    rows = _child_edges(tree, matrix_id, "matrix_row")
+    matrix_leaves = leaves_by_subtree.get(matrix_id, [])
+    if matrix_leaves:
+        labels.append(
+            {
+                "target_node_id": matrix_id,
+                "role": "TARGET_MATRIX_GRID_EVIDENCE",
+                "matrix_pdf_node_ids": _pdf_ids(matrix_leaves),
+                "row_count": len(rows),
+                "confidence": _structure_confidence(matrix_leaves),
+                "supervision": _structure_supervision(matrix_leaves),
+            }
+        )
+    for row_index, row_edge in enumerate(rows):
+        row_leaves = leaves_by_subtree.get(row_edge.target, [])
+        if row_leaves:
+            labels.append(
+                {
+                    "target_node_id": row_edge.target,
+                    "role": "TARGET_MATRIX_ROW_EVIDENCE",
+                    "row_index": row_index,
+                    "row_pdf_node_ids": _pdf_ids(row_leaves),
+                    "confidence": _structure_confidence(row_leaves),
+                    "supervision": _structure_supervision(row_leaves),
+                }
+            )
+        cells = _child_edges(tree, row_edge.target, "matrix_cell")
+        for column_index, cell_edge in enumerate(cells):
+            cell_leaves = leaves_by_subtree.get(cell_edge.target, [])
+            if cell_leaves:
+                labels.append(
+                    {
+                        "target_node_id": cell_edge.target,
+                        "role": "TARGET_MATRIX_CELL_EVIDENCE",
+                        "row_index": row_index,
+                        "column_index": column_index,
+                        "cell_pdf_node_ids": _pdf_ids(cell_leaves),
+                        "confidence": _structure_confidence(cell_leaves),
+                        "supervision": _structure_supervision(cell_leaves),
+                    }
+                )
+    return labels
+
+
+def _child_edges(tree: CSLTTree, source: str, relation: str) -> list[CSLTEdge]:
+    return sorted(
+        [edge for edge in tree.edges if edge.source == source and edge.relation == relation],
+        key=lambda item: (item.order, item.relation, item.target),
+    )
+
+
+def _ordered_alignments_for_target(
+    node_alignments: list[TinyBDNodeAlignment],
+    target_node_id: str,
+) -> list[TinyBDNodeAlignment]:
+    return sorted(
+        [item for item in node_alignments if item.target_node_id == target_node_id and item.label in {"hard", "soft"}],
+        key=lambda item: (_target_key_index(item.target_key), item.pdf_node_id),
+    )
+
+
+def _target_key_index(target_key: str) -> int:
+    pieces = str(target_key or "").rsplit(":", 1)
+    if len(pieces) != 2:
+        return 0
+    try:
+        return int(pieces[1])
+    except ValueError:
+        return 0
 
 
 def _structure_child_leaves(
@@ -447,7 +641,15 @@ def _source_anchor_leaf(
 ) -> TinyBDNodeAlignment | None:
     node_by_id = tree.node_map()
     source_node = node_by_id.get(edge.source)
-    if source_node is not None and source_node.node_type == "script" and edge.relation in {"sub", "sup"}:
+    if source_node is not None and source_node.node_type == "script" and edge.relation in {"sub", "sup", "pre_sub", "pre_sup"}:
+        base_edges = [
+            item
+            for item in tree.edges
+            if item.source == edge.source and item.relation == "base"
+        ]
+        if base_edges:
+            return _representative_leaf(base_edges[0].target, leaves_by_subtree)
+    if source_node is not None and source_node.node_type == "under_over" and edge.relation in {"under", "over"}:
         base_edges = [
             item
             for item in tree.edges

@@ -67,8 +67,12 @@ QUICK_TESTS = [
     "tests/test_tinybdmath_alignment.py",
     "tests/test_tinybdmath_alignment_audit.py",
     "tests/test_tinybdmath_candidate_service.py",
+    "tests/test_tinybdmath_constrained_decode.py",
     "tests/test_tinybdmath_cslt_schema.py",
     "tests/test_tinybdmath_graph_parser.py",
+    "tests/test_tinybdmath_layout_verifier.py",
+    "tests/test_tinybdmath_no_hardcoded_patterns.py",
+    "tests/test_tinybdmath_structure_scope_audit.py",
     "tests/test_tinybdmath_symbol_equivalence.py",
     "tests/test_tinybdmath_target_tree.py",
 ]

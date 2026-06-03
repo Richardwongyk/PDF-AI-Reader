@@ -58,6 +58,9 @@ def test_tinybdmath_candidate_service_requires_graph_parser_and_abstains_without
     assert result.evidence["structural_candidate"]["candidate_only"] is True
     assert result.evidence["structural_candidate"]["abstain"] is True
     assert result.evidence["decoded_latex"]["candidate_only"] is True
+    assert result.evidence["decoded_latex"]["canonical_cslt"]["candidate_only"] is True
+    assert result.evidence["decoded_latex"]["latex_candidates"][0]["accepted"] is False
+    assert result.score is not None
 
 
 def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Path) -> None:
@@ -94,6 +97,8 @@ def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Pa
     assert result.evidence["relation_scoring"]["source"] == "tinybdmath_graph_parser_m1"
     assert result.evidence["structural_candidate"]["candidate_only"] is True
     assert result.evidence["decoded_latex"]["candidate_only"] is True
+    assert result.evidence["decoded_latex"]["canonical_cslt"]["candidate_only"] is True
+    assert result.score is not None
 
 
 def test_tinybdmath_candidate_service_carries_vector_rule_nodes(tmp_path: Path) -> None:

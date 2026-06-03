@@ -274,6 +274,45 @@ candidate-only 输出；结构缺失或低置信时 abstain。
   - node precision：OPERATOR=0.681818、SPACING=0.92、SYMBOL=0.697248、TEXT=0.280702。
 - 结论：TEXT/OPERATOR 已进入模型学习路径，但 TEXT precision 偏低、UNKNOWN
   暂不预测；下一步要扩大样本、校准阈值，并补 vector role/group boundary。
+- 2026-06-03 已用当前结构标签完成 2000 行短训 smoke：
+  relation validation accuracy=0.818262，positive_recall=0.405096；
+  node validation accuracy=0.761431；OPERATOR recall=0.946903、
+  precision=0.550600；TEXT recall=0.900000、precision=0.095745。
+- 同一 2000 行 decoded eval：exact=0.569500，near=0.710500，
+  weak=0.924500，average_similarity=0.866203。
+- 2026-06-03 已接入 layout verifier M0：gate 后 pass=557、review=935、
+  abstain=508，final_abstain_rate=0.254000；未拒绝子集 exact=0.726542、
+  near=0.819035。该 gate 只影响 candidate-only 的可信度和拒绝状态，不写
+  accepted。
+- 2026-06-03 已新增 constrained decode M0：只检查模型结构图 schema、缺失节点、
+  cycle、coverage 和 blockers，不生成 LaTeX 模板；接入后同一 2000 行 gate 为
+  pass=557、review=859、abstain=584，final_abstain_rate=0.292000，
+  未拒绝子集 exact=0.748588、near=0.831215。
+- 2026-06-03 已接入 n-best CSLT/LaTeX candidate evidence：Graph Parser
+  relation alternatives 会透传到 constrained decode；成环结构额外生成按模型
+  置信度保留的无环投影候选。rank-1 永远保持原始 selected graph，不自动
+  accepted。814 行重生成候选审计：rank-1 exact/near=0.515971/0.687961，
+  n-best oracle exact/near=0.527027/0.787469，average_candidate_count=2.125307。
+- 2026-06-03 已修复接续会话故障点：重复 LaTeX 的替代结构证据会合并进同一
+  candidate 的 `alternative_structure_evidence`，但 `candidate_id=selected`
+  不会作为自身替代证据重复写入。814 行审计指标保持不变。
+- 2026-06-03 继续补通用结构序列化：decoder/constrained decode/layout verifier
+  已把 `FENCE_OPEN`、`FENCE_CLOSE`、`FENCE_BODY`、`TEXT_RUN_NEXT`、
+  `MATRIX_ROW`、`MATRIX_CELL`、`CELL_CONTENT`、`ACCENT_BASE` 纳入可序列化关系。
+  TEXT_RUN 只有在 node head 对链上节点给出高置信 `TEXT`/`OPERATOR` 时才包
+  `\text{...}`，否则只作为普通顺序关系，避免把数学符号误包成文本。814 行
+  gated-text 审计：rank-1 exact/near=0.531941/0.680590，n-best oracle
+  exact/near=0.540541/0.766585，pass_or_review exact/near=0.711504/0.821239。
+- 2026-06-03 后续接续已按 M0/M1 结构清单继续推进，而不是按失败样例决定
+  计划：`prescript`/左附着通用关系已完成 CSLT、alignment、Graph Parser、
+  decoder、constrained decode、layout verifier 闭环；`radical_index` 已完成
+  nth-root index 监督和序列化；operator text run 由 node head 高置信
+  `OPERATOR` 输出 `\operatorname{...}`，高置信 `TEXT` 输出 `\text{...}`；
+  `matrix_grid` 训练监督和 decoder 已按 row/cell/content 三层语义修正。
+  失败分桶只用于验收归因，不作为实现顺序来源。focused 结构测试 82 passed，
+  TinyBDMath 主线 129 passed。
+- 已修复 decoder 一个具体 bug：分数/overline 等 rule structure 已消费全部
+  glyph 后，不再回退遍历所有 glyph 并误报 `decoder_no_root`/`decoder_cycle`。
 
 正式训练前提：
 
@@ -291,6 +330,12 @@ candidate-only 输出；结构缺失或低置信时 abstain。
 - `tools/formula_multiround_pipeline.py` 支持 `--tinybdmath-graph-parser-model`。
 - `tools/full_software_validation.py` 默认寻找
   `test_artifacts/tinybdmath_graph_parser_m1/tinybdmath_graph_parser_model.json`。
+- `src/core/tinybdmath_constrained_decode.py` 现在输出结构约束 status、blockers、
+  coverage、relation schema 统计、canonical CSLT、n-best CSLT。
+- `decode_latex_candidate()` 现在输出 `abstain`、`layout_status`、
+  `layout_confidence`、`layout_verification`、rank-1/n-best LaTeX candidates；
+  `tools/tinybdmath_eval_decoded_latex.py` 输出 `layout_gate` 和 n-best oracle
+  审计指标。
 
 ## 7. 环境检查命令
 
@@ -348,8 +393,12 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
   tests/test_tinybdmath_alignment_audit.py `
   tests/test_tinybdmath_graph_parser.py `
   tests/test_tinybdmath_latex_decoder.py `
+  tests/test_tinybdmath_layout_verifier.py `
+  tests/test_tinybdmath_constrained_decode.py `
   tests/test_tinybdmath_eval_decoded_latex.py `
   tests/test_tinybdmath_candidate_service.py `
+  tests/test_tinybdmath_no_hardcoded_patterns.py `
+  tests/test_tinybdmath_structure_scope_audit.py `
   tests/test_formula_multiround_pipeline.py `
   tests/test_full_software_validation.py -q
 ```
@@ -364,12 +413,36 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
   tests/test_tinybdmath_target_tree.py `
   tests/test_tinybdmath_graph_parser.py `
   tests/test_tinybdmath_latex_decoder.py `
+  tests/test_tinybdmath_layout_verifier.py `
+  tests/test_tinybdmath_constrained_decode.py `
+  tests/test_tinybdmath_eval_decoded_latex.py `
   tests/test_tinybdmath_candidate_service.py `
+  tests/test_tinybdmath_no_hardcoded_patterns.py `
+  tests/test_tinybdmath_structure_scope_audit.py `
   tests/test_formula_multiround_pipeline.py `
   tests/test_full_software_validation.py -q
 ```
 
-结果：57 passed。
+结果：116 passed。
+
+接续故障点补充验证：
+
+```powershell
+C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
+  tests/test_tinybdmath_latex_decoder.py `
+  tests/test_tinybdmath_eval_decoded_latex.py `
+  tests/test_tinybdmath_graph_parser.py `
+  tests/test_tinybdmath_constrained_decode.py `
+  tests/test_tinybdmath_layout_verifier.py `
+  tests/test_tinybdmath_candidate_service.py `
+  tests/test_tinybdmath_no_hardcoded_patterns.py -q
+```
+
+结果：42 passed。814 行 duplicate-evidence 审计输出：
+rank-1 exact/near=0.515971/0.687961，n-best oracle
+exact/near=0.527027/0.787469，average_candidate_count=2.125307，
+manual recommendation exact/near=0.522113/0.686732，
+auto_accept_allowed_count=0。
 
 ## 9. 提交前检查
 

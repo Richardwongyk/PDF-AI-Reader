@@ -37,6 +37,8 @@ CSLTEdgeRelation = Literal[
     "base",
     "sup",
     "sub",
+    "pre_sup",
+    "pre_sub",
     "over",
     "under",
     "numerator",
@@ -280,7 +282,16 @@ def _serialize_node(
         base = _serialize_first(outgoing, "base", node_by_id, edges, visited)
         sub = _serialize_first(outgoing, "sub", node_by_id, edges, visited)
         sup = _serialize_first(outgoing, "sup", node_by_id, edges, visited)
+        pre_sub = _serialize_first(outgoing, "pre_sub", node_by_id, edges, visited)
+        pre_sup = _serialize_first(outgoing, "pre_sup", node_by_id, edges, visited)
         result = base
+        if pre_sub or pre_sup:
+            result = "{}"
+            if pre_sub:
+                result += "_{" + pre_sub + "}"
+            if pre_sup:
+                result += "^{" + pre_sup + "}"
+            result += base
         if sub:
             result += "_{" + sub + "}"
         if sup:

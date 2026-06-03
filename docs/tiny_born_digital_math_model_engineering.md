@@ -274,13 +274,21 @@ decoder 里写补丁。
 1. 给每个 PDF 小块补 node mask 标签：保留、丢弃、结构线条、噪声。
    第一版先覆盖语义节点、空白/间距、不确定。
 2. 节点头输出已接到 r2a evidence 和解码前过滤。
+3. relation labels 已接住 `UNDER`、`OVER`、`ACCENT_BASE`，Graph Parser
+   训练样本可消费上下极限、根号主体、围栏、矩阵行/单元格、over/under line
+   vector 这类标准结构监督。
+4. alignment structure labels 已覆盖 under/over、accent、fence、matrix、
+   enclosure 和 equation tag 证据；这些字段仍是训练/审计监督，不是 decoder
+   补丁。
+5. 普通 text run 和 operator text run 已生成组边界证据，Graph Parser 训练样本
+   可消费 `TEXT_RUN_NEXT`，operator text run 的节点标签进入 `OPERATOR`。
 
 仍需完成：
 
-2. 给 group/text/operator 补组边界标签。
-3. 给 vector 补通用横线/竖线标签，并把 fraction、overline、matrix/fence
-   boundary、radical body 等语义结构放进 relation/group 监督，而不是 node label。
-4. 对复合 glyph 保留证据和 soft label，不写固定拆分表。
+1. 给不可见 group、matrix/fence boundary 等补更完整的组边界标签。
+2. 给 vector 补更完整的通用横线/竖线标签，并把尚未覆盖的结构线条角色放进
+   relation/group 监督，而不是 node label。
+3. 对复合 glyph 保留证据和 soft label，不写固定拆分表。
 
 验收：
 
@@ -292,13 +300,51 @@ decoder 里写补丁。
 
 目标：让模型直接输出公式结构。
 
+2026-06-03 当前状态：
+
+- 已完成 2000 行短训 smoke，临时目录
+  `test_artifacts/tinybdmath_graph_parser_smoke_current_20260603/`，不提交。
+- relation validation accuracy=0.818262，positive_recall=0.405096。
+- node validation accuracy=0.761431；OPERATOR recall=0.946903，
+  precision=0.550600；TEXT recall=0.900000，precision=0.095745。
+- 公式级 decoded eval：2000 行 exact=0.569500，near=0.710500，
+  weak=0.924500，average_similarity=0.866203。
+- 结论：当前结构标签短训已超过旧 direct eval 的 exact/near 基线，但 TEXT
+  precision 和 decoder warnings 仍是主要风险；不能 accepted，只能作为下一轮
+  verifier 和模型校准基线。
+- 2026-06-03 已接入 layout verifier M0；同一 2000 行候选的总体 exact/near
+  保持 0.569500/0.710500，gate 后 pass=557、review=935、abstain=508，
+  final_abstain_rate=0.254000，未拒绝子集 exact=0.726542、near=0.819035。
+  该结果只证明 candidate gate 有用，不代表 accepted 精度达标。
+- 2026-06-03 已新增 constrained decode M0，只做结构 schema/缺失节点/cycle/
+  coverage/blocker 检查，不生成 LaTeX 模板；接入后同一 2000 行 gate 为
+  pass=557、review=859、abstain=584，final_abstain_rate=0.292000，
+  未拒绝子集 exact=0.748588、near=0.831215。
+- 2026-06-03 已接入 n-best CSLT/LaTeX candidate evidence。relation
+  alternatives 和无环投影候选只作为 candidate evidence；rank-1 保持 selected
+  graph，不自动 accepted。接续会话修复了重复 LaTeX 证据合并：同样 LaTeX
+  的更干净结构会写进 `alternative_structure_evidence`，但 selected graph
+  不会作为自身替代证据重复写入。814 行审计保持 rank-1 exact/near=
+  0.515971/0.687961，n-best oracle exact/near=0.527027/0.787469。
+- 2026-06-03 已继续补通用结构序列化，不按样本词表或公式内容分支：
+  fence、text run、matrix row/cell、accent base 关系进入 decoder/verifier。
+  text run 只有在 node head 高置信 `TEXT`/`OPERATOR` 证据下才输出
+  `\text{...}`。814 行 gated-text 审计：rank-1 exact/near=
+  0.531941/0.680590，n-best oracle exact/near=0.540541/0.766585。
+- 2026-06-03 已按 M0/M1 结构清单继续补齐支持，失败分桶只作为验收归因：
+  左附着/`prescript` 通用关系、`radical_index`/nth-root index、
+  operator text run 和 `matrix_grid` row/cell/content 三层语义均已进入
+  target/alignment/Graph Parser/decoder/verifier 的对应闭环。decoder 只消费
+  模型或 target-derived 结构关系；不按公式内容、函数名或样本词表分支。
+  focused 结构测试 82 passed，TinyBDMath 主线 129 passed。
+
 任务：
 
-1. 用 2000 行先训练 smoke，不要一上来全量长训。
-2. 再扩大到全量训练。
-3. 每轮输出公式级准确率，不只看局部关系分数。
-4. 与 2026-06-01 direct eval 数字做历史对照。
-5. 报告必须同时列出节点头、关系头、公式级 exact/near、拒绝率。
+1. 继续按 `docs/tinybdmath_ai_math_latex_structure_scope.md` 的 M0/M1 结构清单
+   补齐已有真实证据入口的结构；失败分桶只用于验收归因和报告。
+2. 每轮输出公式级准确率，不只看局部关系分数。
+3. 与 2026-06-01 direct eval 数字做历史对照。
+4. 报告必须同时列出节点头、关系头、公式级 exact/near、拒绝率。
 
 验收：
 
@@ -313,12 +359,27 @@ decoder 里写补丁。
 
 目标：把模型输出变成可用候选。
 
-任务：
+已完成：
 
-1. 对模型输出做通用结构合法性检查。
-2. 生成多个候选。
-3. 用 verifier 检查符号覆盖、bbox 覆盖、布局一致性、置信度。
-4. 低置信时明确拒绝。
+1. 新增 `src/core/tinybdmath_constrained_decode.py`，只验证模型结构图，不补 LaTeX。
+2. 新增 `src/core/tinybdmath_layout_verifier.py`。
+3. decoded candidate 输出 `abstain`、`layout_status`、`layout_confidence`
+   和 `layout_verification`。
+4. 修复 rule structure 已消费全部 glyph 后又回退遍历导致的
+   `decoder_no_root` / `decoder_cycle` 误报。
+5. 评估报告新增 `layout_gate`，用于跟踪 pass/review/abstain 和未拒绝子集质量。
+6. r2a recognition score 使用 verifier `layout_confidence`，仍 candidate-only。
+7. n-best CSLT/LaTeX candidates 已写入 evidence；重复 LaTeX 的替代结构证据
+   合并到同一 candidate，供审核和后续 verifier 排序使用。
+8. fence、text/operator run、matrix row/cell/content、left attachment、
+   radical index、accent base 的通用关系序列化已接入；
+   仍保持 candidate-only，不写 accepted。
+
+仍需完成：
+
+1. 继续校准 n-best 排序、TEXT precision、decoder warning 和 verifier 阈值。
+2. 扩大 verifier 对符号覆盖、bbox 覆盖、布局一致性和置信度的检查。
+3. 低置信时明确拒绝，accepted gate 仍保持关闭或极保守。
 
 验收：
 

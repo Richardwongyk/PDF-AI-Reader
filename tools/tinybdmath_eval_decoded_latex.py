@@ -59,28 +59,91 @@ def _decode_rows(
     for candidate in candidates:
         row_id = str(candidate.get("row_id", ""))
         graph_row = rows_by_id.get(row_id, {})
-        decoded = decode_latex_candidate(
-            list(graph_row.get("glyph_nodes", []) or graph_row.get("glyphs", []) or []),
-            candidate,
-            vectors=list(graph_row.get("vector_nodes", []) or graph_row.get("vectors", []) or []),
-            fallback_text=_fallback_text(graph_row),
-        ).to_json()
-        label = str(graph_row.get("label_latex", "") or "")
-        similarity = _similarity(label, str(decoded.get("latex", "") or ""))
-        warnings.update(str(item) for item in decoded.get("warnings", []) if item)
-        decoded_rows.append(
+        decoded_row = _decoded_eval_row(row_id, graph_row, candidate)
+        warnings.update(str(item) for item in decoded_row.get("warnings", []) if item)
+        decoded_rows.append(decoded_row)
+    return decoded_rows, warnings
+
+
+def _decoded_eval_row(
+    row_id: str,
+    graph_row: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    decoded = decode_latex_candidate(
+        list(graph_row.get("glyph_nodes", []) or graph_row.get("glyphs", []) or []),
+        candidate,
+        vectors=list(graph_row.get("vector_nodes", []) or graph_row.get("vectors", []) or []),
+        fallback_text=_fallback_text(graph_row),
+    ).to_json()
+    label = str(graph_row.get("label_latex", "") or "")
+    similarity = _similarity(label, str(decoded.get("latex", "") or ""))
+    latex_candidates = _latex_candidate_eval_rows(label, decoded)
+    n_best_similarity = max(
+        [similarity] + [float(item.get("similarity", 0.0) or 0.0) for item in latex_candidates]
+    )
+    recommendation = _manual_recommendation_eval_row(label, decoded.get("manual_review_recommendation", {}))
+    return {
+        "row_id": row_id,
+        "kind": str(graph_row.get("kind", "") or candidate.get("kind", "")),
+        "label_latex": label,
+        "decoded_latex": str(decoded.get("latex", "") or ""),
+        "similarity": round(similarity, 6),
+        "n_best_similarity": round(n_best_similarity, 6),
+        "manual_recommendation_similarity": float(recommendation.get("similarity", 0.0) or 0.0),
+        "decoded_confidence": float(decoded.get("confidence", 0.0) or 0.0),
+        "candidate_abstain": bool(candidate.get("abstain")),
+        "decoded_abstain": bool(decoded.get("abstain")),
+        "final_abstain": bool(decoded.get("abstain")),
+        "layout_status": str(decoded.get("layout_status", "") or "unknown"),
+        "layout_confidence": float(decoded.get("layout_confidence", 0.0) or 0.0),
+        "layout_warnings": list(decoded.get("layout_warnings", []) or []),
+        "latex_candidates": latex_candidates,
+        "manual_review_recommendation": recommendation,
+        "warnings": list(decoded.get("warnings", []) or []),
+    }
+
+
+def _latex_candidate_eval_rows(label: str, decoded: dict[str, Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in decoded.get("latex_candidates", []) or []:
+        if not isinstance(item, dict):
+            continue
+        latex = str(item.get("latex", "") or "")
+        if not latex.strip() or latex in seen:
+            continue
+        seen.add(latex)
+        output.append(
             {
-                "row_id": row_id,
-                "kind": str(graph_row.get("kind", "") or candidate.get("kind", "")),
-                "label_latex": label,
-                "decoded_latex": str(decoded.get("latex", "") or ""),
-                "similarity": round(similarity, 6),
-                "decoded_confidence": float(decoded.get("confidence", 0.0) or 0.0),
-                "candidate_abstain": bool(candidate.get("abstain")),
-                "warnings": list(decoded.get("warnings", []) or []),
+                "rank": int(item.get("rank", len(output) + 1) or len(output) + 1),
+                "latex": latex,
+                "similarity": round(_similarity(label, latex), 6),
+                "confidence": float(item.get("confidence", 0.0) or 0.0),
+                "source": str(item.get("source", "") or ""),
+                "candidate_only": bool(item.get("candidate_only", True)),
+                "accepted": bool(item.get("accepted", False)),
             }
         )
-    return decoded_rows, warnings
+    return sorted(output, key=lambda item: int(item["rank"]))
+
+
+def _manual_recommendation_eval_row(label: str, recommendation: object) -> dict[str, Any]:
+    if not isinstance(recommendation, dict):
+        recommendation = {}
+    latex = str(recommendation.get("latex", "") or "")
+    return {
+        "latex": latex,
+        "similarity": round(_similarity(label, latex), 6) if latex.strip() else 0.0,
+        "recommended_rank": int(recommendation.get("recommended_rank", 0) or 0),
+        "confidence": float(recommendation.get("confidence", 0.0) or 0.0),
+        "layout_status": str(recommendation.get("layout_status", "") or ""),
+        "layout_confidence": float(recommendation.get("layout_confidence", 0.0) or 0.0),
+        "selection_blockers": list(recommendation.get("selection_blockers", []) or []),
+        "candidate_only": bool(recommendation.get("candidate_only", True)),
+        "accepted": bool(recommendation.get("accepted", False)),
+        "auto_accept_allowed": bool(recommendation.get("auto_accept_allowed", False)),
+    }
 
 
 def _decode_rows_stream(
@@ -102,27 +165,9 @@ def _decode_rows_stream(
             if str(graph_row.get("row_id", "")) != row_id:
                 graph_row = {}
                 warnings.update(["stream_row_id_mismatch"])
-            decoded = decode_latex_candidate(
-                list(graph_row.get("glyph_nodes", []) or graph_row.get("glyphs", []) or []),
-                candidate,
-                vectors=list(graph_row.get("vector_nodes", []) or graph_row.get("vectors", []) or []),
-                fallback_text=_fallback_text(graph_row),
-            ).to_json()
-            label = str(graph_row.get("label_latex", "") or "")
-            similarity = _similarity(label, str(decoded.get("latex", "") or ""))
-            warnings.update(str(item) for item in decoded.get("warnings", []) if item)
-            decoded_rows.append(
-                {
-                    "row_id": row_id,
-                    "kind": str(graph_row.get("kind", "") or candidate.get("kind", "")),
-                    "label_latex": label,
-                    "decoded_latex": str(decoded.get("latex", "") or ""),
-                    "similarity": round(similarity, 6),
-                    "decoded_confidence": float(decoded.get("confidence", 0.0) or 0.0),
-                    "candidate_abstain": bool(candidate.get("abstain")),
-                    "warnings": list(decoded.get("warnings", []) or []),
-                }
-            )
+            decoded_row = _decoded_eval_row(row_id, graph_row, candidate)
+            warnings.update(str(item) for item in decoded_row.get("warnings", []) if item)
+            decoded_rows.append(decoded_row)
     return decoded_rows, warnings
 
 
@@ -132,6 +177,9 @@ def _build_report(decoded_rows: list[dict[str, Any]], warnings: Counter[str], *,
         "schema_version": "tinybdmath_decoded_latex_eval_v1",
         "rows": len(decoded_rows),
         "metrics": metrics,
+        "n_best_oracle_metrics": _n_best_oracle_metrics(decoded_rows),
+        "manual_recommendation_metrics": _manual_recommendation_metrics(decoded_rows),
+        "layout_gate": _layout_gate_metrics(decoded_rows),
         "warning_counts": dict(sorted(warnings.items())),
         "streaming": bool(streaming),
         "sample_low_similarity": [
@@ -140,6 +188,12 @@ def _build_report(decoded_rows: list[dict[str, Any]], warnings: Counter[str], *,
                 "label_latex": row["label_latex"],
                 "decoded_latex": row["decoded_latex"],
                 "similarity": row["similarity"],
+                "n_best_similarity": row.get("n_best_similarity", row["similarity"]),
+                "manual_recommendation_similarity": row.get("manual_recommendation_similarity", row["similarity"]),
+                "layout_status": row.get("layout_status", "unknown"),
+                "final_abstain": bool(row.get("final_abstain")),
+                "latex_candidates": row.get("latex_candidates", [])[:3],
+                "manual_review_recommendation": row.get("manual_review_recommendation", {}),
                 "warnings": row["warnings"][:8],
             }
             for row in sorted(decoded_rows, key=lambda item: float(item["similarity"]))[:10]
@@ -220,6 +274,73 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "weak_match_rate": round(sum(1 for value in scored if value >= 0.55) / len(scored), 6),
         "average_similarity": round(sum(scored) / len(scored), 6),
         "decoded_nonempty_rate": round(sum(1 for row in rows if str(row.get("decoded_latex", "") or "").strip()) / len(rows), 6),
+    }
+
+
+def _n_best_oracle_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    scored = [float(row.get("n_best_similarity", row.get("similarity", 0.0)) or 0.0) for row in rows]
+    candidate_counts = [len(row.get("latex_candidates", []) or []) for row in rows]
+    if not scored:
+        return {
+            "oracle_exact_match_rate": 0.0,
+            "oracle_near_match_rate": 0.0,
+            "oracle_average_similarity": 0.0,
+            "average_candidate_count": 0.0,
+        }
+    return {
+        "oracle_exact_match_rate": round(sum(1 for value in scored if value >= 0.98) / len(scored), 6),
+        "oracle_near_match_rate": round(sum(1 for value in scored if value >= 0.80) / len(scored), 6),
+        "oracle_average_similarity": round(sum(scored) / len(scored), 6),
+        "average_candidate_count": round(sum(candidate_counts) / len(candidate_counts), 6),
+    }
+
+
+def _manual_recommendation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    scored = [float(row.get("manual_recommendation_similarity", row.get("similarity", 0.0)) or 0.0) for row in rows]
+    recommendations = [
+        row.get("manual_review_recommendation", {})
+        for row in rows
+        if isinstance(row.get("manual_review_recommendation", {}), dict)
+    ]
+    if not scored:
+        return {
+            "recommendation_exact_match_rate": 0.0,
+            "recommendation_near_match_rate": 0.0,
+            "recommendation_average_similarity": 0.0,
+            "non_rank_one_recommendation_rate": 0.0,
+            "auto_accept_allowed_count": 0,
+        }
+    non_rank_one = sum(1 for item in recommendations if int(item.get("recommended_rank", 1) or 1) not in {0, 1})
+    auto_accept_allowed = sum(1 for item in recommendations if bool(item.get("auto_accept_allowed", False)))
+    return {
+        "recommendation_exact_match_rate": round(sum(1 for value in scored if value >= 0.98) / len(scored), 6),
+        "recommendation_near_match_rate": round(sum(1 for value in scored if value >= 0.80) / len(scored), 6),
+        "recommendation_average_similarity": round(sum(scored) / len(scored), 6),
+        "non_rank_one_recommendation_rate": round(non_rank_one / len(scored), 6),
+        "auto_accept_allowed_count": int(auto_accept_allowed),
+    }
+
+
+def _layout_gate_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "status_counts": {},
+            "final_abstain_rate": 0.0,
+            "pass_rate": 0.0,
+            "review_rate": 0.0,
+            "pass_or_review_exact_match_rate": 0.0,
+            "pass_or_review_near_match_rate": 0.0,
+        }
+    statuses = Counter(str(row.get("layout_status", "") or "unknown") for row in rows)
+    usable = [row for row in rows if not bool(row.get("final_abstain"))]
+    usable_metrics = _metrics(usable)
+    return {
+        "status_counts": dict(sorted(statuses.items())),
+        "final_abstain_rate": round(sum(1 for row in rows if bool(row.get("final_abstain"))) / len(rows), 6),
+        "pass_rate": round(statuses.get("pass", 0) / len(rows), 6),
+        "review_rate": round(statuses.get("review", 0) / len(rows), 6),
+        "pass_or_review_exact_match_rate": usable_metrics["exact_match_rate"],
+        "pass_or_review_near_match_rate": usable_metrics["near_match_rate"],
     }
 
 

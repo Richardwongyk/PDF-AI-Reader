@@ -17,18 +17,23 @@ import unicodedata
 
 
 GRAPH_PARSER_ARTIFACT_VERSION = "tinybdmath_graph_parser_m1_json_v1"
-GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v2"
+GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v4"
 
 GRAPH_PARSER_RELATIONS = (
     "NONE",
     "NEXT",
     "SUB",
     "SUP",
+    "PRE_SUB",
+    "PRE_SUP",
     "NUMERATOR",
     "DENOMINATOR",
     "RADICAL_BODY",
     "RADICAL_INDEX",
     "BASE",
+    "UNDER",
+    "OVER",
+    "ACCENT_BASE",
     "CHILD",
     "FENCE_BODY",
     "FENCE_OPEN",
@@ -36,7 +41,12 @@ GRAPH_PARSER_RELATIONS = (
     "MATRIX_ROW",
     "MATRIX_CELL",
     "CELL_CONTENT",
+    "TEXT_RUN_NEXT",
+    "ENCLOSURE_BODY",
+    "EQUATION_TAG",
     "FRACTION_BAR",
+    "OVERLINE",
+    "UNDERLINE",
     "ABOVE",
     "BELOW",
 )
@@ -59,6 +69,12 @@ GRAPH_PARSER_FEATURES = (
     "target_is_math",
     "source_is_rule",
     "target_is_rule",
+    "source_is_horizontal_rule",
+    "source_is_vertical_rule",
+    "target_is_horizontal_rule",
+    "target_is_vertical_rule",
+    "source_aspect_ratio",
+    "target_aspect_ratio",
     "same_font",
     "source_index",
     "target_index",
@@ -72,6 +88,7 @@ GRAPH_PARSER_NODE_LABELS = (
     "SPACING",
     "HORIZONTAL_RULE",
     "VERTICAL_RULE",
+    "EQUATION_TAG",
 )
 GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD = 0.80
 GRAPH_PARSER_OPERATOR_KATEX_TYPES = (
@@ -107,6 +124,9 @@ GRAPH_PARSER_NODE_FEATURES = (
     "text_has_mark",
     "is_math",
     "is_rule",
+    "is_horizontal_rule",
+    "is_vertical_rule",
+    "rule_aspect_ratio",
     "font_size",
     "font_size_ratio",
     "order_index",
@@ -215,6 +235,7 @@ class TinyBDGraphParser:
         nodes = [node for node in all_nodes if node.get("node_type") == "vector" or str(node.get("text", "") or "").strip()]
         pairs = candidate_pairs(nodes)
         predictions: list[TinyBDGraphParserPrediction] = []
+        relation_alternatives: list[dict[str, Any]] = []
         cutoff = self.artifact.threshold if threshold is None else float(threshold)
         for source, target in pairs:
             features = graph_parser_features(source, target, nodes)
@@ -226,6 +247,16 @@ class TinyBDGraphParser:
             confidence = float(probabilities[best_index])
             if relation == "NONE" or confidence < cutoff:
                 continue
+            relation_alternatives.append(
+                {
+                    "source": str(source["node_id"]),
+                    "target": str(target["node_id"]),
+                    "alternatives": _top_relation_alternatives(
+                        probabilities,
+                        self.artifact.relation_labels,
+                    ),
+                }
+            )
             predictions.append(
                 TinyBDGraphParserPrediction(
                     source=str(source["node_id"]),
@@ -245,6 +276,10 @@ class TinyBDGraphParser:
             "node_predictions": node_predictions,
             "node_filter_threshold": float(self.artifact.node_filter_threshold),
             "predictions": [item.to_json() for item in sorted(predictions, key=lambda item: (item.source, item.target, item.relation))],
+            "relation_alternatives": sorted(
+                relation_alternatives,
+                key=lambda item: (str(item.get("source", "")), str(item.get("target", ""))),
+            ),
             "candidate_only": True,
         }
 
@@ -328,7 +363,7 @@ def _feed_forward_probabilities(
         float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
         for row, bias in zip(output_weights, output_bias)
     ]
-    return _softmax(logits)
+    return _normalized_exponential_weights(logits)
 
 
 def graph_nodes(row: dict[str, Any], *, include_blank: bool = False) -> list[dict[str, Any]]:
@@ -396,6 +431,12 @@ def graph_parser_features(source: dict[str, Any], target: dict[str, Any], nodes:
         "target_is_math": 1.0 if target.get("is_math_font") else 0.0,
         "source_is_rule": 1.0 if source.get("node_type") == "vector" else 0.0,
         "target_is_rule": 1.0 if target.get("node_type") == "vector" else 0.0,
+        "source_is_horizontal_rule": 1.0 if _is_horizontal_rule_node(source) else 0.0,
+        "source_is_vertical_rule": 1.0 if _is_vertical_rule_node(source) else 0.0,
+        "target_is_horizontal_rule": 1.0 if _is_horizontal_rule_node(target) else 0.0,
+        "target_is_vertical_rule": 1.0 if _is_vertical_rule_node(target) else 0.0,
+        "source_aspect_ratio": min(1000.0, sw / max(sh, 1e-6)),
+        "target_aspect_ratio": min(1000.0, tw / max(th, 1e-6)),
         "same_font": 1.0 if str(source.get("font", "")) == str(target.get("font", "")) else 0.0,
         "source_index": source_index / max(1.0, len(nodes) - 1),
         "target_index": target_index / max(1.0, len(nodes) - 1),
@@ -440,6 +481,9 @@ def graph_parser_node_features(node: dict[str, Any], nodes: list[dict[str, Any]]
         "text_has_mark": flags["mark"],
         "is_math": 1.0 if node.get("is_math_font") else 0.0,
         "is_rule": 1.0 if node.get("node_type") == "vector" else 0.0,
+        "is_horizontal_rule": 1.0 if _is_horizontal_rule_node(node) else 0.0,
+        "is_vertical_rule": 1.0 if _is_vertical_rule_node(node) else 0.0,
+        "rule_aspect_ratio": min(1000.0, width / max(height, 1e-6)) if node.get("node_type") == "vector" else 0.0,
         "font_size": font_size,
         "font_size_ratio": font_size / max(mean_size, 1e-6) if font_size > 0 and mean_size > 0 else 0.0,
         "order_index": order_index / max(1.0, len(nodes) - 1),
@@ -479,7 +523,7 @@ def training_samples_from_rows(
             target = str(label.get("target", "") or "")
             confidence = float(label.get("confidence", 0.0) or 0.0)
             current = positive.get((source, target))
-            if current is None or confidence > current[1]:
+            if current is None or confidence >= current[1]:
                 positive[(source, target)] = (relation, confidence)
         for source, target in candidate_pairs(nodes):
             key = (str(source["node_id"]), str(target["node_id"]))
@@ -558,6 +602,8 @@ def _node_label_from_alignment(alignment: dict[str, Any]) -> str:
     katex_type = str(attrs.get("katex_type", "") or "")
     family = str(attrs.get("family", "") or "")
     if target_node_type == "text_run":
+        if bool(attrs.get("operator")):
+            return "OPERATOR"
         return "TEXT"
     if target_node_type == "symbol" and (
         katex_type in GRAPH_PARSER_OPERATOR_KATEX_TYPES or family in GRAPH_PARSER_OPERATOR_KATEX_TYPES
@@ -572,9 +618,33 @@ def _generic_rule_node_label(node: dict[str, Any]) -> tuple[str, float]:
     height = max(0.0, float(y1) - float(y0))
     if width <= 0.0 and height <= 0.0:
         return "UNKNOWN", 0.25
-    if width >= height:
+    if _is_horizontal_rule_node(node):
         return "HORIZONTAL_RULE", 1.0
-    return "VERTICAL_RULE", 1.0
+    if _is_vertical_rule_node(node):
+        return "VERTICAL_RULE", 1.0
+    return ("HORIZONTAL_RULE", 0.75) if width >= height else ("VERTICAL_RULE", 0.75)
+
+
+def _is_horizontal_rule_node(node: dict[str, Any]) -> bool:
+    if node.get("node_type") != "vector":
+        return False
+    if bool(node.get("is_horizontal_rule_candidate")):
+        return True
+    x0, y0, x1, y1 = node.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    width = max(0.0, float(x1) - float(x0))
+    height = max(0.0, float(y1) - float(y0))
+    return width / max(height, 1e-6) >= 6.0 and height <= max(width * 0.08, 2.0)
+
+
+def _is_vertical_rule_node(node: dict[str, Any]) -> bool:
+    if node.get("node_type") != "vector":
+        return False
+    if bool(node.get("is_vertical_rule_candidate")):
+        return True
+    x0, y0, x1, y1 = node.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    width = max(0.0, float(x1) - float(x0))
+    height = max(0.0, float(y1) - float(y0))
+    return height / max(width, 1e-6) >= 6.0 and width <= max(height * 0.08, 2.0)
 
 
 def _structure_relation_labels_from_structure(
@@ -582,26 +652,248 @@ def _structure_relation_labels_from_structure(
     alignment: dict[str, Any],
 ) -> list[dict[str, Any]]:
     vectors = [node for node in nodes if node.get("node_type") == "vector"]
-    if not vectors:
-        return []
     node_by_id = {str(node.get("node_id", "") or ""): node for node in nodes}
     output: list[dict[str, Any]] = []
+    output.extend(_matrix_grid_relations_from_structure(node_by_id, alignment.get("structure_labels", []) or []))
     for item in alignment.get("structure_labels", []) or []:
-        if not isinstance(item, dict) or str(item.get("role", "") or "") != "TARGET_FRACTION_SEPARATOR_EVIDENCE":
+        if not isinstance(item, dict):
             continue
-        above_nodes = _nodes_for_ids(node_by_id, item.get("above_pdf_node_ids", []))
-        below_nodes = _nodes_for_ids(node_by_id, item.get("below_pdf_node_ids", []))
-        scored = [(_fraction_separator_evidence_score(vector, above_nodes, below_nodes), vector) for vector in vectors]
-        score, vector = max(scored, key=lambda pair: (pair[0], str(pair[1].get("node_id", "") or "")), default=(0.0, {}))
-        if score < 0.45:
+        role = str(item.get("role", "") or "")
+        if role in {"TARGET_TEXT_RUN_EVIDENCE", "TARGET_OPERATOR_TEXT_RUN_EVIDENCE"}:
+            text_nodes = _nodes_for_ids(node_by_id, item.get("text_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for previous, current in zip(text_nodes, text_nodes[1:]):
+                output.append(
+                    _training_relation(
+                        str(previous.get("node_id", "") or ""),
+                        str(current.get("node_id", "") or ""),
+                        "TEXT_RUN_NEXT",
+                        confidence,
+                    )
+                )
+        elif role == "TARGET_RADICAL_MARK_EVIDENCE":
+            mark_nodes = _nodes_for_ids(node_by_id, item.get("mark_pdf_node_ids", []))
+            body_nodes = _nodes_for_ids(node_by_id, item.get("body_pdf_node_ids", []))
+            index_nodes = _nodes_for_ids(node_by_id, item.get("index_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for mark in mark_nodes:
+                for body in body_nodes:
+                    output.append(
+                        _training_relation(
+                            str(mark.get("node_id", "") or ""),
+                            str(body.get("node_id", "") or ""),
+                            "RADICAL_BODY",
+                            confidence,
+                        )
+                    )
+                for index in index_nodes:
+                    output.append(
+                        _training_relation(
+                            str(mark.get("node_id", "") or ""),
+                            str(index.get("node_id", "") or ""),
+                            "RADICAL_INDEX",
+                            confidence,
+                        )
+                    )
+        elif role == "TARGET_UNDER_OVER_EVIDENCE":
+            base_nodes = _nodes_for_ids(node_by_id, item.get("base_pdf_node_ids", []))
+            under_nodes = _nodes_for_ids(node_by_id, item.get("under_pdf_node_ids", []))
+            over_nodes = _nodes_for_ids(node_by_id, item.get("over_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for base in base_nodes[:1]:
+                for under in under_nodes:
+                    output.append(
+                        _training_relation(
+                            str(base.get("node_id", "") or ""),
+                            str(under.get("node_id", "") or ""),
+                            "UNDER",
+                            confidence,
+                        )
+                    )
+                for over in over_nodes:
+                    output.append(
+                        _training_relation(
+                            str(base.get("node_id", "") or ""),
+                            str(over.get("node_id", "") or ""),
+                            "OVER",
+                            confidence,
+                        )
+                    )
+        elif role == "TARGET_LEFT_ATTACHMENT_EVIDENCE":
+            base_nodes = _nodes_for_ids(node_by_id, item.get("base_pdf_node_ids", []))
+            pre_sub_nodes = _nodes_for_ids(node_by_id, item.get("pre_sub_pdf_node_ids", []))
+            pre_sup_nodes = _nodes_for_ids(node_by_id, item.get("pre_sup_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for base in base_nodes[:1]:
+                for pre_sub in pre_sub_nodes:
+                    output.append(
+                        _training_relation(
+                            str(base.get("node_id", "") or ""),
+                            str(pre_sub.get("node_id", "") or ""),
+                            "PRE_SUB",
+                            confidence,
+                        )
+                    )
+                for pre_sup in pre_sup_nodes:
+                    output.append(
+                        _training_relation(
+                            str(base.get("node_id", "") or ""),
+                            str(pre_sup.get("node_id", "") or ""),
+                            "PRE_SUP",
+                            confidence,
+                        )
+                    )
+        elif role == "TARGET_FENCE_EVIDENCE":
+            body_nodes = _nodes_for_ids(node_by_id, item.get("body_pdf_node_ids", []))
+            open_nodes = _nodes_for_ids(node_by_id, item.get("open_pdf_node_ids", []))
+            close_nodes = _nodes_for_ids(node_by_id, item.get("close_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for body_anchor in body_nodes[:1]:
+                for open_node in open_nodes:
+                    output.append(
+                        _training_relation(
+                            str(body_anchor.get("node_id", "") or ""),
+                            str(open_node.get("node_id", "") or ""),
+                            "FENCE_OPEN",
+                            confidence,
+                        )
+                    )
+                    output.append(
+                        _training_relation(
+                            str(open_node.get("node_id", "") or ""),
+                            str(body_anchor.get("node_id", "") or ""),
+                            "FENCE_BODY",
+                            confidence,
+                        )
+                    )
+                for close_node in close_nodes:
+                    output.append(
+                        _training_relation(
+                            str(body_anchor.get("node_id", "") or ""),
+                            str(close_node.get("node_id", "") or ""),
+                            "FENCE_CLOSE",
+                            confidence,
+                        )
+                    )
+                    output.append(
+                        _training_relation(
+                            str(close_node.get("node_id", "") or ""),
+                            str(body_anchor.get("node_id", "") or ""),
+                            "FENCE_BODY",
+                            confidence,
+                        )
+                    )
+        elif role == "TARGET_MATRIX_CELL_EVIDENCE":
+            cell_nodes = _nodes_for_ids(node_by_id, item.get("cell_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for cell_anchor in cell_nodes[:1]:
+                for cell_member in cell_nodes[1:]:
+                    output.append(
+                        _training_relation(
+                            str(cell_anchor.get("node_id", "") or ""),
+                            str(cell_member.get("node_id", "") or ""),
+                            "CELL_CONTENT",
+                            confidence,
+                        )
+                    )
+        elif role == "TARGET_FRACTION_SEPARATOR_EVIDENCE":
+            if not vectors:
+                continue
+            above_nodes = _nodes_for_ids(node_by_id, item.get("above_pdf_node_ids", []))
+            below_nodes = _nodes_for_ids(node_by_id, item.get("below_pdf_node_ids", []))
+            scored = [(_fraction_separator_evidence_score(vector, above_nodes, below_nodes), vector) for vector in vectors]
+            score, vector = max(
+                scored,
+                key=lambda pair: (pair[0], str(pair[1].get("node_id", "") or "")),
+                default=(0.0, {}),
+            )
+            if score < 0.45:
+                continue
+            vector_id = str(vector.get("node_id", "") or "")
+            confidence = round(score * float(item.get("confidence", 1.0) or 1.0), 6)
+            output.append(_training_relation(vector_id, vector_id, "FRACTION_BAR", confidence))
+            for node in above_nodes:
+                output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), "ABOVE", confidence))
+            for node in below_nodes:
+                output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), "BELOW", confidence))
+        elif role == "TARGET_ACCENT_ANNOTATION_EVIDENCE":
+            if not vectors:
+                continue
+            base_nodes = _nodes_for_ids(node_by_id, item.get("base_pdf_node_ids", []))
+            position = str(item.get("annotation_position", "") or "")
+            relation = {"over": "OVERLINE", "under": "UNDERLINE"}.get(position)
+            if relation is None:
+                continue
+            scored = [(_annotation_rule_evidence_score(vector, base_nodes, position=position), vector) for vector in vectors]
+            score, vector = max(
+                scored,
+                key=lambda pair: (pair[0], str(pair[1].get("node_id", "") or "")),
+                default=(0.0, {}),
+            )
+            if score < 0.45:
+                continue
+            vector_id = str(vector.get("node_id", "") or "")
+            confidence = round(score * float(item.get("confidence", 1.0) or 1.0), 6)
+            output.append(_training_relation(vector_id, vector_id, relation, confidence))
+            child_relation = "BELOW" if position == "over" else "ABOVE"
+            for node in base_nodes:
+                output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), child_relation, confidence))
+    return output
+
+
+def _matrix_grid_relations_from_structure(
+    node_by_id: dict[str, dict[str, Any]],
+    structure_labels: list[Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    cells_by_row: dict[int, list[dict[str, Any]]] = {}
+    output: list[dict[str, Any]] = []
+    for item in structure_labels:
+        if not isinstance(item, dict):
             continue
-        vector_id = str(vector.get("node_id", "") or "")
-        confidence = round(score * float(item.get("confidence", 1.0) or 1.0), 6)
-        output.append(_training_relation(vector_id, vector_id, "FRACTION_BAR", confidence))
-        for node in above_nodes:
-            output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), "ABOVE", confidence))
-        for node in below_nodes:
-            output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), "BELOW", confidence))
+        role = str(item.get("role", "") or "")
+        if role == "TARGET_MATRIX_ROW_EVIDENCE":
+            row_nodes = _nodes_for_ids(node_by_id, item.get("row_pdf_node_ids", []))
+            if row_nodes:
+                rows.append(
+                    {
+                        "row_index": _int(item.get("row_index")),
+                        "anchor": row_nodes[0],
+                        "confidence": float(item.get("confidence", 1.0) or 1.0),
+                    }
+                )
+        elif role == "TARGET_MATRIX_CELL_EVIDENCE":
+            cell_nodes = _nodes_for_ids(node_by_id, item.get("cell_pdf_node_ids", []))
+            if cell_nodes:
+                row_index = _int(item.get("row_index"))
+                cells_by_row.setdefault(row_index, []).append(
+                    {
+                        "column_index": _int(item.get("column_index")),
+                        "anchor": cell_nodes[0],
+                        "confidence": float(item.get("confidence", 1.0) or 1.0),
+                    }
+                )
+    ordered_rows = sorted(rows, key=lambda item: (int(item["row_index"]), str(item["anchor"].get("node_id", "") or "")))
+    for previous, current in zip(ordered_rows, ordered_rows[1:]):
+        output.append(
+            _training_relation(
+                str(previous["anchor"].get("node_id", "") or ""),
+                str(current["anchor"].get("node_id", "") or ""),
+                "MATRIX_ROW",
+                min(float(previous["confidence"]), float(current["confidence"])),
+            )
+        )
+    for cells in cells_by_row.values():
+        ordered_cells = sorted(cells, key=lambda item: (int(item["column_index"]), str(item["anchor"].get("node_id", "") or "")))
+        for previous, current in zip(ordered_cells, ordered_cells[1:]):
+            output.append(
+                _training_relation(
+                    str(previous["anchor"].get("node_id", "") or ""),
+                    str(current["anchor"].get("node_id", "") or ""),
+                    "MATRIX_CELL",
+                    min(float(previous["confidence"]), float(current["confidence"])),
+                )
+            )
     return output
 
 
@@ -651,6 +943,32 @@ def _fraction_separator_evidence_score(
     return round(max(0.0, min(1.0, (0.35 * shape) + (0.35 * between) + (0.30 * span))), 6)
 
 
+def _annotation_rule_evidence_score(
+    vector: dict[str, Any],
+    base_nodes: list[dict[str, Any]],
+    *,
+    position: str,
+) -> float:
+    if vector.get("node_type") != "vector" or not base_nodes:
+        return 0.0
+    vx0, vy0, vx1, vy1 = vector["bbox"]
+    v_width = max(0.0, vx1 - vx0)
+    v_height = max(0.0, vy1 - vy0)
+    base_bbox = _nodes_bbox(base_nodes)
+    vector_center_y = (vy0 + vy1) / 2.0
+    base_center_y = _bbox_center_y(base_bbox)
+    if position == "over" and vector_center_y > base_center_y:
+        return 0.0
+    if position == "under" and vector_center_y < base_center_y:
+        return 0.0
+    vertical_distance = abs(vector_center_y - base_center_y)
+    base_height = max(1e-6, base_bbox[3] - base_bbox[1])
+    proximity = 1.0 - min(1.0, vertical_distance / max(base_height * 2.0, 1e-6))
+    span = _overlap(vx0, vx1, base_bbox[0], base_bbox[2]) / max(1e-6, base_bbox[2] - base_bbox[0])
+    shape = _horizontal_rule_score(v_width, v_height)
+    return round(max(0.0, min(1.0, (0.40 * shape) + (0.35 * span) + (0.25 * proximity))), 6)
+
+
 def _unicode_category_flags(text: str) -> dict[str, float]:
     categories = [unicodedata.category(char) for char in str(text or "")]
     return {
@@ -668,12 +986,27 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
         "NEXT": "HORIZONTAL",
         "SUB": "SUB",
         "SUP": "SUP",
+        "PRE_SUB": "PRE_SUB",
+        "PRE_SUP": "PRE_SUP",
+        "UNDER": "UNDER",
+        "OVER": "OVER",
+        "ACCENT_BASE": "ACCENT_BASE",
         "RADICAL_BODY": "RADICAL_BODY",
+        "RADICAL_INDEX": "RADICAL_INDEX",
         "NUMERATOR": "ABOVE",
         "DENOMINATOR": "BELOW",
         "FRACTION_BAR": "FRACTION_BAR",
+        "OVERLINE": "OVERLINE",
+        "UNDERLINE": "UNDERLINE",
         "ABOVE": "ABOVE",
         "BELOW": "BELOW",
+        "FENCE_BODY": "FENCE_BODY",
+        "FENCE_OPEN": "FENCE_OPEN",
+        "FENCE_CLOSE": "FENCE_CLOSE",
+        "MATRIX_ROW": "MATRIX_ROW",
+        "MATRIX_CELL": "MATRIX_CELL",
+        "CELL_CONTENT": "CELL_CONTENT",
+        "TEXT_RUN_NEXT": "TEXT_RUN_NEXT",
     }
     selected = []
     for index, item in enumerate(predictions.get("predictions", []) or []):
@@ -694,6 +1027,10 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
             }
         )
     selected = _dedupe_selected_relations(selected)
+    relation_alternatives = _map_relation_alternatives(
+        predictions.get("relation_alternatives", []) or [],
+        relation_map,
+    )
     warnings: list[str] = []
     if not selected:
         warnings.append("graph_parser_no_selected_relations")
@@ -701,6 +1038,7 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
         "candidate_only": True,
         "abstain": not bool(selected),
         "selected_relations": selected,
+        "relation_alternatives": relation_alternatives,
         "node_predictions": list(predictions.get("node_predictions", []) or []),
         "node_filter_threshold": float(
             predictions.get("node_filter_threshold", GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD)
@@ -709,6 +1047,59 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
         "verifier_warnings": sorted(set(warnings)),
         "model_version": str(predictions.get("model_version", "") or ""),
     }
+
+
+def _top_relation_alternatives(
+    probabilities: list[float],
+    labels: tuple[str, ...],
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    alternatives: list[dict[str, Any]] = []
+    for index, probability in sorted(
+        enumerate(probabilities[: len(labels)]),
+        key=lambda item: float(item[1]),
+        reverse=True,
+    ):
+        label = str(labels[index])
+        if label == "NONE":
+            continue
+        alternatives.append({"relation": label, "confidence": round(float(probability), 6)})
+        if len(alternatives) >= limit:
+            break
+    return alternatives
+
+
+def _map_relation_alternatives(
+    items: list[Any],
+    relation_map: dict[str, str],
+) -> list[dict[str, Any]]:
+    mapped: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        alternatives: list[dict[str, Any]] = []
+        for alternative in item.get("alternatives", []) or []:
+            if not isinstance(alternative, dict):
+                continue
+            relation = relation_map.get(str(alternative.get("relation", "") or ""))
+            if relation is None:
+                continue
+            alternatives.append(
+                {
+                    "relation": relation,
+                    "confidence": float(alternative.get("confidence", 0.0) or 0.0),
+                }
+            )
+        if alternatives:
+            mapped.append(
+                {
+                    "source": str(item.get("source", "") or ""),
+                    "target": str(item.get("target", "") or ""),
+                    "alternatives": alternatives,
+                }
+            )
+    return sorted(mapped, key=lambda item: (item["source"], item["target"]))
 
 
 def _normalize_node(item: dict[str, Any], *, index: int, node_type: str) -> dict[str, Any]:
@@ -794,11 +1185,18 @@ def _node_sort_key(node: dict[str, Any]) -> tuple[float, float, str]:
     return (float(bbox[0]), float(bbox[1]), str(node.get("node_id", "") or ""))
 
 
+def _int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
-def _softmax(logits: list[float]) -> list[float]:
+def _normalized_exponential_weights(logits: list[float]) -> list[float]:
     if not logits:
         return []
     max_logit = max(logits)

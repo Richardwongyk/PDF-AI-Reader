@@ -399,7 +399,11 @@ class TinyBDMathCandidateService:
             fallback_text=str(payload.get("pdf_text", "") or ""),
         ).to_json()
         return {
-            "score": None,
+            "score": float(
+                decoded_latex.get("layout_confidence")
+                or decoded_latex.get("confidence")
+                or 0.0
+            ),
             "warnings": warnings + list(structural_candidate.get("verifier_warnings", [])) + list(decoded_latex.get("warnings", [])),
             "graph_parser": graph_parser,
             "relation_scoring": relation_scoring,
@@ -541,6 +545,7 @@ def _vector_to_json(vector: Any) -> dict[str, Any]:
         "aspect_ratio": _float(getattr(vector, "aspect_ratio", 0.0)),
         "page_num": _int(getattr(vector, "page_num", 0)),
         "is_horizontal_rule_candidate": bool(getattr(vector, "is_horizontal_rule_candidate", False)),
+        "is_vertical_rule_candidate": bool(getattr(vector, "is_vertical_rule_candidate", False)),
     }
 
 

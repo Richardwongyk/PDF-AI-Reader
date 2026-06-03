@@ -35,6 +35,9 @@ Kept after the 2026-06-02 cleanup:
 - `test_artifacts/instrumented_full_unique_color_components_v3_20260601`
   contains final instrumented JSONL training/evidence rows. Its temporary
   `work/` directory was removed.
+- `test_artifacts/tinybdmath_structure_scope_audit_100.json` records the first
+  100-row AI/Math CSLT structure coverage audit. It is a regenerable audit
+  output and must not be committed.
 
 `.pytest_cache` currently has unreadable permissions and near-zero size, so it
 was left in place instead of force-changing ACLs.
@@ -48,6 +51,7 @@ Use these for new work:
 - `tools/tinybdmath_build_target_trees.py`
 - `tools/tinybdmath_align_targets.py`
 - `tools/tinybdmath_audit_alignment.py`
+- `tools/tinybdmath_audit_structure_scope.py`
 - `tools/tinybdmath_train_graph_parser.py`
 - `tools/tinybdmath_eval_decoded_latex.py`
 - `tools/formula_multiround_pipeline.py --run-tinybdmath --tinybdmath-graph-parser-model <model>`

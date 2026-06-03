@@ -55,6 +55,43 @@ def test_graph_parser_node_samples_label_text_run_nodes() -> None:
     assert labels["g0005"] == "TEXT"
 
 
+def test_graph_parser_node_samples_label_operator_text_run_nodes() -> None:
+    graph_row = _graph_row("operator", ["f", "o", "o", "(", "x", ")"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\operatorname{foo}(x)", row_id="operator").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = node_training_samples_from_rows([graph_row], [alignment])
+    labels = {sample["node_id"]: sample["label"] for sample in samples}
+
+    assert labels["g0000"] == "OPERATOR"
+    assert labels["g0001"] == "OPERATOR"
+    assert labels["g0002"] == "OPERATOR"
+
+
+def test_graph_parser_training_samples_include_text_run_group_edges() -> None:
+    graph_row = _graph_row("text", ["d", "m", "o", "d", "e", "l"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"d_{\text{model}}", row_id="text").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0001", "g0002", "TEXT_RUN_NEXT") in relations
+    assert ("g0004", "g0005", "TEXT_RUN_NEXT") in relations
+
+
+def test_graph_parser_training_samples_include_radical_index_edges() -> None:
+    graph_row = _graph_row("radical-index", [r"\sqrt", "3", "x"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\sqrt[3]{x}", row_id="radical-index").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0000", "g0001", "RADICAL_INDEX") in relations
+    assert ("g0000", "g0002", "RADICAL_BODY") in relations
+
+
 def test_graph_parser_samples_label_horizontal_rule_node_and_fraction_relations() -> None:
     graph_row = _graph_row(
         "frac",
@@ -77,6 +114,80 @@ def test_graph_parser_samples_label_horizontal_rule_node_and_fraction_relations(
     assert ("v0000", "v0000", "FRACTION_BAR") in relations
     assert ("v0000", "g0000", "ABOVE") in relations
     assert ("v0000", "g0001", "BELOW") in relations
+
+
+def test_graph_parser_training_samples_keep_under_over_relation_labels() -> None:
+    graph_row = _graph_row("limits", [r"\sum", "i", "=", "1", "n"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\sum_{i=1}^{n}", row_id="limits", display_mode=True).to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {sample["relation"] for sample in samples}
+
+    assert "UNDER" in relations
+    assert "OVER" in relations
+
+
+def test_graph_parser_training_samples_keep_left_attachment_relation_labels() -> None:
+    graph_row = _graph_row("left-script", ["a", "b", "X"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"{}^a_b X", row_id="left-script", display_mode=True).to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0002", "g0000", "PRE_SUP") in relations
+    assert ("g0002", "g0001", "PRE_SUB") in relations
+
+
+def test_graph_parser_samples_label_overline_rule_from_accent_structure() -> None:
+    graph_row = _graph_row(
+        "accent",
+        ["x"],
+        glyph_bboxes=[
+            [2.0, 4.0, 7.0, 10.0],
+        ],
+        vector_nodes=[{"node_id": "v0000", "bbox": [0.0, 1.0, 10.0, 1.4]}],
+    )
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\overline{x}", row_id="accent").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("v0000", "v0000", "OVERLINE") in relations
+    assert ("v0000", "g0000", "BELOW") in relations
+
+
+def test_graph_parser_training_samples_include_fence_structure_edges() -> None:
+    graph_row = _graph_row("fence", ["(", "x", ")"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\left(x\right)", row_id="fence").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0001", "g0000", "FENCE_OPEN") in relations
+    assert ("g0001", "g0002", "FENCE_CLOSE") in relations
+    assert ("g0000", "g0001", "FENCE_BODY") in relations
+    assert ("g0002", "g0001", "FENCE_BODY") in relations
+
+
+def test_graph_parser_training_samples_include_matrix_row_and_cell_edges() -> None:
+    graph_row = _graph_row("matrix", ["x", "y", "z", "w"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(
+        r"\begin{matrix}x&y\\z&w\end{matrix}",
+        row_id="matrix",
+        display_mode=True,
+    ).to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0000", "g0002", "MATRIX_ROW") in relations
+    assert ("g0000", "g0001", "MATRIX_CELL") in relations
+    assert ("g0002", "g0003", "MATRIX_CELL") in relations
 
 
 def test_graph_parser_node_samples_label_generic_rule_vectors() -> None:
@@ -124,6 +235,20 @@ def test_graph_parser_structural_candidate_accepts_model_structure_relations() -
             {"source": "v0000", "target": "v0000", "relation": "FRACTION_BAR", "confidence": 0.97},
             {"source": "v0000", "target": "g0000", "relation": "ABOVE", "confidence": 0.93},
             {"source": "v0000", "target": "g0001", "relation": "BELOW", "confidence": 0.94},
+            {"source": "g0002", "target": "g0003", "relation": "UNDER", "confidence": 0.92},
+            {"source": "g0004", "target": "g0005", "relation": "TEXT_RUN_NEXT", "confidence": 0.90},
+            {"source": "g0008", "target": "g0006", "relation": "PRE_SUP", "confidence": 0.88},
+            {"source": "g0009", "target": "g0010", "relation": "RADICAL_INDEX", "confidence": 0.87},
+        ],
+        "relation_alternatives": [
+            {
+                "source": "g0002",
+                "target": "g0003",
+                "alternatives": [
+                    {"relation": "UNDER", "confidence": 0.92},
+                    {"relation": "OVER", "confidence": 0.41},
+                ],
+            }
         ],
     }
     structural = graph_parser_predictions_to_structural_candidate(payload)
@@ -131,7 +256,13 @@ def test_graph_parser_structural_candidate_accepts_model_structure_relations() -
     relations = {(item["source"], item["target"], item["relation"]) for item in structural["selected_relations"]}
     assert ("v0000", "v0000", "FRACTION_BAR") in relations
     assert ("v0000", "g0000", "ABOVE") in relations
+    assert ("g0002", "g0003", "UNDER") in relations
+    assert ("g0004", "g0005", "TEXT_RUN_NEXT") in relations
+    assert ("g0008", "g0006", "PRE_SUP") in relations
+    assert ("g0009", "g0010", "RADICAL_INDEX") in relations
     assert ("v0000", "g0001", "BELOW") in relations
+    assert structural["relation_alternatives"][0]["alternatives"][0]["relation"] == "UNDER"
+    assert structural["relation_alternatives"][0]["alternatives"][1]["relation"] == "OVER"
 
 
 def _toy_artifact() -> TinyBDGraphParserArtifact:

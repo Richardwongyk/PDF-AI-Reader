@@ -195,6 +195,44 @@ PDF 小块证据
 `ready_for_model`、`needs_identity_repair`、`needs_schema_extension`、
 `needs_image_mfr`、`route_unsupported`、`abstain` 分桶。
 
+2026-06-03 已完成第一轮 100 行审计工具和 smoke，并把审计口径收敛为
+parser/target/alignment/PDF evidence 驱动，不再按 LaTeX 字符串模式推断
+schema 缺口：
+
+- 新增 `tools/tinybdmath_audit_structure_scope.py`。
+- target tree 输出新增 parser summary，记录 KaTeX type/family 与 MathML tag
+  计数，供审计归因使用，不进入生产推理。
+- 输出 `test_artifacts/tinybdmath_structure_scope_audit_100.json`，不提交。
+- 结果：`ready_for_model=84`、`needs_identity_repair=15`、
+  `needs_schema_extension=1`。
+- 已补一个通用 schema 小步：KaTeX parse tree 中的 `cr` 行断点会生成
+  `aligned_display`/`matrix_grid` target container。
+- 2026-06-03 已补标准 KaTeX AST 结构：large operator/operatorname limits
+  生成 `under_over`，`operatorname` 生成 operator `text_run`，overline/underline/
+  horizBrace 生成 `accent`，boxed/fbox 生成 enclosure evidence，left/right/middle
+  和 sized delimiter 保留 fence/delimiter 证据，equation tag 生成
+  `equation_number`，phantom/smash/lap/color 保留 layout/style evidence。
+- 2026-06-03 已把标准结构监督继续接入 alignment 和 Graph Parser：relation
+  labels 接住 `UNDER`、`OVER`、`ACCENT_BASE`，structure labels 新增
+  `TARGET_TEXT_RUN_EVIDENCE`、`TARGET_OPERATOR_TEXT_RUN_EVIDENCE`、
+  `TARGET_UNDER_OVER_EVIDENCE`、`TARGET_ACCENT_ANNOTATION_EVIDENCE`、
+  `TARGET_FENCE_EVIDENCE`、`TARGET_MATRIX_GRID_EVIDENCE`、
+  `TARGET_MATRIX_ROW_EVIDENCE`、`TARGET_MATRIX_CELL_EVIDENCE`、
+  `TARGET_ENCLOSURE_EVIDENCE`、`TARGET_EQUATION_TAG_EVIDENCE`。Graph Parser
+  训练样本能消费 `UNDER`、`OVER`、`TEXT_RUN_NEXT`、`RADICAL_BODY`、
+  `FENCE_OPEN`、`FENCE_CLOSE`、`FENCE_BODY`、`MATRIX_ROW`、`CELL_CONTENT`
+  和 over/under line vector evidence；operator text run 进入 `OPERATOR` 节点标签。
+  decoder 只序列化已支持的 `UNDER`/`OVER`，其余暂未支持关系会降为 warning 和
+  低置信，不用于补洞。
+- 复跑 100 行后 `under_over` 已在真实样本中覆盖；fraction/radical/matrix/
+  aligned 虽已出现，但本批仍未进入 `ready_for_model` 分桶，后续先修
+  PDF-to-target identity/alignment。
+- 新增 `tests/test_tinybdmath_no_hardcoded_patterns.py`，用 AST/源码扫描和
+  synthetic 反例验证，阻止 TinyBDMath 主线再次引入宏注入、正则解析、
+  LaTeX 命令分支或样本术语硬编码。
+- 当前 schema blocker 只剩 1 个未包裹 display alignment parse failure；
+  其余 blocker 主要是 PDF-to-target identity/alignment，不得在 decoder 中硬补。
+
 ### Step 3：生成 target tree
 
 M1 已完成：
@@ -257,7 +295,7 @@ M1 已完成：
 - relation_row_rate 仍偏低，说明还需要补 group/text/operator/vector role 标签，
   不能直接长训后宣称完成。
 
-### Step 6：训练 Graph Parser M1（节点头已接入，正式训练未完成）
+### Step 6：训练 Graph Parser M1（节点头已接入，2000 行短训已完成，正式全量未完成）
 
 已完成：
 
@@ -286,19 +324,93 @@ M1 已完成：
 - 结论：TEXT/OPERATOR 标签和训练链路已接通，但 TEXT precision 偏低、UNKNOWN
   暂不预测；这仍是 smoke，不是正式质量结论。
 
+2026-06-03 已用当前结构标签重跑 2000 行短训 smoke：
+
+- 临时目录：`test_artifacts/tinybdmath_graph_parser_smoke_current_20260603/`，
+  不提交。
+- target tree：2000 行，1993 成功，7 失败。
+- alignment：rows_with_hard_labels=1270，avg_hard_alignment_rate=0.951501，
+  rows_with_structure_labels=167。
+- structure_counts 已出现 text run、operator text run、fraction/radical、
+  accent、fence、matrix、under_over 结构监督。
+- 训练样本：relation samples=90979，node samples=14729。
+- relation validation：accuracy=0.818262，positive_recall=0.405096。
+- node validation：accuracy=0.761431；OPERATOR recall=0.946903、
+  precision=0.550600；TEXT recall=0.900000、precision=0.095745。
+- 公式级 decoded eval：rows=2000，exact_match_rate=0.569500，
+  near_match_rate=0.710500，weak_match_rate=0.924500，
+  average_similarity=0.866203。
+- 对比 2026-06-01 旧 direct eval（exact≈0.523、near≈0.660），短训已有提升，
+  但 decoder warning 仍多，TEXT precision 很低，不能 accepted，只能作为
+  candidate-only/verifier 下一步基线。
+
+2026-06-03 已接入 layout verifier M0 并重跑同一 2000 行 decoded eval：
+
+- 整体 decoded 指标不变：exact=0.569500，near=0.710500，
+  weak=0.924500，average_similarity=0.866203。
+- verifier gate：pass=557，review=935，abstain=508，final_abstain_rate=0.254。
+- 未拒绝子集：exact=0.726542，near=0.819035。
+- constrained decode 接入后 gate：pass=557，review=859，abstain=584，
+  final_abstain_rate=0.292；未拒绝子集 exact=0.748588，near=0.831215。
+- 2026-06-03 已把 Graph Parser relation alternatives 透传为 n-best CSLT
+  candidate evidence，并在 decoded evidence 中输出 canonical CSLT、
+  `n_best_cslt` 和 rank-1 `latex_candidates`；同一 2000 行评估 exact/near
+  与 gate 指标保持不变。该路径只扩展候选证据，不新增 LaTeX 模板规则。
+- 2026-06-03 接续会话修复了重复 LaTeX candidate 证据合并的确定 bug：
+  同样 LaTeX 的无环投影等更干净结构会写入 rank-1 的
+  `alternative_structure_evidence`，但 selected graph 不再作为自身替代证据
+  重复写入。814 行审计指标保持 rank-1 exact/near=0.515971/0.687961，
+  n-best oracle exact/near=0.527027/0.787469。
+- 2026-06-03 已继续补通用结构序列化：`FENCE_OPEN`、`FENCE_CLOSE`、
+  `FENCE_BODY`、`TEXT_RUN_NEXT`、`MATRIX_ROW`、`MATRIX_CELL`、
+  `CELL_CONTENT`、`ACCENT_BASE` 进入 decoder/constrained decode/layout
+  verifier 的可序列化路径。TEXT_RUN 只在 node head 对链上节点给出高置信
+  `TEXT`/`OPERATOR` 时包 `\text{...}`，否则只作为普通顺序关系。814 行
+  gated-text 审计：rank-1 exact/near=0.531941/0.680590，n-best oracle
+  exact/near=0.540541/0.766585，pass_or_review exact/near=0.711504/0.821239。
+- 2026-06-03 按 M0/M1 结构清单继续补齐支持，而不是按失败样例决定路线：
+  `prescript`/左附着通用关系已接入 CSLT、alignment、Graph Parser、
+  decoder、constrained decode 和 layout verifier；`radical_index` 已完成
+  nth-root index 监督与序列化；operator text run 现在由 node head 高置信
+  `OPERATOR` 输出 `\operatorname{...}`，高置信 `TEXT` 仍输出 `\text{...}`；
+  `matrix_grid` 训练监督和 decoder 已按 row/cell/content 三层语义修正。
+  这些改动只消费模型/target-derived 结构关系，不按公式内容、函数名或样本词表
+  分支。focused 结构测试 82 passed，TinyBDMath 主线 129 passed。
+- 修复了 decoder 对完整 rule structure 的一个确定 bug：分数/overline 等结构已消费
+  全部 glyph 后，不再回退遍历所有 glyph 并误报 `decoder_no_root`/`decoder_cycle`。
+- 该 gate 只影响 candidate 可信度和 abstain/review/pass 统计，不写 accepted。
+
 正式验收仍是：
 
 - 2000 行 dev formula exact/near 明显超过旧 direct eval 抽样基线。
 - 失败样例不依赖 decoder 猜。
 - 关系 recall 提升时 precision 不崩。
 
-### Step 7：CSLT constrained decoder + verifier
+### Step 7：CSLT constrained decoder + verifier（layout verifier M0 已接入）
 
-任务：
+已完成：
 
-- 新增 `src/core/tinybdmath_constrained_decode.py`。
+- 新增 `src/core/tinybdmath_constrained_decode.py`，只验证模型输出结构图的
+  schema、缺失节点、cycle、coverage 和 blockers，不生成 LaTeX 模板。
 - 新增 `src/core/tinybdmath_layout_verifier.py`。
-- 输出 n-best CSLT/canonical LaTeX、confidence、warnings、blockers。
+- `decoded_latex` evidence 输出 `abstain`、`layout_status`、
+  `layout_confidence` 和 `layout_verification`。
+- `TinyBDMathCandidateService` 的 r2a recognition score 使用 verifier
+  `layout_confidence`，仍然 `accepted=false`。
+- Graph Parser prediction evidence 已输出 relation alternatives；constrained
+  decode 将其整理成 canonical CSLT 和 n-best CSLT candidate evidence。
+- 重复 LaTeX 的替代结构证据会合并进同一 candidate，供人工审核比较结构
+  证据；rank-1 仍保持 selected graph，不自动 accepted。
+- decoder 已序列化基础 fence、text/operator run、matrix row/cell/content、
+  left attachment、radical index、accent base 关系；
+  未满足模型证据门控的结构仍保守降级为 candidate-only。
+- `tools/tinybdmath_eval_decoded_latex.py` 输出 `layout_gate` 统计。
+- `tests/test_tinybdmath_layout_verifier.py` 已覆盖 pass/review/abstain 基础门控。
+
+仍需完成：
+
+- 继续基于 n-best CSLT 做 verifier 排序/abstain 校准，而不是补样本模板。
+- 继续校准 TEXT precision、decoder warning、n-best 排序和 verifier 阈值。
 
 验收：
 
@@ -351,8 +463,12 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest `
   tests/test_tinybdmath_alignment_audit.py `
   tests/test_tinybdmath_graph_parser.py `
   tests/test_tinybdmath_latex_decoder.py `
+  tests/test_tinybdmath_layout_verifier.py `
+  tests/test_tinybdmath_constrained_decode.py `
   tests/test_tinybdmath_eval_decoded_latex.py `
   tests/test_tinybdmath_candidate_service.py `
+  tests/test_tinybdmath_no_hardcoded_patterns.py `
+  tests/test_tinybdmath_structure_scope_audit.py `
   tests/test_formula_multiround_pipeline.py `
   tests/test_full_software_validation.py -q
 ```
