@@ -41,6 +41,8 @@ DECODER_SUPPORTED_RELATIONS = {
     "MATRIX_ROW",
     "MATRIX_CELL",
     "CELL_CONTENT",
+    "ENCLOSURE_BODY",
+    "EQUATION_TAG",
 }
 
 
@@ -131,7 +133,7 @@ def decode_latex_candidate(
             continue
         supported_relations.append(relation)
         by_source[source][kind].append(relation)
-        if kind in {"HORIZONTAL", "SUP", "SUB", "PRE_SUP", "PRE_SUB", "UNDER", "OVER", "ABOVE", "BELOW", "RADICAL_BODY", "RADICAL_INDEX", "TEXT_RUN_NEXT", "FENCE_OPEN", "FENCE_CLOSE", "MATRIX_ROW", "MATRIX_CELL", "CELL_CONTENT", "ACCENT_BASE"}:
+        if kind in {"HORIZONTAL", "SUP", "SUB", "PRE_SUP", "PRE_SUB", "UNDER", "OVER", "ABOVE", "BELOW", "RADICAL_BODY", "RADICAL_INDEX", "TEXT_RUN_NEXT", "FENCE_OPEN", "FENCE_CLOSE", "MATRIX_ROW", "MATRIX_CELL", "CELL_CONTENT", "ACCENT_BASE", "ENCLOSURE_BODY", "EQUATION_TAG"}:
             has_parent.add(target)
         if kind in {"FRACTION_BAR", "OVERLINE", "UNDERLINE"} and source == target:
             has_parent.add(source)
@@ -386,6 +388,15 @@ def _decode_rule_structures(
                 parts.append(rf"{accent}{{{body}}}")
             else:
                 warnings.add("decoder_accent_missing_group")
+        elif children.get("ENCLOSURE_BODY"):
+            body_relations = _ordered_children(children.get("ENCLOSURE_BODY", []), node_by_id)
+            if body_relations:
+                body = _decode_group([str(item.get("target", "")) for item in body_relations], node_by_id, by_source, visited, warnings)
+                visited.add(source)
+                parts.append(body)
+                warnings.add("decoder_enclosure_body_unwrapped")
+            else:
+                warnings.add("decoder_enclosure_missing_body")
     return parts
 
 
@@ -531,6 +542,8 @@ def _rule_consumed_nodes(
             + children.get("MATRIX_ROW", [])
             + children.get("MATRIX_CELL", [])
             + children.get("CELL_CONTENT", [])
+            + children.get("ENCLOSURE_BODY", [])
+            + children.get("EQUATION_TAG", [])
         )
         if not (
             children.get("FRACTION_BAR")
@@ -540,6 +553,8 @@ def _rule_consumed_nodes(
             or children.get("MATRIX_ROW")
             or children.get("MATRIX_CELL")
             or children.get("CELL_CONTENT")
+            or children.get("ENCLOSURE_BODY")
+            or children.get("EQUATION_TAG")
         ):
             rule_relations = children.get("FENCE_OPEN", []) + children.get("FENCE_CLOSE", [])
         for relation in rule_relations:
@@ -994,7 +1009,7 @@ def _decode_relations_without_verifier(
             continue
         supported_relations.append(relation)
         by_source[source][kind].append(relation)
-        if kind in {"HORIZONTAL", "SUP", "SUB", "PRE_SUP", "PRE_SUB", "UNDER", "OVER", "ABOVE", "BELOW", "RADICAL_BODY", "RADICAL_INDEX", "TEXT_RUN_NEXT", "FENCE_OPEN", "FENCE_CLOSE", "MATRIX_ROW", "MATRIX_CELL", "CELL_CONTENT", "ACCENT_BASE"}:
+        if kind in {"HORIZONTAL", "SUP", "SUB", "PRE_SUP", "PRE_SUB", "UNDER", "OVER", "ABOVE", "BELOW", "RADICAL_BODY", "RADICAL_INDEX", "TEXT_RUN_NEXT", "FENCE_OPEN", "FENCE_CLOSE", "MATRIX_ROW", "MATRIX_CELL", "CELL_CONTENT", "ACCENT_BASE", "ENCLOSURE_BODY", "EQUATION_TAG"}:
             has_parent.add(target)
         if kind in {"FRACTION_BAR", "OVERLINE", "UNDERLINE"} and source == target:
             has_parent.add(source)

@@ -190,6 +190,49 @@ def test_graph_parser_training_samples_include_matrix_row_and_cell_edges() -> No
     assert ("g0002", "g0003", "MATRIX_CELL") in relations
 
 
+def test_graph_parser_training_samples_include_enclosure_body_edges() -> None:
+    graph_row = _graph_row(
+        "box",
+        ["x"],
+        glyph_bboxes=[
+            [4.0, 4.0, 8.0, 10.0],
+        ],
+        vector_nodes=[{"node_id": "v0000", "bbox": [0.0, 1.0, 15.0, 1.4]}],
+    )
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\boxed{x}", row_id="box").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("v0000", "g0000", "ENCLOSURE_BODY") in relations
+
+
+def test_graph_parser_training_samples_include_equation_tag_edges_and_node_label() -> None:
+    graph_row = _graph_row(
+        "tag",
+        ["x", "(1)"],
+        glyph_bboxes=[
+            [0.0, 0.0, 5.0, 8.0],
+            [40.0, 0.0, 55.0, 8.0],
+        ],
+    )
+    target = TinyBDTargetTreeBuilder().build_from_latex(
+        r"\begin{equation}x\tag{1}\end{equation}",
+        row_id="tag",
+        display_mode=True,
+    ).to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    relation_samples = training_samples_from_rows([graph_row], [alignment])
+    node_samples = node_training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in relation_samples}
+    node_labels = {sample["node_id"]: sample["label"] for sample in node_samples}
+
+    assert ("g0000", "g0001", "EQUATION_TAG") in relations
+    assert node_labels["g0001"] == "EQUATION_TAG"
+
+
 def test_graph_parser_node_samples_label_generic_rule_vectors() -> None:
     graph_row = _graph_row(
         "rules",
@@ -239,6 +282,8 @@ def test_graph_parser_structural_candidate_accepts_model_structure_relations() -
             {"source": "g0004", "target": "g0005", "relation": "TEXT_RUN_NEXT", "confidence": 0.90},
             {"source": "g0008", "target": "g0006", "relation": "PRE_SUP", "confidence": 0.88},
             {"source": "g0009", "target": "g0010", "relation": "RADICAL_INDEX", "confidence": 0.87},
+            {"source": "v0011", "target": "g0011", "relation": "ENCLOSURE_BODY", "confidence": 0.86},
+            {"source": "g0012", "target": "g0013", "relation": "EQUATION_TAG", "confidence": 0.85},
         ],
         "relation_alternatives": [
             {
@@ -260,6 +305,8 @@ def test_graph_parser_structural_candidate_accepts_model_structure_relations() -
     assert ("g0004", "g0005", "TEXT_RUN_NEXT") in relations
     assert ("g0008", "g0006", "PRE_SUP") in relations
     assert ("g0009", "g0010", "RADICAL_INDEX") in relations
+    assert ("v0011", "g0011", "ENCLOSURE_BODY") in relations
+    assert ("g0012", "g0013", "EQUATION_TAG") in relations
     assert ("v0000", "g0001", "BELOW") in relations
     assert structural["relation_alternatives"][0]["alternatives"][0]["relation"] == "UNDER"
     assert structural["relation_alternatives"][0]["alternatives"][1]["relation"] == "OVER"

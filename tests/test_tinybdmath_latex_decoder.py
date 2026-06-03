@@ -330,6 +330,50 @@ def test_decoder_serializes_matrix_row_relations_from_model_edges() -> None:
     assert decoded.accepted is False
 
 
+def test_decoder_keeps_enclosure_body_candidate_without_unsupported_warning() -> None:
+    decoded = decode_latex_candidate(
+        [
+            {"node_id": "g0", "latex": "x", "bbox": [4, 4, 8, 10]},
+        ],
+        {
+            "selected_relations": [
+                {"source": "v0", "target": "g0", "relation": "ENCLOSURE_BODY", "confidence": 0.91},
+            ],
+            "verifier_warnings": [],
+        },
+        vectors=[{"node_id": "v0", "bbox": [0, 1, 15, 1.4]}],
+        fallback_text="x",
+    )
+
+    assert decoded.latex == "x"
+    assert "decoder_unsupported_relation_labels" not in decoded.warnings
+    assert "decoder_enclosure_body_unwrapped" in decoded.warnings
+    assert decoded.candidate_only is True
+    assert decoded.accepted is False
+
+
+def test_decoder_keeps_equation_tag_in_evidence_not_body_latex() -> None:
+    decoded = decode_latex_candidate(
+        [
+            {"node_id": "g0", "latex": "x", "bbox": [0, 0, 5, 8]},
+            {"node_id": "g1", "latex": "(1)", "bbox": [40, 0, 55, 8]},
+        ],
+        {
+            "selected_relations": [
+                {"source": "g0", "target": "g1", "relation": "EQUATION_TAG", "confidence": 0.90},
+            ],
+            "verifier_warnings": [],
+        },
+        fallback_text="x(1)",
+    )
+
+    assert decoded.latex == "x"
+    assert "decoder_unsupported_relation_labels" not in decoded.warnings
+    assert decoded.canonical_cslt["relations"][0]["relation"] == "EQUATION_TAG"
+    assert decoded.candidate_only is True
+    assert decoded.accepted is False
+
+
 def test_decoder_emits_n_best_latex_candidates_from_model_relation_alternatives() -> None:
     decoded = decode_latex_candidate(
         [

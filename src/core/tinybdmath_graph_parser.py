@@ -525,7 +525,17 @@ def training_samples_from_rows(
             current = positive.get((source, target))
             if current is None or confidence >= current[1]:
                 positive[(source, target)] = (relation, confidence)
-        for source, target in candidate_pairs(nodes):
+        pairs = candidate_pairs(nodes)
+        node_by_id = {str(node.get("node_id", "") or ""): node for node in nodes}
+        pair_keys = {(str(source["node_id"]), str(target["node_id"])) for source, target in pairs}
+        for source_id, target_id in positive:
+            if (source_id, target_id) in pair_keys:
+                continue
+            if source_id not in node_by_id or target_id not in node_by_id:
+                continue
+            pairs.append((node_by_id[source_id], node_by_id[target_id]))
+            pair_keys.add((source_id, target_id))
+        for source, target in pairs:
             key = (str(source["node_id"]), str(target["node_id"]))
             relation, confidence = positive.get(key, ("NONE", 1.0))
             samples.append(
@@ -605,6 +615,8 @@ def _node_label_from_alignment(alignment: dict[str, Any]) -> str:
         if bool(attrs.get("operator")):
             return "OPERATOR"
         return "TEXT"
+    if target_node_type == "equation_number":
+        return "EQUATION_TAG"
     if target_node_type == "symbol" and (
         katex_type in GRAPH_PARSER_OPERATOR_KATEX_TYPES or family in GRAPH_PARSER_OPERATOR_KATEX_TYPES
     ):
@@ -796,6 +808,49 @@ def _structure_relation_labels_from_structure(
                             confidence,
                         )
                     )
+        elif role == "TARGET_ENCLOSURE_EVIDENCE":
+            if not vectors:
+                continue
+            body_nodes = _nodes_for_ids(node_by_id, item.get("body_pdf_node_ids", []))
+            if not body_nodes:
+                continue
+            scored = [(_enclosure_rule_evidence_score(vector, body_nodes), vector) for vector in vectors]
+            score, vector = max(
+                scored,
+                key=lambda pair: (pair[0], str(pair[1].get("node_id", "") or "")),
+                default=(0.0, {}),
+            )
+            if score < 0.35:
+                continue
+            vector_id = str(vector.get("node_id", "") or "")
+            confidence = round(score * float(item.get("confidence", 1.0) or 1.0), 6)
+            for body_node in body_nodes:
+                output.append(
+                    _training_relation(
+                        vector_id,
+                        str(body_node.get("node_id", "") or ""),
+                        "ENCLOSURE_BODY",
+                        confidence,
+                    )
+                )
+        elif role == "TARGET_EQUATION_TAG_EVIDENCE":
+            tag_nodes = _nodes_for_ids(node_by_id, item.get("tag_pdf_node_ids", []))
+            if not tag_nodes:
+                continue
+            anchor = _equation_tag_anchor_node(node_by_id, tag_nodes)
+            if not anchor:
+                continue
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            anchor_id = str(anchor.get("node_id", "") or "")
+            for tag_node in tag_nodes:
+                output.append(
+                    _training_relation(
+                        anchor_id,
+                        str(tag_node.get("node_id", "") or ""),
+                        "EQUATION_TAG",
+                        confidence,
+                    )
+                )
         elif role == "TARGET_FRACTION_SEPARATOR_EVIDENCE":
             if not vectors:
                 continue
@@ -839,6 +894,34 @@ def _structure_relation_labels_from_structure(
             for node in base_nodes:
                 output.append(_training_relation(vector_id, str(node.get("node_id", "") or ""), child_relation, confidence))
     return output
+
+
+def _equation_tag_anchor_node(
+    node_by_id: dict[str, dict[str, Any]],
+    tag_nodes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    tag_ids = {str(node.get("node_id", "") or "") for node in tag_nodes}
+    body_nodes = [
+        node
+        for node in node_by_id.values()
+        if str(node.get("node_id", "") or "") not in tag_ids
+        and node.get("node_type") == "glyph"
+        and str(node.get("text", "") or node.get("unicode", "") or node.get("latex", "") or "").strip()
+    ]
+    if not body_nodes:
+        return {}
+    tag_bbox = _nodes_bbox(tag_nodes)
+    tag_center_y = (tag_bbox[1] + tag_bbox[3]) / 2.0
+    left_of_tag = [node for node in body_nodes if float(node.get("center", [0.0, 0.0])[0]) <= tag_bbox[0]]
+    candidates = left_of_tag or body_nodes
+    return min(
+        candidates,
+        key=lambda node: (
+            abs(float(node.get("center", [0.0, 0.0])[1]) - tag_center_y),
+            abs(float(node.get("center", [0.0, 0.0])[0]) - tag_bbox[0]),
+            str(node.get("node_id", "") or ""),
+        ),
+    )
 
 
 def _matrix_grid_relations_from_structure(
@@ -969,6 +1052,43 @@ def _annotation_rule_evidence_score(
     return round(max(0.0, min(1.0, (0.40 * shape) + (0.35 * span) + (0.25 * proximity))), 6)
 
 
+def _enclosure_rule_evidence_score(
+    vector: dict[str, Any],
+    body_nodes: list[dict[str, Any]],
+) -> float:
+    if vector.get("node_type") != "vector" or not body_nodes:
+        return 0.0
+    vx0, vy0, vx1, vy1 = vector["bbox"]
+    v_width = max(0.0, vx1 - vx0)
+    v_height = max(0.0, vy1 - vy0)
+    body_bbox = _nodes_bbox(body_nodes)
+    body_width = max(1e-6, body_bbox[2] - body_bbox[0])
+    body_height = max(1e-6, body_bbox[3] - body_bbox[1])
+    horizontal_shape = _horizontal_rule_score(v_width, v_height)
+    vertical_shape = _vertical_rule_score(v_width, v_height)
+    if horizontal_shape >= vertical_shape:
+        span = _overlap(vx0, vx1, body_bbox[0], body_bbox[2]) / body_width
+        distance = min(
+            abs(vy0 - body_bbox[1]),
+            abs(vy0 - body_bbox[3]),
+            abs(vy1 - body_bbox[1]),
+            abs(vy1 - body_bbox[3]),
+        )
+        proximity = 1.0 - min(1.0, distance / max(body_height * 1.5, 1e-6))
+        shape = horizontal_shape
+    else:
+        span = _overlap(vy0, vy1, body_bbox[1], body_bbox[3]) / body_height
+        distance = min(
+            abs(vx0 - body_bbox[0]),
+            abs(vx0 - body_bbox[2]),
+            abs(vx1 - body_bbox[0]),
+            abs(vx1 - body_bbox[2]),
+        )
+        proximity = 1.0 - min(1.0, distance / max(body_width * 1.5, 1e-6))
+        shape = vertical_shape
+    return round(max(0.0, min(1.0, (0.45 * shape) + (0.35 * span) + (0.20 * proximity))), 6)
+
+
 def _unicode_category_flags(text: str) -> dict[str, float]:
     categories = [unicodedata.category(char) for char in str(text or "")]
     return {
@@ -1007,6 +1127,8 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
         "MATRIX_CELL": "MATRIX_CELL",
         "CELL_CONTENT": "CELL_CONTENT",
         "TEXT_RUN_NEXT": "TEXT_RUN_NEXT",
+        "ENCLOSURE_BODY": "ENCLOSURE_BODY",
+        "EQUATION_TAG": "EQUATION_TAG",
     }
     selected = []
     for index, item in enumerate(predictions.get("predictions", []) or []):
@@ -1176,6 +1298,12 @@ def _horizontal_rule_score(width: float, height: float) -> float:
     if width <= 0:
         return 0.0
     return max(0.0, min(1.0, 1.0 - (height / max(width, 1e-6))))
+
+
+def _vertical_rule_score(width: float, height: float) -> float:
+    if height <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - (width / max(height, 1e-6))))
 
 
 def _node_sort_key(node: dict[str, Any]) -> tuple[float, float, str]:

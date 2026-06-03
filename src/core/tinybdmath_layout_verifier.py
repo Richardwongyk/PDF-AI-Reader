@@ -39,6 +39,8 @@ LAYOUT_SUPPORTED_RELATIONS = {
     "MATRIX_ROW",
     "MATRIX_CELL",
     "CELL_CONTENT",
+    "ENCLOSURE_BODY",
+    "EQUATION_TAG",
 }
 
 BLOCKING_DECODER_WARNINGS = {
@@ -57,6 +59,8 @@ REVIEW_DECODER_WARNINGS = {
     "decoder_overline_missing_group": "layout_decoder_overline_missing_group",
     "decoder_underline_missing_group": "layout_decoder_underline_missing_group",
     "decoder_accent_missing_group": "layout_decoder_accent_missing_group",
+    "decoder_enclosure_body_unwrapped": "layout_decoder_enclosure_body_unwrapped",
+    "decoder_enclosure_missing_body": "layout_decoder_enclosure_missing_body",
     "decoder_ignored_backward_text_run_next": "layout_decoder_ignored_backward_text_run_next",
     "decoder_text_run_cycle": "layout_decoder_text_run_cycle",
     "graph_parser_no_selected_relations": "layout_graph_parser_no_selected_relations",

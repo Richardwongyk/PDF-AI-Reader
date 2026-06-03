@@ -115,6 +115,29 @@ def test_constrained_decode_treats_radical_index_as_serialized_schema() -> None:
     assert {item["relation"] for item in result.canonical_cslt["relations"]} == {"RADICAL_BODY", "RADICAL_INDEX"}
 
 
+def test_constrained_decode_treats_enclosure_and_equation_tag_as_serialized_schema() -> None:
+    result = constrain_structural_candidate(
+        [
+            {"node_id": "g0", "latex": "x"},
+            {"node_id": "g1", "latex": "(1)"},
+        ],
+        {
+            "selected_relations": [
+                {"source": "v0", "target": "g0", "relation": "ENCLOSURE_BODY", "confidence": 0.89},
+                {"source": "g0", "target": "g1", "relation": "EQUATION_TAG", "confidence": 0.88},
+            ],
+            "model_version": "graph_parser",
+        },
+        vectors=[{"node_id": "v0", "bbox": [0, 0, 16, 1]}],
+    )
+
+    assert result.status == "pass"
+    assert result.blockers == ()
+    assert result.nonserialized_relations == ()
+    assert {item["relation"] for item in result.canonical_cslt["relations"]} == {"ENCLOSURE_BODY", "EQUATION_TAG"}
+    assert all(item["serialized"] is True for item in result.canonical_cslt["relations"])
+
+
 def test_constrained_decode_outputs_canonical_and_n_best_cslt_from_model_edges() -> None:
     result = constrain_structural_candidate(
         [

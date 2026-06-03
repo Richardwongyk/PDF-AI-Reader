@@ -98,6 +98,30 @@ def test_layout_verifier_passes_radical_index_structure() -> None:
     assert decoded.layout_verification["supported_relation_count"] == 2
 
 
+def test_layout_verifier_supports_enclosure_and_equation_tag_relations() -> None:
+    decoded = decode_latex_candidate(
+        [
+            {"node_id": "g0", "latex": "x", "bbox": [4, 4, 8, 10]},
+            {"node_id": "g1", "latex": "(1)", "bbox": [40, 4, 55, 10]},
+        ],
+        {
+            "selected_relations": [
+                {"source": "v0", "target": "g0", "relation": "ENCLOSURE_BODY", "confidence": 0.91},
+                {"source": "g0", "target": "g1", "relation": "EQUATION_TAG", "confidence": 0.90},
+            ],
+            "verifier_warnings": [],
+        },
+        vectors=[{"node_id": "v0", "bbox": [0, 1, 15, 1.4]}],
+        fallback_text="x(1)",
+    )
+
+    assert decoded.latex == "x"
+    assert decoded.layout_status == "review"
+    assert decoded.layout_verification["supported_relation_count"] == 2
+    assert "layout_unsupported_relation_labels" not in decoded.warnings
+    assert "layout_decoder_enclosure_body_unwrapped" in decoded.warnings
+
+
 def test_layout_verifier_abstains_when_graph_parser_model_is_missing() -> None:
     decoded = decode_latex_candidate(
         [{"node_id": "g0", "latex": "x", "bbox": [0, 0, 8, 10]}],
