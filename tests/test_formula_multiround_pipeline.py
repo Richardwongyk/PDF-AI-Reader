@@ -576,6 +576,42 @@ def test_formula_accuracy_report_counts_inline_math_candidates(tmp_path) -> None
     assert by_group["inline_spans:document_chunker"]["inline_near_match_rate"] >= 0.99
 
 
+def test_formula_accuracy_report_counts_tinybdmath_decoded_candidate(tmp_path) -> None:
+    from tools import formula_multiround_pipeline as pipe
+    from src.app.formula_index_store import FormulaIndexStore
+
+    latex_root = tmp_path / "latex"
+    latex_root.mkdir()
+    (latex_root / "main.tex").write_text(r"inline \(h_{t}\)", encoding="utf-8")
+    case = type("Case", (), {"name": "fake", "pdf": Path("fake.pdf"), "latex_root": latex_root})()
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    paragraph = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content=r"inline \(h_t\)",
+        bbox=(0, 0, 100, 20),
+    )
+    store.put_recognition_result(
+        doc_hash="doc-1",
+        candidate_id="p0_b0_inline_0",
+        stage="tinybdmath_structural",
+        model="tinybdmath",
+        model_version="v1",
+        preprocess_version="p1",
+        input_hash="hash",
+        latex="zzzz",
+        normalized_latex="zzzz",
+        evidence={"decoded_latex": {"latex": r"h_{t}", "confidence": 0.9, "warnings": []}},
+    )
+
+    report = pipe._formula_accuracy_report(case, store, "doc-1", [paragraph], [], max_pages=0)
+
+    by_group = {item["group"]: item for item in report["stage_metrics"]}
+    assert by_group["tinybdmath_structural:tinybdmath"]["near_match_rate"] < 0.99
+    assert by_group["tinybdmath_decoded:tinybdmath"]["near_match_rate"] >= 0.99
+
+
 def test_formula_fusion_report_includes_inline_math_candidates(tmp_path) -> None:
     from tools import formula_multiround_pipeline as pipe
     from src.app.formula_index_store import FormulaIndexStore

@@ -989,10 +989,13 @@ def _formula_accuracy_report(
         groups["inline_spans:document_chunker"] = inline_candidates
     for record in store.list_recognition_results(doc_hash, limit=10000):
         latex = str(record.latex or "").strip()
-        if not latex:
-            continue
-        key = f"{record.stage}:{record.model}"
-        groups.setdefault(key, []).append(latex)
+        if latex:
+            key = f"{record.stage}:{record.model}"
+            groups.setdefault(key, []).append(latex)
+        decoded = record.evidence.get("decoded_latex", {}) if isinstance(record.evidence, dict) else {}
+        decoded_latex = str(decoded.get("latex", "") or "").strip() if isinstance(decoded, dict) else ""
+        if decoded_latex and decoded_latex != latex:
+            groups.setdefault(f"tinybdmath_decoded:{record.model}", []).append(decoded_latex)
 
     fusion_best: list[str] = []
     fusion_accepted: list[str] = []

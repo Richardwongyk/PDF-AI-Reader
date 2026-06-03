@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.core.tinybdmath_graph_parser import (
+    TinyBDGraphParser,
+    graph_parser_predictions_to_structural_candidate,
+)
 from src.core.tinybdmath_latex_decoder import decode_latex_candidate
 from tools.formula_latex_audit import _formula_similarity, _normalize_formula_for_match
 
@@ -18,7 +22,13 @@ from tools.formula_latex_audit import _formula_similarity, _normalize_formula_fo
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate TinyBDMath decoded LaTeX candidates against graph-row labels.")
     parser.add_argument("--graph-rows", type=Path, required=True)
-    parser.add_argument("--candidates", type=Path, required=True, help="Graph Parser structural candidate JSONL")
+    candidate_source = parser.add_mutually_exclusive_group(required=True)
+    candidate_source.add_argument("--candidates", type=Path, help="Graph Parser structural candidate JSONL")
+    candidate_source.add_argument(
+        "--graph-parser-model",
+        type=Path,
+        help="Graph Parser JSON artifact; candidates are generated directly from graph rows.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
@@ -28,6 +38,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.stream and args.graph_parser_model is not None:
+        parser.error("--stream is only supported with --candidates")
     if args.stream:
         decoded_rows, warnings = _decode_rows_stream(
             args.graph_rows,
@@ -36,7 +48,10 @@ def main() -> int:
         )
     else:
         graph_rows = _read_jsonl(args.graph_rows, limit=args.limit)
-        candidates = _read_jsonl(args.candidates, limit=args.limit)
+        if args.graph_parser_model is not None:
+            candidates = _candidates_from_graph_parser(graph_rows, args.graph_parser_model)
+        else:
+            candidates = _read_jsonl(args.candidates, limit=args.limit)
         rows_by_id = {str(row.get("row_id", "")): row for row in graph_rows}
         decoded_rows, warnings = _decode_rows(candidates, rows_by_id)
     report = _build_report(decoded_rows, warnings, streaming=bool(args.stream))
@@ -48,6 +63,21 @@ def main() -> int:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     print(json.dumps({"schema_version": report["schema_version"], "rows": report["rows"], **report["metrics"]}, ensure_ascii=False, indent=2))
     return 0
+
+
+def _candidates_from_graph_parser(
+    graph_rows: list[dict[str, Any]],
+    graph_parser_model: Path,
+) -> list[dict[str, Any]]:
+    parser = TinyBDGraphParser.load(graph_parser_model)
+    candidates: list[dict[str, Any]] = []
+    for graph_row in graph_rows:
+        predictions = parser.predict_row(graph_row)
+        structural = graph_parser_predictions_to_structural_candidate(predictions)
+        structural["row_id"] = str(graph_row.get("row_id", "") or "")
+        structural["kind"] = str(graph_row.get("kind", "") or "")
+        candidates.append(structural)
+    return candidates
 
 
 def _decode_rows(

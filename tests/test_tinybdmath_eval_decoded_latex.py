@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 
-from tools.tinybdmath_eval_decoded_latex import _build_report, _decode_rows, _decode_rows_stream, _similarity
+from tools.tinybdmath_eval_decoded_latex import (
+    _build_report,
+    _candidates_from_graph_parser,
+    _decode_rows,
+    _decode_rows_stream,
+    _similarity,
+)
+from tests.test_tinybdmath_graph_parser import _graph_row, _toy_artifact
 
 
 def test_decoded_latex_eval_counts_identical_commands_as_exact() -> None:
@@ -83,3 +90,18 @@ def test_decoded_latex_eval_reports_n_best_oracle_without_replacing_rank_one() -
     assert report["metrics"]["exact_match_rate"] == 0.0
     assert report["n_best_oracle_metrics"]["oracle_exact_match_rate"] == 1.0
     assert report["accepted_latex_emitted"] is False
+
+
+def test_decoded_latex_eval_can_generate_candidates_from_graph_parser_model(tmp_path: Path) -> None:
+    model_path = tmp_path / "graph_parser.json"
+    _toy_artifact().save(model_path)
+    graph_rows = [_graph_row("r1", ["h", "t"])]
+
+    candidates = _candidates_from_graph_parser(graph_rows, model_path)
+    rows, warnings = _decode_rows(candidates, {"r1": graph_rows[0]})
+
+    assert warnings
+    assert candidates[0]["row_id"] == "r1"
+    assert candidates[0]["candidate_only"] is True
+    assert rows[0]["decoded_latex"]
+    assert rows[0]["manual_review_recommendation"]["accepted"] is False
