@@ -62,6 +62,7 @@ class TinyBDDecodedLatex:
     canonical_cslt: dict[str, Any] = field(default_factory=dict)
     n_best_cslt: tuple[dict[str, Any], ...] = ()
     latex_candidates: tuple[dict[str, Any], ...] = ()
+    verifier_ranked_candidates: tuple[dict[str, Any], ...] = ()
     manual_review_recommendation: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -716,6 +717,7 @@ def _finalize_decoded(
         layout_confidence=verification.confidence,
         layout_warnings=verification.warnings,
     )
+    verifier_ranked_candidates = _verifier_ranked_candidates(latex_candidates)
     return TinyBDDecodedLatex(
         decoder_version=decoded.decoder_version,
         latex=decoded.latex,
@@ -731,6 +733,7 @@ def _finalize_decoded(
         canonical_cslt=canonical_cslt,
         n_best_cslt=tuple(item for item in n_best_cslt if isinstance(item, dict)),
         latex_candidates=latex_candidates,
+        verifier_ranked_candidates=verifier_ranked_candidates,
         manual_review_recommendation=_manual_review_recommendation(latex_candidates),
     )
 
@@ -785,24 +788,13 @@ def _latex_candidates_from_cslt(
             evidence = _alternative_structure_evidence(candidate)
             if evidence:
                 existing.setdefault("alternative_structure_evidence", []).append(evidence)
-                existing["selection_blockers"] = sorted(
-                    set(existing.get("selection_blockers", []) or [])
-                    & set(candidate.get("selection_blockers", []) or [])
-                )
-                existing["layout_confidence"] = max(
-                    float(existing.get("layout_confidence", 0.0) or 0.0),
-                    float(candidate.get("layout_confidence", 0.0) or 0.0),
-                )
-                existing["confidence"] = max(
-                    float(existing.get("confidence", 0.0) or 0.0),
-                    float(candidate.get("confidence", 0.0) or 0.0),
-                )
             continue
         candidates.append(candidate)
         by_latex[latex] = candidate
         if len(candidates) >= 3:
             break
-    return tuple(candidates)
+    ranked = _verifier_ranked_candidates(candidates)
+    return tuple(_with_verifier_rank(candidates, ranked))
 
 
 def _latex_candidate_from_cslt_candidate(
@@ -870,8 +862,11 @@ def _alternative_structure_evidence(candidate: dict[str, Any]) -> dict[str, Any]
     if not source and not cslt_candidate_id:
         return {}
     return {
+        "rank": int(candidate.get("rank", 999) or 999),
         "source": source,
         "cslt_candidate_id": cslt_candidate_id,
+        "latex": str(candidate.get("latex", "") or ""),
+        "confidence": float(candidate.get("confidence", 0.0) or 0.0),
         "layout_status": str(candidate.get("layout_status", "") or ""),
         "layout_confidence": float(candidate.get("layout_confidence", 0.0) or 0.0),
         "selection_blockers": list(candidate.get("selection_blockers", []) or []),
@@ -879,6 +874,79 @@ def _alternative_structure_evidence(candidate: dict[str, Any]) -> dict[str, Any]
         "candidate_only": True,
         "accepted": False,
     }
+
+
+def _verifier_ranked_candidates(candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
+    ranked: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        entry = _verifier_ranking_entry(candidate)
+        key = (str(entry.get("source", "") or ""), str(entry.get("cslt_candidate_id", "") or ""))
+        if key not in seen:
+            ranked.append(entry)
+            seen.add(key)
+        for alternative in candidate.get("alternative_structure_evidence", []) or []:
+            if not isinstance(alternative, dict):
+                continue
+            alt_entry = _verifier_ranking_entry(
+                {
+                    **alternative,
+                    "rank": int(alternative.get("rank", candidate.get("rank", 999)) or 999),
+                    "latex": candidate.get("latex", ""),
+                }
+            )
+            alt_key = (str(alt_entry.get("source", "") or ""), str(alt_entry.get("cslt_candidate_id", "") or ""))
+            if alt_key in seen:
+                continue
+            ranked.append(alt_entry)
+            seen.add(alt_key)
+    return tuple(
+        sorted(
+            ranked,
+            key=lambda item: (
+                _layout_status_rank(str(item.get("layout_status", "") or "")),
+                float(item.get("layout_confidence", 0.0) or 0.0),
+                float(item.get("confidence", 0.0) or 0.0),
+                -int(item.get("rank", 999) or 999),
+            ),
+            reverse=True,
+        )
+    )
+
+
+def _verifier_ranking_entry(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": int(candidate.get("rank", 999) or 999),
+        "latex": str(candidate.get("latex", "") or ""),
+        "confidence": float(candidate.get("confidence", 0.0) or 0.0),
+        "layout_status": str(candidate.get("layout_status", "") or ""),
+        "layout_confidence": float(candidate.get("layout_confidence", 0.0) or 0.0),
+        "selection_blockers": list(candidate.get("selection_blockers", []) or []),
+        "warnings": list(candidate.get("warnings", candidate.get("layout_warnings", [])) or []),
+        "source": str(candidate.get("source", "") or ""),
+        "cslt_candidate_id": str(candidate.get("cslt_candidate_id", "") or ""),
+        "candidate_only": True,
+        "accepted": False,
+    }
+
+
+def _with_verifier_rank(
+    candidates: list[dict[str, Any]],
+    ranked: tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    rank_by_key = {
+        (str(item.get("source", "") or ""), str(item.get("cslt_candidate_id", "") or "")): index
+        for index, item in enumerate(ranked, start=1)
+    }
+    output: list[dict[str, Any]] = []
+    for candidate in candidates:
+        payload = dict(candidate)
+        key = (str(payload.get("source", "") or ""), str(payload.get("cslt_candidate_id", "") or ""))
+        verifier_rank = rank_by_key.get(key)
+        if verifier_rank is not None:
+            payload["verifier_rank"] = verifier_rank
+        output.append(payload)
+    return output
 
 
 def _structural_candidate_for_relations(
@@ -922,16 +990,7 @@ def _manual_review_recommendation(candidates: tuple[dict[str, Any], ...]) -> dic
             "auto_accept_allowed": False,
             "reason": "no_latex_candidates",
         }
-    ranked = sorted(
-        candidates,
-        key=lambda item: (
-            _layout_status_rank(str(item.get("layout_status", "") or "")),
-            float(item.get("layout_confidence", item.get("confidence", 0.0)) or 0.0),
-            float(item.get("confidence", 0.0) or 0.0),
-            -int(item.get("rank", 999) or 999),
-        ),
-        reverse=True,
-    )
+    ranked = _verifier_ranked_candidates(candidates)
     best = ranked[0]
     rank = int(best.get("rank", 0) or 0)
     blockers = set(str(item) for item in best.get("selection_blockers", []) or [])
@@ -947,6 +1006,8 @@ def _manual_review_recommendation(candidates: tuple[dict[str, Any], ...]) -> dic
         "layout_status": str(best.get("layout_status", "") or ""),
         "layout_confidence": float(best.get("layout_confidence", 0.0) or 0.0),
         "selection_blockers": sorted(blockers),
+        "source": str(best.get("source", "") or ""),
+        "cslt_candidate_id": str(best.get("cslt_candidate_id", "") or ""),
         "reason": "highest_verifier_confidence_candidate_for_manual_review",
     }
 

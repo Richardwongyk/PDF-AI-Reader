@@ -430,8 +430,17 @@ def test_decoder_keeps_duplicate_latex_alternative_structure_evidence() -> None:
 
     assert decoded.latex == "ab"
     assert decoded.latex_candidates[0]["latex"] == "ab"
+    assert decoded.latex_candidates[0]["layout_status"] == "abstain"
+    assert "layout_abstain" in decoded.latex_candidates[0]["selection_blockers"]
     assert decoded.latex_candidates[0]["alternative_structure_evidence"]
     evidence = decoded.latex_candidates[0]["alternative_structure_evidence"][0]
     assert evidence["cslt_candidate_id"] == "acyclic_projection"
+    assert evidence["rank"] == 2
+    assert evidence["layout_status"] == "pass"
+    assert decoded.verifier_ranked_candidates[0]["cslt_candidate_id"] == "acyclic_projection"
+    assert decoded.verifier_ranked_candidates[0]["layout_status"] == "pass"
+    assert decoded.manual_review_recommendation["recommended_rank"] == 2
+    assert decoded.manual_review_recommendation["cslt_candidate_id"] == "acyclic_projection"
+    assert "manual_review_required_for_non_rank_one_candidate" in decoded.manual_review_recommendation["selection_blockers"]
     assert evidence["candidate_only"] is True
     assert evidence["accepted"] is False

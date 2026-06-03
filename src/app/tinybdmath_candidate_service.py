@@ -112,6 +112,7 @@ class TinyBDMathCandidateService:
                         "relation_scoring": result["relation_scoring"],
                         "structural_candidate": result["structural_candidate"],
                         "decoded_latex": decoded,
+                        "score_evidence": result["score_evidence"],
                         "candidate_only": True,
                         "notes": [
                             "TinyBDMath r2a uses born-digital PDF structure evidence only.",
@@ -219,6 +220,7 @@ class TinyBDMathCandidateService:
                         "relation_scoring": result["relation_scoring"],
                         "structural_candidate": result["structural_candidate"],
                         "decoded_latex": decoded,
+                        "score_evidence": result["score_evidence"],
                         "candidate_only": True,
                         "notes": [
                             "TinyBDMath inline r2a uses born-digital PDF span/font/bbox evidence only.",
@@ -398,17 +400,15 @@ class TinyBDMathCandidateService:
             vectors=list(payload.get("vectors", [])),
             fallback_text=str(payload.get("pdf_text", "") or ""),
         ).to_json()
+        score = _decoded_candidate_score(decoded_latex)
         return {
-            "score": float(
-                decoded_latex.get("layout_confidence")
-                or decoded_latex.get("confidence")
-                or 0.0
-            ),
+            "score": score["score"],
             "warnings": warnings + list(structural_candidate.get("verifier_warnings", [])) + list(decoded_latex.get("warnings", [])),
             "graph_parser": graph_parser,
             "relation_scoring": relation_scoring,
             "structural_candidate": structural_candidate,
             "decoded_latex": decoded_latex,
+            "score_evidence": score,
         }
 
     def _relation_payload(self, predictions: dict[str, Any], structural: dict[str, Any]) -> dict[str, Any]:
@@ -480,6 +480,7 @@ class TinyBDMathCandidateService:
             "relation_scoring": result.get("relation_scoring", {}),
             "structural_candidate": result.get("structural_candidate", {}),
             "decoded_latex": result.get("decoded_latex", {}),
+            "score_evidence": result.get("score_evidence", {}),
             "warnings": warnings,
             "candidate_only": True,
         }
@@ -604,6 +605,39 @@ def _bbox_from_payload(payload: dict[str, Any]) -> tuple[float, float, float, fl
         return tuple(float(value) for value in bbox)  # type: ignore[return-value]
     except (TypeError, ValueError):
         return (0.0, 0.0, 0.0, 0.0)
+
+
+def _decoded_candidate_score(decoded_latex: dict[str, Any]) -> dict[str, Any]:
+    recommendation = decoded_latex.get("manual_review_recommendation", {})
+    if isinstance(recommendation, dict):
+        recommended_confidence = _float(recommendation.get("layout_confidence"))
+        if recommended_confidence > 0:
+            return {
+                "score": recommended_confidence,
+                "source": "manual_review_recommendation_layout_confidence",
+                "recommended_rank": _int(recommendation.get("recommended_rank")),
+                "latex": str(recommendation.get("latex", "") or ""),
+                "layout_status": str(recommendation.get("layout_status", "") or ""),
+                "source_candidate": str(recommendation.get("source", "") or ""),
+                "cslt_candidate_id": str(recommendation.get("cslt_candidate_id", "") or ""),
+                "candidate_only": True,
+                "accepted": False,
+            }
+    return {
+        "score": float(
+            decoded_latex.get("layout_confidence")
+            or decoded_latex.get("confidence")
+            or 0.0
+        ),
+        "source": "selected_structural_candidate_layout_confidence",
+        "recommended_rank": 1,
+        "latex": str(decoded_latex.get("latex", "") or ""),
+        "layout_status": str(decoded_latex.get("layout_status", "") or ""),
+        "source_candidate": "selected_structural_candidate",
+        "cslt_candidate_id": "selected",
+        "candidate_only": True,
+        "accepted": False,
+    }
 
 
 def _json_hash(payload: dict[str, object]) -> str:

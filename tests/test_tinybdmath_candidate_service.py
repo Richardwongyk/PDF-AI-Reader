@@ -101,6 +101,48 @@ def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Pa
     assert result.score is not None
 
 
+def test_tinybdmath_candidate_service_scores_verifier_recommended_n_best_candidate(tmp_path: Path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula.db"))
+    graph_parser_path = tmp_path / "graph_parser.json"
+    _toy_graph_parser_artifact("NEXT").save(graph_parser_path)
+
+    summary = TinyBDMathCandidateService(store, graph_parser_model_path=graph_parser_path).process_inline_candidates(
+        "doc",
+        [
+            {
+                "candidate_id": "cycle_inline",
+                "latex": "ht",
+                "page_num": 1,
+                "bbox": [0, 0, 20, 12],
+                "inline_pdf_evidence": {
+                    "bbox": [0, 0, 20, 12],
+                    "spans": [
+                        {"text": "h", "font": "CMMI10", "size": 10, "bbox": [0, 0, 8, 10]},
+                        {"text": "t", "font": "CMMI10", "size": 10, "bbox": [10, 0, 18, 10]},
+                    ],
+                },
+            }
+        ],
+        filepath="fake.pdf",
+    )
+
+    assert summary["processed"] == 1
+    result = store.list_recognition_results("doc", candidate_id="cycle_inline", stage="tinybdmath_structural")[0]
+    decoded = result.evidence["decoded_latex"]
+    score_evidence = result.evidence["score_evidence"]
+
+    assert result.accepted is False
+    assert decoded["layout_status"] == "abstain"
+    assert decoded["manual_review_recommendation"]["cslt_candidate_id"] == "acyclic_projection"
+    assert decoded["manual_review_recommendation"]["accepted"] is False
+    assert decoded["verifier_ranked_candidates"][0]["cslt_candidate_id"] == "acyclic_projection"
+    assert score_evidence["source"] == "manual_review_recommendation_layout_confidence"
+    assert score_evidence["cslt_candidate_id"] == "acyclic_projection"
+    assert score_evidence["candidate_only"] is True
+    assert score_evidence["accepted"] is False
+    assert result.score == score_evidence["score"]
+
+
 def test_tinybdmath_candidate_service_carries_vector_rule_nodes(tmp_path: Path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula.db"))
     store.put_recognition_result(
