@@ -171,6 +171,48 @@ def test_constrained_decode_outputs_canonical_and_n_best_cslt_from_model_edges()
     assert all(item["candidate_only"] is True for item in result.n_best_cslt)
 
 
+def test_constrained_decode_beams_multiple_relation_alternatives_into_one_candidate() -> None:
+    result = constrain_structural_candidate(
+        [
+            {"node_id": "g0", "latex": "x", "bbox": [0, 0, 8, 10]},
+            {"node_id": "g1", "latex": "i", "bbox": [9, 4, 12, 10]},
+            {"node_id": "g2", "latex": "j", "bbox": [13, 4, 16, 10]},
+        ],
+        {
+            "selected_relations": [
+                {"source": "g0", "target": "g1", "relation": "HORIZONTAL", "confidence": 0.91},
+            ],
+            "relation_alternatives": [
+                {
+                    "source": "g0",
+                    "target": "g1",
+                    "alternatives": [
+                        {"relation": "HORIZONTAL", "confidence": 0.91},
+                        {"relation": "SUB", "confidence": 0.82},
+                    ],
+                },
+                {
+                    "source": "g1",
+                    "target": "g2",
+                    "alternatives": [
+                        {"relation": "HORIZONTAL", "confidence": 0.81},
+                    ],
+                },
+            ],
+            "model_version": "graph_parser",
+        },
+    )
+
+    relation_sets = [
+        {(item["source"], item["target"], item["relation"]) for item in candidate["relations"]}
+        for candidate in result.n_best_cslt
+    ]
+    assert {
+        ("g0", "g1", "SUB"),
+        ("g1", "g2", "HORIZONTAL"),
+    } in relation_sets
+
+
 def test_constrained_decode_adds_acyclic_projection_without_replacing_selected_graph() -> None:
     result = constrain_structural_candidate(
         [

@@ -70,6 +70,11 @@ SERIALIZED_RELATION_SUBSET = {
     "EQUATION_TAG",
 }
 
+CSLT_N_BEST_DEFAULT_LIMIT = 8
+CSLT_N_BEST_BEAM_WIDTH = 24
+CSLT_N_BEST_RELATION_PAIR_LIMIT = 32
+CSLT_N_BEST_ALTERNATIVES_PER_PAIR = 2
+
 
 @dataclass(frozen=True)
 class TinyBDConstrainedDecodeResult:
@@ -335,7 +340,7 @@ def _n_best_cslt(
     relation_alternatives: list[Any],
     semantic_nodes: list[dict[str, Any]],
     vectors: list[dict[str, Any]],
-    limit: int = 3,
+    limit: int = CSLT_N_BEST_DEFAULT_LIMIT,
 ) -> list[dict[str, Any]]:
     candidates: dict[tuple[tuple[str, str, str], ...], dict[str, Any]] = {
         _relation_signature(selected_relations): dict(canonical_cslt)
@@ -372,47 +377,17 @@ def _n_best_cslt(
         if projected:
             add_candidate(projected, candidate_id="acyclic_projection", rank=2)
 
-    selected_by_pair = {
-        (str(item.get("source", "") or ""), str(item.get("target", "") or "")): item
-        for item in selected_relations
-    }
     rank = 2 + (1 if _has_directed_cycle(selected_relations) else 0)
-    for item in relation_alternatives:
-        if not isinstance(item, dict):
-            continue
-        source = str(item.get("source", "") or "")
-        target = str(item.get("target", "") or "")
-        if not source or not target:
-            continue
-        current = selected_by_pair.get((source, target))
-        for alternative in item.get("alternatives", []) or []:
-            if not isinstance(alternative, dict):
-                continue
-            relation = str(alternative.get("relation", "") or "")
-            if relation not in CSLT_RELATION_SCHEMA:
-                continue
-            if current is not None and relation == str(current.get("relation", "") or ""):
-                continue
-            replaced = [
-                relation_item
-                for relation_item in selected_relations
-                if (str(relation_item.get("source", "") or ""), str(relation_item.get("target", "") or ""))
-                != (source, target)
-            ]
-            replaced.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "relation": relation,
-                    "confidence": float(alternative.get("confidence", 0.0) or 0.0),
-                    "hint": "graph_parser_alternative",
-                    "reason": "graph_parser_relation_alternative",
-                }
-            )
-            add_candidate(replaced, candidate_id=f"alternative_{rank - 1}", rank=rank)
-            rank += 1
-            if len(candidates) >= limit:
-                break
+    semantic_node_ids = {_node_id(item) for item in semantic_nodes if _node_id(item)}
+    beam_candidates = _beam_relation_alternative_candidates(
+        selected_relations=selected_relations,
+        relation_alternatives=relation_alternatives,
+        semantic_node_ids=semantic_node_ids,
+        limit=max(0, limit - len(candidates)),
+    )
+    for relations in beam_candidates:
+        add_candidate(relations, candidate_id=f"beam_{rank - 1:03d}", rank=rank)
+        rank += 1
         if len(candidates) >= limit:
             break
     selected_signature = _relation_signature(selected_relations)
@@ -429,6 +404,132 @@ def _n_best_cslt(
     for index, item in enumerate(output, start=1):
         item["rank"] = index
     return output or [canonical_cslt]
+
+
+def _beam_relation_alternative_candidates(
+    *,
+    selected_relations: list[dict[str, Any]],
+    relation_alternatives: list[Any],
+    semantic_node_ids: set[str],
+    limit: int,
+) -> list[list[dict[str, Any]]]:
+    if limit <= 0:
+        return []
+    selected = _dedupe_relations(selected_relations)
+    selected_signature = _relation_signature(selected)
+    selected_by_pair = {
+        (str(item.get("source", "") or ""), str(item.get("target", "") or "")): item
+        for item in selected
+    }
+    pair_options = _beam_pair_options(relation_alternatives, selected_by_pair)
+    if not pair_options:
+        return []
+    beams: list[list[dict[str, Any]]] = [selected]
+    seen_signatures = {selected_signature}
+    for source, target, alternatives in pair_options[:CSLT_N_BEST_RELATION_PAIR_LIMIT]:
+        next_beams = list(beams)
+        for relations in beams:
+            base = [
+                item
+                for item in relations
+                if (str(item.get("source", "") or ""), str(item.get("target", "") or "")) != (source, target)
+            ]
+            for alternative in alternatives[:CSLT_N_BEST_ALTERNATIVES_PER_PAIR]:
+                candidate = _dedupe_relations(
+                    base
+                    + [
+                        {
+                            "source": source,
+                            "target": target,
+                            "relation": str(alternative.get("relation", "") or ""),
+                            "confidence": _float(alternative.get("confidence")),
+                            "hint": "graph_parser_alternative",
+                            "reason": "graph_parser_relation_beam",
+                        }
+                    ]
+                )
+                if _has_directed_cycle(candidate):
+                    continue
+                signature = _relation_signature(candidate)
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                next_beams.append(candidate)
+        beams = sorted(
+            next_beams,
+            key=lambda item: _beam_relation_score(item, semantic_node_ids),
+            reverse=True,
+        )[:CSLT_N_BEST_BEAM_WIDTH]
+    output = [
+        item
+        for item in beams
+        if _relation_signature(item) != selected_signature
+    ]
+    return sorted(
+        output,
+        key=lambda item: _beam_relation_score(item, semantic_node_ids),
+        reverse=True,
+    )[:limit]
+
+
+def _beam_pair_options(
+    relation_alternatives: list[Any],
+    selected_by_pair: dict[tuple[str, str], dict[str, Any]],
+) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    output: list[tuple[str, str, list[dict[str, Any]]]] = []
+    for item in relation_alternatives:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source", "") or "")
+        target = str(item.get("target", "") or "")
+        if not source or not target:
+            continue
+        current = selected_by_pair.get((source, target))
+        current_relation = str(current.get("relation", "") or "") if current is not None else ""
+        best_by_relation: dict[str, dict[str, Any]] = {}
+        for alternative in item.get("alternatives", []) or []:
+            if not isinstance(alternative, dict):
+                continue
+            relation = str(alternative.get("relation", "") or "")
+            if relation not in CSLT_RELATION_SCHEMA or relation == current_relation:
+                continue
+            confidence = _float(alternative.get("confidence"))
+            if confidence <= 0.0:
+                continue
+            current_best = best_by_relation.get(relation)
+            if current_best is None or confidence > _float(current_best.get("confidence")):
+                best_by_relation[relation] = {"relation": relation, "confidence": confidence}
+        alternatives = sorted(
+            best_by_relation.values(),
+            key=lambda alternative: _float(alternative.get("confidence")),
+            reverse=True,
+        )
+        if alternatives:
+            output.append((source, target, alternatives))
+    return sorted(
+        output,
+        key=lambda item: _float(item[2][0].get("confidence")) if item[2] else 0.0,
+        reverse=True,
+    )
+
+
+def _beam_relation_score(relations: list[dict[str, Any]], semantic_node_ids: set[str]) -> tuple[float, float, float]:
+    schema_relations = [
+        item
+        for item in _dedupe_relations(relations)
+        if str(item.get("relation", "") or "") in CSLT_RELATION_SCHEMA
+    ]
+    if not schema_relations:
+        return (0.0, 0.0, 0.0)
+    confidence = sum(_float(item.get("confidence")) for item in schema_relations) / len(schema_relations)
+    relation_node_ids = _semantic_relation_node_ids(schema_relations, semantic_node_ids)
+    coverage = len(relation_node_ids) / len(semantic_node_ids) if semantic_node_ids else 0.0
+    relation_density = min(1.0, len(schema_relations) / max(1.0, len(semantic_node_ids) - 1))
+    return (
+        round((0.58 * confidence) + (0.32 * coverage) + (0.10 * relation_density), 6),
+        round(coverage, 6),
+        round(confidence, 6),
+    )
 
 
 def _acyclic_relation_projection(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
