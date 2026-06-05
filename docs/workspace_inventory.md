@@ -1,6 +1,6 @@
 # Workspace Inventory
 
-Last updated: 2026-06-02.
+Last updated: 2026-06-05.
 
 This file records the practical workspace layout. It is about local cleanup and
 handoff, not product design.
@@ -41,6 +41,17 @@ Kept after the 2026-06-02 cleanup:
 
 `.pytest_cache` currently has unreadable permissions and near-zero size, so it
 was left in place instead of force-changing ACLs.
+
+## Current Working Tree Notes
+
+- As of the latest documentation audit, tracked files are expected to be clean
+  after the UI commits; the persistent untracked entry is `测试资料/`.
+- Do not commit generated logs, caches, `test_artifacts/`, or any files under
+  `测试资料/`.
+- Recent UI verification touched only tracked source/test/docs files. The latest
+  small UI test combo is `tests/test_smoke.py tests/test_pdf_viewer_navigation.py
+  -q` with 30 passed; this does not replace the full Attention/Napkin desktop
+  E2E gate.
 
 ## Current TinyBDMath Entrypoints
 

@@ -44,6 +44,9 @@
 - `4e4a861 Complete TinyBDMath graph parser eval loop`
 - `aceba02 Improve TinyBDMath target parsing and eval tooling`
 - `a5091f8 Add AI dock panel controls`
+- `745c9b1 Fix translation split text alignment`
+- `c509dae Refine dock controls and top chrome`
+- `fb1f86a Center PDF content after panel and zoom changes`
 
 此前 TinyBDMath 范围收口已在 Graph Parser M1 基础上提交节点保留/丢弃学习：
 
@@ -71,7 +74,7 @@
 当前 r2a 默认推理路径只保留 Graph Parser artifact。缺模型时写 candidate-only
 abstain 和缺模型 warning。
 
-2026-06-05 UI 状态（`a5091f8 Add AI dock panel controls` 后接续完善左侧开关）：
+2026-06-05 UI 状态（已提交到 `fb1f86a Center PDF content after panel and zoom changes`）：
 
 - `src/ui/main_window.py`
   - 主工具栏设置 objectName `main_toolbar`。
@@ -91,6 +94,11 @@ abstain 和缺模型 warning。
   - 中央阅读区水平滚动条从禁用改为按需显示。
   - 缩放后页面宽度超过视口时会同步内容最小宽度和横向滚动范围。
   - `scroll_to_bbox` 会同步横向滚动到 bbox 的 x 坐标附近。
+  - 页面 widget、翻译裂缝和问答裂缝统一水平居中插入；侧栏折叠后会延迟触发水平居中。
+  - split page 缩放/离屏恢复会按当前 page meta 宽度和 DPR 重建，避免开过翻译框的页停在旧缩放宽度。
+- `src/ui/split_widget.py`
+  - 翻译裂缝 WebView 支持内容左右 padding，`PdfViewer` 会按原文 block bbox 设置 padding。
+  - 这解决的是译文列和原 PDF 段落左右边界不齐，不改变翻译公式保护或多轮公式候选边界。
 - `src/ui/pdf_viewer.py` / `src/ui/theme.py`
   - 全局 tooltip 改成白字深底，移除旧的紫色 tooltip 文本注入。
 - `src/main.py` / `src/ui/main_window.py`
@@ -99,11 +107,12 @@ abstain 和缺模型 warning。
   - `test_main_window_smoke` 覆盖左右侧栏菜单栏同层 toggle、按钮小尺寸、tooltip 状态、
     左右 dock 不可关闭、左右 float/restore、工具栏空白区双击和恢复细条双击。
 - `tests/test_pdf_viewer_navigation.py`
-  - 覆盖按需水平滚动条和 bbox 横向跳转。
+  - 覆盖按需水平滚动条、bbox 横向跳转、页面水平居中、侧栏折叠后居中、split page 缩放重建和离屏 split 状态保持。
 - 已补跑：
-  - `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_smoke.py -q`
   - `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_pdf_viewer_navigation.py -q`
-  - 结果：smoke 11 passed；PDF viewer navigation 14 passed。
+    - 结果：19 passed。
+  - `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q`
+    - 结果：30 passed。
 
 2026-06-02 进一步收束：第一阶段目标不是开放科学记号识别，而是 AI/Math 论文
 中的通用数学排版结构恢复。数学公式不能按内容枚举；应按 LaTeX/amsmath/

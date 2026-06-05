@@ -59,16 +59,24 @@ radical、accent、fence、matrix/aligned、operator、text run、style/mathvari
   - 新增 AI/Math LaTeX 结构范围文档。
   - 删除旧 TinyBDMath quality/edge/sharded/gold/review 路线、孤立历史文档和旧脚本入口。
 
-- 2026-06-05 侧栏 UI 小步（从 `a5091f8 Add AI dock panel controls` 接续完善）
-  - `src/ui/main_window.py` 左侧导航 dock 和右侧 `AI 工具集` dock 都去掉关闭按钮。
-  - 主工具栏最左侧 `left_panel_toggle_button` 可隐藏/显示左侧导航；最右侧
-    `right_panel_toggle_button` 可隐藏/显示右侧 AI 面板；两个按钮均为 30px icon-only 线头按钮。
-  - 右侧自定义 dock 标题栏保留 `right_dock_float_button`，支持弹出独立窗口和归位右侧栏。
-  - tooltip 已统一为白字深底；默认生成路由走云端，非 `local_only` 启动不再弹 Ollama。
-  - `src/ui/pdf_viewer.py` 中央阅读区改为按需水平滚动，bbox 跳转会同步横向定位。
-  - `tests/test_smoke.py` 覆盖 `main_toolbar`、左右 toggle、按钮小尺寸、tooltip 状态、
-    dock 不可关闭和右侧 float/restore；`tests/test_pdf_viewer_navigation.py` 覆盖横向滚动。
-  - 已补跑 `tests/test_smoke.py -q`：11 passed；`tests/test_pdf_viewer_navigation.py -q`：14 passed。
+- `745c9b1 Fix translation split text alignment`
+  - 翻译裂缝宽度跟随页面宽度。
+  - WebView 内容区按原文 block bbox 设置左右 padding，避免译文列和原文列错位。
+
+- `c509dae Refine dock controls and top chrome`
+  - 左侧导航 dock 和右侧 `AI 工具集` dock 都去掉关闭按钮，保留 movable/floatable。
+  - 左右侧栏隐藏/显示按钮移动到菜单栏同层左右角，均为 30px icon-only 线头按钮。
+  - 左右 dock 都使用自定义标题栏，支持弹出独立窗口和归位。
+  - 顶部工具栏空白区可双击折叠工具栏/状态栏，折叠后中央阅读区顶部细条可双击恢复。
+  - 菜单栏文字区域双击折叠未可靠满足需求，用户已决定暂不继续。
+  - 文档标签页/标签关闭当前文档已讨论，当前暂不实现。
+
+- `fb1f86a Center PDF content after panel and zoom changes`
+  - 侧栏折叠后延迟触发 PDF 阅读区水平居中，同时保留按需横向滚动。
+  - 页面 widget、翻译裂缝和问答裂缝统一按页面宽度水平居中插入。
+  - split page 缩放/离屏恢复会按当前 page meta 宽度和 DPR 重建，修复开过翻译框的页缩放后停在旧位置的问题。
+  - 最新已补跑 `tests/test_pdf_viewer_navigation.py -q`：19 passed；
+    `tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q`：30 passed。
 
 2026-06-02 当前已在 Graph Parser M1 上提交“节点保留/丢弃”学习：
 
@@ -93,13 +101,14 @@ abstain 和缺模型 warning。
 
 `测试资料/` 是用户资料，不提交、不清理、不移动。
 
-当前主窗口左侧导航和右侧 AI 工具集都可以通过主工具栏的小型 icon-only 按钮隐藏/显示；
+当前主窗口左侧导航和右侧 AI 工具集都可以通过菜单栏同层左右角的小型 icon-only 按钮隐藏/显示；
 右侧 AI 工具集仍是全文问答/证据/回答/追问入口，也可以从自定义 dock 标题栏弹出为独立
 窗口或归位到右侧栏。这只是阅读界面可用性更新，不改变公式多轮索引、RAG/GraphRAG 或
 accepted gate 边界。
 
 当前中央 PDF 阅读区支持按需水平滚动。缩放后页面宽度超过视口时会出现横向滚动范围；
-从证据 bbox 跳转时会同时调整垂直和水平滚动位置。
+侧栏折叠后会把页面重新水平居中；从证据 bbox 跳转时会同时调整垂直和水平滚动位置。
+翻译裂缝内容按原文 bbox 做左右 padding，split page 缩放后的段图和 overlay 会按当前缩放重建。
 
 ## 3. 关键结论
 

@@ -46,13 +46,15 @@
 - 2026-06-02 已重写 TinyBDMath 下一步方案。下一步先做 AI/Math LaTeX 结构覆盖审计、
   CSLT 目标树、PDF graph 到 CSLT 的 alignment、Graph Parser、constrained decode 和 layout verifier；细节见
   `docs/tiny_born_digital_math_model_engineering.md` 和 `docs/current_goal_and_next_steps.md`。
-- 2026-06-05 已提交并推送 `a5091f8 Add AI dock panel controls`，随后接续完善侧栏开关：
-  左侧导航 dock 通过工具栏最左侧 `left_panel_toggle_button` 隐藏/显示，右侧 `AI 工具集`
-  通过工具栏最右侧 `right_panel_toggle_button` 隐藏/显示；两个按钮均为 30px icon-only
-  线头按钮，白色边框、黑底、蓝色线条。左右 dock 都不可关闭，右侧仍可通过
-  `right_dock_float_button` 弹出独立窗口和归位到右侧栏。同轮还把全局 tooltip 改成白字深底，
-  默认生成路由走云端并跳过启动 Ollama 弹窗，中央 `PdfViewer` 改为按需水平滚动。
-  `tests/test_smoke.py -q` 和 `tests/test_pdf_viewer_navigation.py -q` 已通过。
+- 2026-06-05 UI 小步已提交到 `fb1f86a Center PDF content after panel and zoom changes`：
+  左侧导航 dock 和右侧 `AI 工具集` 的隐藏/显示按钮位于菜单栏同层左右角；左右 dock
+  都不可关闭，并各自支持标题栏弹出独立窗口和归位。全局 tooltip 已改成白字深底，
+  默认生成路由走云端并跳过启动 Ollama 弹窗。中央 `PdfViewer` 支持按需水平滚动、
+  侧栏折叠后水平居中和 bbox 横向定位；翻译裂缝正文按原文 block bbox 设置左右 padding；
+  split page 缩放/离屏恢复会按当前页面宽度重建。菜单栏文字区域双击折叠未可靠满足需求，
+  当前暂不继续；文档标签页/标签关闭当前文档也暂不实现。最新 UI/导航回归：
+  `tests/test_pdf_viewer_navigation.py -q` 为 19 passed，
+  `tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q` 为 30 passed。
 - 外部工具模型缓存已迁到仓库本地 `.tool_models/`，并由 `PDF_AI_READER_TOOL_MODELS_DIR`
   作为统一覆盖入口；不要再把新模型缓存放到 `C:\pdf_ai_reader_tool_models` 或用户默认
   `.cache\modelscope`。

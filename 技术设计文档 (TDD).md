@@ -1,9 +1,9 @@
 # PDF AI 阅读器 · 技术设计文档 (TDD)
 
-**版本:** V5.0（2026-05-28 状态校准）
-**日期:** 2026-05-28
+**版本:** V5.1（2026-06-05 状态校准）
+**日期:** 2026-06-05
 **状态:** 架构基线 + 历史设计说明
-**依赖文档:** 产品需求文档 (PRD) V5.0
+**依赖文档:** 产品需求文档 (PRD) V5.1
 **开发语言:** Python 3.14.4
 **GUI 框架:** PySide6 ≥ 6.11.0
 **生成模型:** LiteLLM 云端 / Ollama 本地 / Mock 测试降级
@@ -16,7 +16,7 @@
 
 本文档保留 PDF AI Reader 的主要技术结构，但 2026-05-03 版本中关于“本地 Qwen/BGE-M3 默认、Chroma 单一路线、两阶段公式检测”的内容已经被后续实现覆盖。新会话判断当前状态时，应以 `AGENTS.md`、`docs/next_session_handoff.md`、`docs/current_goal_and_next_steps.md`、`docs/async_formula_indexing_design.md` 和源码为准。
 
-2026-05-28 当前新增的权威边界：
+2026-05-28 以来新增的权威边界：
 
 - 生成模型走可配置路由：LiteLLM 云端、Ollama 本地和 Mock 降级都必须明确标注，不能把云端伪装成本地。
 - 知识库由 `KnowledgeEngine` facade 统一管理，可选 SQLite FTS5、Chroma、LlamaIndex 编排等后端；无真实 embedding 时优先 FTS5 快速召回。
@@ -28,9 +28,20 @@
   或最近 snapshot 作为即时可见层，tile 只负责渐进清晰化。
 - 翻译公式保护需要从共享 `TextPreprocessor` 状态改为每请求独立 protection session，避免并发
   流式翻译恢复公式时串线；预处理层不应承担样本规则式公式修补。
+- 2026-06-05 UI 小修已经提交到 `fb1f86a`：左右侧栏按钮在菜单栏同层两角，
+  左右 dock 均不可关闭但可弹出/归位；右侧 `AI 工具集` 是全文问答、证据、
+  回答和追问入口，不再只是占位。PDF 阅读区支持按需横向滚动、侧栏折叠后水平居中、
+  bbox 横向定位和 split page 缩放重建。
+- 翻译裂缝宽度跟随页面，WebView 正文按原文 block bbox 设置左右 padding。
+  该修复只解决显示对齐，不改变翻译公式保护和公式候选 accepted gate。
+- 菜单栏文字区域双击折叠未可靠满足需求，当前暂不继续；多文档标签页/标签关闭当前文档
+  当前也不实现。
+- 最新 UI/导航回归：`tests/test_pdf_viewer_navigation.py -q` 为 19 passed；
+  `tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q` 为 30 passed。
+  这不是 Attention/Napkin 桌面 E2E 或公式质量门禁。
 
 本文档覆盖：
-- 完整的模块结构与类定义（与代码一致）
+- 主要模块结构与类定义（历史章节保留基线，当前状态以源码和交接文档为准）
 - 所有公开方法的签名与职责
 - 信号与槽的连接规范
 - 线程模型与并发安全约束
@@ -112,6 +123,7 @@
 │               │      │     └── BlockOverlay (透明交互热区)       │
 │               │      └── SplitWidget (裂缝容器 — QWebEngineView) │
 │               ├── QDockWidget (左: 目录导航 / 右: AI 工具集)     │
+│               │      └── 菜单栏同层左右角 icon-only 侧栏按钮     │
 │               └── QStatusBar (页码/模型状态/进度)                 │
 │                                                                  │
 │  信号流: UI 信号 → Core 服务 → 信号回调 → UI 更新               │
@@ -121,7 +133,7 @@
 │                         │       Core 层 (src/core/)               │
 │                                                                  │
 │  CoreServiceRegistry (服务定位器 — 依赖注入容器)                  │
-│     ├── DocumentEngine (PDF 解析 + 块分割 + 渲染缓存)            │
+│     ├── DocumentFlow / DocumentEngine (文档生命周期 + PDF 解析) │
 │     ├── AIEngine (翻译/问答协调器 — 线程管理 + 信号转发)         │
 │     │     ├── TranslationService (Prompt 构建 + 公式保护)        │
 │     │     └── QAService (知识库检索 + 上下文组装)                │
@@ -139,7 +151,7 @@
 │  辅助模块:                                                       │
 │     ├── DocumentChunker (段落分割 + 公式检测 + 双栏处理)         │
 │     ├── TextPreprocessor (公式占位符保护/恢复)                   │
-│     ├── BornDigitalFormulaExtractor / FormulaIndexFlow           │
+│     ├── FormulaIndexStore / FormulaIndexFlow / SemanticReview    │
 │     ├── TinyBDMathCandidateService / FormulaAcceptanceReview      │
 │     └── EmbeddingService / SQLiteFtsBackend / Chroma backend      │
 │                                                                  │
@@ -218,7 +230,24 @@ D:\程设大作业\
 │   │   ├── ai_engine.py           # AIEngine + LLM 客户端 + 路由 + 翻译/问答服务
 │   │   ├── knowledge_engine.py    # KnowledgeEngine + EmbeddingService
 │   │   ├── glossary_manager.py    # GlossaryManager 术语表管理
-│   │   └── navigator.py           # Navigator 目录/书签管理
+│   │   ├── navigator.py           # Navigator 目录/书签管理
+│   │   ├── born_digital_formula_extractor.py
+│   │   ├── external_formula_tools.py
+│   │   ├── tinybdmath_*.py        # TinyBDMath CSLT/alignment/parser/decoder/verifier
+│   │   └── knowledge_backends.py
+│   ├── app/
+│   │   ├── document_flow.py       # 文档打开/关闭协调
+│   │   ├── translate_flow.py      # 翻译缓存与请求协调
+│   │   ├── ask_flow.py            # 全文问答协调
+│   │   ├── formula_index_*.py     # 多轮公式索引调度/持久化/后台流
+│   │   ├── formula_semantic_review.py
+│   │   ├── formula_knowledge_*.py
+│   │   └── graph_index_*.py
+│   ├── infra/
+│   │   ├── page_cache.py
+│   │   ├── tile_renderer.py
+│   │   ├── tile_cache.py
+│   │   └── ai_cache.py
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── main_window.py         # MainWindow 主窗口
@@ -924,21 +953,24 @@ class ConfigManager(QObject):
 ```python
 class MainWindow(QMainWindow):
     """主窗口。
-    布局: 菜单栏 → 工具栏 → [左Dock | PdfViewer | 右Dock] → 状态栏
+    布局: 菜单栏(左右角侧栏按钮) → 工具栏 → [左Dock | PdfViewer | 右Dock] → 状态栏
 
     核心职责:
     - UI 信号 ↔ Core 服务信号的桥接
     - 文档加载/关闭的完整流程协调
     - 翻译/问答的触发与流式回调处理
-    - 首次启动 Ollama/模型检测
+    - 首次启动模型路由状态提示；非 local_only 不再因 Ollama 不可达弹窗阻塞
     - 设置对话框（云端 API 配置）
+    - 多轮公式索引、语义复核、r4/r5 后台小批次调度
 
     关键槽:
-    - _on_document_loaded(ParseResult)       → PdfViewer 加载 + 目录 + 知识库构建
+    - _on_document_opened(ParseResult)       → PdfViewer 加载 + 目录 + 知识库状态刷新
     - _on_block_translate(block_id)          → 裂开页面 + AIEngine 翻译
     - _on_split_ask(question, block_id)      → 知识库检索 + AIEngine 问答
     - _on_translation_token/...              → SplitWidget 流式显示
     - _on_formula_blocks_updated(updated)    → 刷新 BlockOverlay
+    - _set_left_panel_collapsed / _set_right_panel_collapsed
+      菜单栏同层左右角按钮隐藏/显示 dock，并在折叠后触发 PdfViewer 水平居中
 
     状态管理:
     - _current_blocks: list[DocumentBlock]   当前文档全量块
@@ -961,23 +993,27 @@ class PdfViewer(QScrollArea):
     - split_close_requested(str)
 
     核心优化:
-    - 虚拟视口：仅渲染可见 ±1 视口高度的页面
-    - 离屏页面释放 pixmap 内存 → 灰色占位
-    - 80ms 防抖滚动监听
+    - _VirtualPageLayout：纯 Python 页面偏移/二分定位
+    - Widget 池化：视口附近页面保持真实 widget，离屏页面隐藏并延迟释放 pixmap
+    - 大页面先绘制整页 fallback，再由 tile cache 渐进清晰化
+    - 水平滚动条按需显示；宽页面可横向滚动，窄页面居中
+    - split page 缩放/离屏恢复时按当前 page meta 宽度和 DPR 重建段图
 
     核心方法:
-    - load_document(ParseResult) → None              创建全量 _LazyPageWidget 占位
+    - load_document(ParseResult) → None              构建虚拟布局和页面 metadata
     - open_split_widget(block_id, mode) → SplitWidget|None  在段落下边界裂开页面
     - find_split_widget(block_id) → SplitWidget|None
     - scroll_to_page(page_num) → None
+    - scroll_to_bbox(page_num, bbox) → bool          垂直 + 水平定位并显示短暂高亮
+    - center_horizontally() → None                   在当前视口中水平居中 PDF 内容
     - clear() → None                                  清空全部资源
     """
 
 class _LazyPageWidget(QWidget):
     """支持延迟加载的页面容器。
     - 未渲染: 浅灰背景 + "…" 占位
-    - 已渲染: pixmap QLabel + BlockOverlay 叠加层
-    - unrender(): 释放 pixmap，释放 overlay，恢复占位
+    - 已渲染: QPainter 绘制整页 pixmap 或 tile cache，BlockOverlay 作为子 widget 叠加
+    - unrender(): 释放 pixmap 和 overlay，恢复占位
     """
 ```
 
@@ -1033,8 +1069,9 @@ class SplitWidget(QFrame):
     特性:
     - QWebEngineView 渲染 Markdown + LaTeX（加载本地 HTML 模板）
     - JavaScript 桥接: updateContent(text, isFinished) 注入内容
+    - 翻译模式下宽度跟随页面，正文 padding 由原文 block bbox 计算
     - 底部可拖拽手柄调整高度（_ResizeHandle）
-    - 高度自适应: 内容超出当前高度时自动撑高（最大 600px），用户拖拽后锁定
+    - 高度自适应: 内容超出当前高度时自动撑高（当前最大 800px），用户拖拽后锁定
     - 折叠/展开: 双击 SplitWidget 自身或点击 ∧ 按钮
     - 多轮对话: 保留最近 6 轮 chat_history
     - Esc 键折叠
@@ -1092,6 +1129,13 @@ apply_theme("sepia")   # 护眼羊皮纸
 ---
 
 ## 9. 信号连接总表
+
+下表保留早期信号基线。当前实现已经把文档、翻译、问答和公式索引进一步拆到
+`DocumentFlow`、`TranslationFlow`、`AskQuestionFlow`、`FormulaIndexFlow` 和
+`FormulaSemanticReviewFlow`；接线细节以 `src/ui/main_window.py` 的 `_connect_signals()`
+为准。关键差异包括：文档打开回调是 `_on_document_opened()`，翻译完成信号经
+`TranslationFlow.translation_ready` 进入 `_on_translation_ready()`，右侧全文问答也使用
+同一 `AIEngine.answer_*` 流式信号并以 `__dock_qa__` split id 区分。
 
 ```
 # === 文档打开与解析 ===
@@ -1285,9 +1329,9 @@ ollama pull bge-m3
 
 | 模块 | 状态 | 备注 |
 |------|------|------|
-| PDF 渲染 | ✅ 已实现 | 虚拟视口懒加载 + LRU 缓存 |
+| PDF 渲染 | ✅ 已实现 | 虚拟布局、widget 池化、按需横向滚动、侧栏折叠后居中；极端 Napkin 400x 仍需桌面复测 |
 | 段落/公式分割 | ✅ 已实现 | 段落分割 + born-digital 结构证据；OCR/MFR 只作候选兜底 |
-| 裂缝式交互 | ✅ 已实现 | SplitWidget + QWebEngineView 渲染 |
+| 裂缝式交互 | ✅ 已实现 | SplitWidget + QWebEngineView 渲染；翻译正文按原文 bbox padding 对齐 |
 | 翻译服务 | ✅ 已实现 | 公式保护 + 术语注入 + Few-shot |
 | 问答服务 | ✅ 已实现 | 知识库检索 + 多轮对话 |
 | 知识库构建 | ✅ 已实现 | KnowledgeEngine facade，可走 SQLite FTS5 / Chroma / 后续混合检索 |
@@ -1297,12 +1341,15 @@ ollama pull bge-m3
 | 混合路由 | ✅ 已实现 | 本地/云端/回退三级策略 |
 | 配置管理 | ✅ 已实现 | YAML + 热加载 + .env |
 | 主题系统 | ✅ 已实现 | QPalette 三套主题 |
+| 侧栏控制 | ✅ 已实现 | 菜单栏同层左右角按钮隐藏/显示；左右 dock 均可弹出/归位且不可关闭 |
+| 顶部工具栏折叠 | 🟡 基础已实现 | 工具栏空白区和恢复细条可双击折叠/恢复；菜单栏文字双击折叠未可靠实现，暂不继续 |
+| 文档标签页 | ⏳ 暂不实现 | 已讨论但当前不做多文档标签/标签关闭当前文档 |
 | 取词翻译 | ⏳ 未实现 | 预留接口 |
 | 扫描版 OCR | ⏳ 未实现 | 预留接口 |
 | 图表理解 | ⏳ 未实现 | 预留接口 |
 | 笔记系统 | ⏳ 未实现 | 数据模型已定义 |
 | 设置对话框（完整） | ⏳ 简化版 | 仅云端 API 配置可用 |
-| AI 工具集侧边栏 | ⏳ 占位 | 显示占位文字 |
+| AI 工具集侧边栏 | ✅ 已实现基础入口 | 全文问答输入、证据树、回答 WebView、追问建议、证据跳转 |
 | 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5、审核 UI 已接线；最终质量未达标 |
 | 公式审核与写回 | 🟡 进行中 | manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回已接线；批量审核待补 |
 
@@ -1320,4 +1367,4 @@ ollama pull bge-m3
 
 ---
 
-*本文档已按 2026-05-28 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*
+*本文档已按 2026-06-05 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*
