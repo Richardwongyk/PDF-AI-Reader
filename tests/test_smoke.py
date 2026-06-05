@@ -261,9 +261,9 @@ def test_main_window_smoke() -> None:
     result = _run_python(
         """
         import sys
-        from PySide6.QtCore import QTimer
+        from PySide6.QtCore import Qt, QTimer
         from PySide6.QtGui import QAction
-        from PySide6.QtWidgets import QApplication, QWidget
+        from PySide6.QtWidgets import QApplication, QDockWidget, QToolBar, QToolButton, QWidget
         from PySide6.QtWebEngineCore import QWebEngineProfile
 
         from src.main import setup_logging, build_services
@@ -282,6 +282,35 @@ def test_main_window_smoke() -> None:
         assert window.findChild(QWidget, "ai_question_input") is not None
         assert window.findChild(QWidget, "ai_evidence_tree") is not None
         assert window.findChild(QWidget, "ai_answer_view") is not None
+        toggle = window.findChild(QToolButton, "right_panel_toggle_button")
+        assert toggle is not None
+        toolbar = window.findChild(QToolBar, "main_toolbar")
+        assert toolbar is not None
+        assert any(toolbar.widgetForAction(action) is toggle for action in toolbar.actions())
+        assert toggle.text() == "隐藏 AI"
+        assert window._right_panel_body is not None
+        assert not window._right_panel_collapsed
+        toggle.click()
+        assert window._right_panel_collapsed
+        assert toggle.text() == "显示 AI"
+        assert not window._right_dock.isVisible()
+        toggle.click()
+        assert not window._right_panel_collapsed
+        assert toggle.text() == "隐藏 AI"
+        assert window._right_dock.isVisible()
+        assert not (window._right_dock.features() & QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        float_button = window.findChild(QToolButton, "right_dock_float_button")
+        assert float_button is not None
+        assert float_button.isVisible()
+        assert not window._right_dock.isFloating()
+        float_button.click()
+        app.processEvents()
+        assert window._right_dock.isFloating()
+        assert float_button.isVisible()
+        float_button.click()
+        app.processEvents()
+        assert not window._right_dock.isFloating()
+        assert window.dockWidgetArea(window._right_dock) == Qt.DockWidgetArea.RightDockWidgetArea
         assert window.findChild(QAction, "high_precision_formula_action") is not None
         assert window.findChild(QAction, "high_precision_formula_toolbar_action") is not None
         assert window._formula_idle_timer.interval() == 5000

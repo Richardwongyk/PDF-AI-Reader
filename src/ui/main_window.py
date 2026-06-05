@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, QSize, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,8 +27,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QSizePolicy,
     QStatusBar,
+    QStyle,
     QToolBar,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -160,6 +163,11 @@ class MainWindow(QMainWindow):
         self._dock_answer_pending_js: str | None = None
         self._dock_answer_pending_theme: str | None = None
         self._dock_answer_bridge: _DockAnswerBridge | None = None
+        self._right_panel_body: QWidget | None = None
+        self._right_panel_toggle_button: QToolButton | None = None
+        self._right_panel_collapsed: bool = False
+        self._right_panel_expanded_width: int = 360
+        self._right_panel_min_width: int = 300
         self._pending_kb_upserts: dict[str, DocumentBlock] = {}
         self._last_formula_viewport_pages: set[int] = set()
         self._formula_import_thread: _FormulaImportPlanThread | None = None
@@ -254,6 +262,7 @@ class MainWindow(QMainWindow):
     def _create_tool_bar(self) -> None:
         """创建工具栏。"""
         toolbar: QToolBar = self.addToolBar("主工具栏")
+        toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
 
         open_action = QAction("📂 打开", self)
@@ -283,6 +292,37 @@ class MainWindow(QMainWindow):
         formula_scan_action.setToolTip("高精度扫描当前视口公式")
         formula_scan_action.triggered.connect(self._on_high_precision_formula_scan)
         toolbar.addAction(formula_scan_action)
+
+        toolbar_spacer = QWidget()
+        toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(toolbar_spacer)
+        self._right_panel_toggle_button = QToolButton()
+        self._right_panel_toggle_button.setObjectName("right_panel_toggle_button")
+        self._right_panel_toggle_button.setAutoRaise(False)
+        self._right_panel_toggle_button.setIconSize(QSize(16, 16))
+        self._right_panel_toggle_button.setMinimumSize(92, 30)
+        self._right_panel_toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._right_panel_toggle_button.clicked.connect(self._on_right_panel_toggle_clicked)
+        self._right_panel_toggle_button.setStyleSheet(
+            """
+            QToolButton#right_panel_toggle_button {
+                background: #2563eb;
+                color: white;
+                border: 1px solid #1d4ed8;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-weight: 600;
+            }
+            QToolButton#right_panel_toggle_button:hover {
+                background: #1d4ed8;
+            }
+            QToolButton#right_panel_toggle_button:pressed {
+                background: #1e40af;
+            }
+            """
+        )
+        toolbar.addWidget(self._right_panel_toggle_button)
+        self._update_right_panel_toggle_icon()
 
     def _create_status_bar(self) -> None:
         """创建状态栏。"""
@@ -323,6 +363,12 @@ class MainWindow(QMainWindow):
         self._right_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
+        self._right_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self._right_dock.topLevelChanged.connect(self._on_right_dock_top_level_changed)
+        self._right_dock.setTitleBarWidget(self._create_right_dock_title_bar())
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(10, 10, 10, 10)
@@ -334,6 +380,11 @@ class MainWindow(QMainWindow):
         self._ai_doc_status.setStyleSheet("color: #444; font-weight: 600;")
         right_layout.addWidget(self._ai_doc_status)
 
+        self._right_panel_body = QWidget()
+        body_layout = QVBoxLayout(self._right_panel_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(8)
+
         action_row = QHBoxLayout()
         self._ai_question_input = QLineEdit()
         self._ai_question_input.setObjectName("ai_question_input")
@@ -344,16 +395,16 @@ class MainWindow(QMainWindow):
         self._ai_ask_button.setObjectName("ai_ask_button")
         self._ai_ask_button.clicked.connect(self._on_dock_question_submitted)
         action_row.addWidget(self._ai_ask_button)
-        right_layout.addLayout(action_row)
+        body_layout.addLayout(action_row)
 
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFrameShadow(QFrame.Shadow.Sunken)
-        right_layout.addWidget(separator)
+        body_layout.addWidget(separator)
 
         evidence_label = QLabel("检索依据")
         evidence_label.setStyleSheet("font-weight: 600;")
-        right_layout.addWidget(evidence_label)
+        body_layout.addWidget(evidence_label)
         self._ai_evidence_tree = QTreeWidget()
         self._ai_evidence_tree.setObjectName("ai_evidence_tree")
         self._ai_evidence_tree.setHeaderLabels(["证据", "相关度", "片段"])
@@ -363,11 +414,11 @@ class MainWindow(QMainWindow):
         self._ai_evidence_tree.setMinimumHeight(170)
         self._ai_evidence_tree.setColumnWidth(0, 112)
         self._ai_evidence_tree.setColumnWidth(1, 72)
-        right_layout.addWidget(self._ai_evidence_tree, 1)
+        body_layout.addWidget(self._ai_evidence_tree, 1)
 
         answer_label = QLabel("回答")
         answer_label.setStyleSheet("font-weight: 600;")
-        right_layout.addWidget(answer_label)
+        body_layout.addWidget(answer_label)
         self._ai_answer_view = WebViewPool.acquire()
         self._ai_answer_view.setObjectName("ai_answer_view")
         self._ai_answer_view.setMinimumHeight(220)
@@ -378,18 +429,130 @@ class MainWindow(QMainWindow):
         WebViewPool.swap_bridge(self._ai_answer_view, self._dock_answer_bridge)
         self._ai_answer_view.loadFinished.connect(self._on_dock_answer_page_loaded)
         WebViewPool.load_template(self._ai_answer_view)
-        right_layout.addWidget(self._ai_answer_view, 2)
+        body_layout.addWidget(self._ai_answer_view, 2)
 
         self._ai_followup_label = QLabel("追问")
         self._ai_followup_label.setStyleSheet("font-weight: 600;")
         self._ai_followup_label.setVisible(False)
-        right_layout.addWidget(self._ai_followup_label)
+        body_layout.addWidget(self._ai_followup_label)
         self._ai_followup_layout = QVBoxLayout()
         self._ai_followup_layout.setSpacing(4)
-        right_layout.addLayout(self._ai_followup_layout)
+        body_layout.addLayout(self._ai_followup_layout)
+        right_layout.addWidget(self._right_panel_body, 1)
 
+        right_widget.setMinimumWidth(self._right_panel_min_width)
+        self._right_dock.setMinimumWidth(self._right_panel_min_width)
         self._right_dock.setWidget(right_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._right_dock)
+        self.resizeDocks(
+            [self._right_dock],
+            [self._right_panel_expanded_width],
+            Qt.Orientation.Horizontal,
+        )
+        self._update_right_panel_toggle_icon()
+
+    def _create_right_dock_title_bar(self) -> QWidget:
+        title_bar = QWidget()
+        title_bar.setObjectName("right_dock_title_bar")
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(8, 3, 6, 3)
+        title_layout.setSpacing(6)
+
+        title_label = QLabel("AI 工具集")
+        title_label.setObjectName("right_dock_title_label")
+        title_label.setStyleSheet("font-weight: 600;")
+        title_layout.addWidget(title_label, 1)
+
+        self._right_dock_float_button = QToolButton()
+        self._right_dock_float_button.setObjectName("right_dock_float_button")
+        self._right_dock_float_button.setAutoRaise(True)
+        self._right_dock_float_button.setIconSize(QSize(16, 16))
+        self._right_dock_float_button.setFixedSize(30, 26)
+        self._right_dock_float_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._right_dock_float_button.clicked.connect(self._on_right_dock_float_toggle_clicked)
+        title_layout.addWidget(self._right_dock_float_button, 0, Qt.AlignmentFlag.AlignRight)
+        self._update_right_dock_float_button()
+        return title_bar
+
+    def _on_right_dock_float_toggle_clicked(self) -> None:
+        """Float the AI dock, or dock it back to the right side."""
+        if self._right_dock.isFloating():
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._right_dock)
+            self._right_dock.setFloating(False)
+            self.resizeDocks(
+                [self._right_dock],
+                [self._right_panel_expanded_width],
+                Qt.Orientation.Horizontal,
+            )
+        else:
+            current_width = self._right_dock.width()
+            if current_width >= self._right_panel_min_width:
+                self._right_panel_expanded_width = max(self._right_panel_min_width, current_width)
+            self._right_dock.setFloating(True)
+        self._update_right_dock_float_button()
+
+    def _on_right_dock_top_level_changed(self, _floating: bool) -> None:
+        self._update_right_dock_float_button()
+
+    def _update_right_dock_float_button(self) -> None:
+        button = getattr(self, "_right_dock_float_button", None)
+        if button is None:
+            return
+        if self._right_dock.isFloating():
+            button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton))
+            button.setToolTip("归位到右侧栏")
+            button.setAccessibleName("归位到右侧栏")
+        else:
+            button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
+            button.setToolTip("弹出为独立窗口")
+            button.setAccessibleName("弹出为独立窗口")
+
+    def _on_right_panel_toggle_clicked(self) -> None:
+        """折叠或展开右侧全文问答面板。"""
+        self._set_right_panel_collapsed(not self._right_panel_collapsed)
+
+    def _set_right_panel_collapsed(self, collapsed: bool) -> None:
+        """Hide or restore the dock while preserving the user's resized width."""
+        if self._right_panel_body is None:
+            return
+        if collapsed == self._right_panel_collapsed:
+            return
+        self._right_panel_collapsed = collapsed
+        if collapsed:
+            current_width = self._right_dock.width()
+            if current_width >= self._right_panel_min_width:
+                self._right_panel_expanded_width = max(self._right_panel_min_width, current_width)
+            self._right_dock.setVisible(False)
+        else:
+            self._right_dock.setMaximumWidth(16777215)
+            self._right_dock.setMinimumWidth(self._right_panel_min_width)
+            content_widget = self._right_dock.widget()
+            if content_widget is not None:
+                content_widget.setMaximumWidth(16777215)
+                content_widget.setMinimumWidth(self._right_panel_min_width)
+            self._right_dock.setVisible(True)
+            self.resizeDocks(
+                [self._right_dock],
+                [self._right_panel_expanded_width],
+                Qt.Orientation.Horizontal,
+            )
+        self._update_right_panel_toggle_icon()
+
+    def _update_right_panel_toggle_icon(self) -> None:
+        if self._right_panel_toggle_button is None:
+            return
+        if self._right_panel_collapsed:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton)
+            tooltip = "展开 AI 工具集"
+            text = "显示 AI"
+        else:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMinButton)
+            tooltip = "折叠 AI 工具集"
+            text = "隐藏 AI"
+        self._right_panel_toggle_button.setIcon(icon)
+        self._right_panel_toggle_button.setText(text)
+        self._right_panel_toggle_button.setToolTip(tooltip)
+        self._right_panel_toggle_button.setAccessibleName(tooltip)
 
     def _apply_theme(self) -> None:
         """应用主题。light=系统原生，dark/sepia=QPalette。广播到所有裂缝。"""
