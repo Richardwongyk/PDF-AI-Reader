@@ -386,6 +386,12 @@ def test_split_widget_followup_buttons() -> None:
         buttons = widget.findChildren(QPushButton)
         followups = [button.property("followup_question") for button in buttons if button.property("followup_question")]
         assert followups == ["问题一？", "问题二？", "问题三？"]
+        widget.set_content_padding(12, -4)
+        assert widget._content_padding == (12, 0)
+        widget._pending_padding_js = None
+        widget._queue_content_padding()
+        assert "paddingLeft='12px'" in widget._pending_padding_js
+        assert "paddingRight='0px'" in widget._pending_padding_js
         widget.close()
         app.quit()
         print("split followup smoke ok")

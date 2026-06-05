@@ -34,6 +34,15 @@ class _Config:
     pass
 
 
+class _FakeSplitWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.padding_calls: list[tuple[int, int]] = []
+
+    def set_content_padding(self, left_px: int, right_px: int) -> None:
+        self.padding_calls.append((left_px, right_px))
+
+
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
@@ -81,6 +90,34 @@ def test_pdf_viewer_scroll_to_bbox_moves_horizontally_for_wide_pages() -> None:
 
     assert moved is True
     assert viewer.horizontalScrollBar().value() > 0
+
+
+def test_pdf_viewer_recomputes_split_text_padding_on_zoom() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph",
+        bbox=(20.0, 120.0, 180.0, 160.0),
+    )
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[block]))
+    split = _FakeSplitWidget()
+    viewer._splits[block.id] = split  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._page_segments[0] = [{"split_id": block.id}]
+
+    viewer._set_zoom(1.2)
+
+    page_pt_w = viewer._page_rects_pt[0][0]
+    assert split.width() == viewer._page_metas[0]["width"]
+    assert split.padding_calls[-1] == (
+        int(block.bbox[0] * viewer._scale),
+        int((page_pt_w - block.bbox[2]) * viewer._scale),
+    )
 
 
 def test_pdf_viewer_rejects_invalid_bbox() -> None:

@@ -1407,6 +1407,26 @@ class PdfViewer(QScrollArea):
 
     # ── 裂缝操作 ──
 
+    def _align_split_content_to_block(
+        self,
+        split: SplitWidget,
+        block: DocumentBlock,
+        page_num: int,
+    ) -> None:
+        """Keep the translated text column aligned to the source block bbox."""
+        meta = self._page_metas.get(page_num, {})
+        page_display_w = int(meta.get("width", 0) or 0)
+        if page_display_w > 0:
+            split.setFixedWidth(page_display_w)
+
+        rect = self._page_rects_pt.get(page_num)
+        if rect is None:
+            return
+        page_pt_w = float(rect[0])
+        left_pad = max(0, int(float(block.bbox[0]) * self._scale))
+        right_pad = max(0, int((page_pt_w - float(block.bbox[2])) * self._scale))
+        split.set_content_padding(left_pad, right_pad)
+
     def open_split_widget(
         self, block_id: str, mode: SplitMode = SplitMode.TRANSLATION
     ) -> SplitWidget | None:
@@ -1470,14 +1490,7 @@ class PdfViewer(QScrollArea):
             block_pixel_height=max(block_px_h, 60),
             page_width=page_display_w,
         )
-        split.setFixedWidth(page_display_w)
-        # 段落内边距：使文字区域左右与紫色框对齐
-        rect = self._page_rects_pt.get(page_num)
-        if rect:
-            page_pt_w = rect[0]
-            left_pad = int(block.bbox[0] * self._scale)
-            right_pad = int((page_pt_w - block.bbox[2]) * self._scale)
-            split.set_content_padding(left_pad, right_pad)
+        self._align_split_content_to_block(split, block, page_num)
         split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
         split.translation_requested.connect(self.block_translate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))
@@ -1843,7 +1856,11 @@ class PdfViewer(QScrollArea):
                 if "split_id" in seg:
                     split = self._splits.get(seg["split_id"])
                     if split:
-                        split.setFixedWidth(self._page_metas[pn]["width"])
+                        block = self._find_block(seg["split_id"])
+                        if block is not None:
+                            self._align_split_content_to_block(split, block, pn)
+                        else:
+                            split.setFixedWidth(self._page_metas[pn]["width"])
                     continue
                 if not split_in_layout:
                     continue

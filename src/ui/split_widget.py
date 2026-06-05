@@ -230,6 +230,7 @@ class SplitWidget(QFrame):
         self._block_pixel_height: int = block_pixel_height
         self._page_width: int = page_width
         self._user_resized: bool = False
+        self._content_padding: tuple[int, int] | None = None
 
         from src.ui.theme import SPLIT_WIDGET_STYLE, get_split_style
         self._current_theme = "light"
@@ -599,6 +600,7 @@ class SplitWidget(QFrame):
             safe_text = json.dumps(self._cached_result)
             self._pending_js = f"updateContent({safe_text}, true);"
             self._current_answer = self._cached_result
+        self._queue_content_padding()
 
         WebViewPool.load_template(view)
         view.setVisible(True)
@@ -620,11 +622,30 @@ class SplitWidget(QFrame):
 
     def set_content_padding(self, left_px: int, right_px: int) -> None:
         """设置 WebView 内容区左右内边距，使文字宽度匹配段落 BBox。"""
-        js = f"document.body.style.paddingLeft='{left_px}px';document.body.style.paddingRight='{right_px}px';"
-        if self._page_ready:
+        left = max(0, int(left_px))
+        right = max(0, int(right_px))
+        self._content_padding = (left, right)
+        js = self._content_padding_js()
+        if js is None:
+            return
+        if self._page_ready and self._result_view is not None:
             self._result_view.page().runJavaScript(js)
         else:
             self._pending_padding_js = js
+
+    def _content_padding_js(self) -> str | None:
+        if self._content_padding is None:
+            return None
+        left, right = self._content_padding
+        return (
+            f"document.body.style.paddingLeft='{left}px';"
+            f"document.body.style.paddingRight='{right}px';"
+        )
+
+    def _queue_content_padding(self) -> None:
+        padding_js = self._content_padding_js()
+        if padding_js is not None:
+            self._pending_padding_js = padding_js
 
     def _update_webview(self, is_finished: bool = False) -> None:
         safe_text = json.dumps(self._current_answer)
