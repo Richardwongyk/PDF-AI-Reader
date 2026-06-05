@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QSize, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, QSize, Signal, Slot, QEvent
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -163,10 +163,18 @@ class MainWindow(QMainWindow):
         self._dock_answer_pending_js: str | None = None
         self._dock_answer_pending_theme: str | None = None
         self._dock_answer_bridge: _DockAnswerBridge | None = None
+        self._menu_bar: QMenuBar | None = None
+        self._main_toolbar: QToolBar | None = None
+        self._toolbar_spacer: QWidget | None = None
+        self._toolbar_restore_handle: QFrame | None = None
+        self._reader_chrome_collapsed: bool = False
+        self._left_panel_toggle_corner: QWidget | None = None
+        self._right_panel_toggle_corner: QWidget | None = None
         self._left_panel_toggle_button: QToolButton | None = None
         self._left_panel_collapsed: bool = False
         self._left_panel_expanded_width: int = 240
         self._left_panel_min_width: int = 220
+        self._left_dock_float_button: QToolButton | None = None
         self._right_panel_body: QWidget | None = None
         self._right_panel_toggle_button: QToolButton | None = None
         self._right_panel_collapsed: bool = False
@@ -187,6 +195,9 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._connect_signals()
         self._apply_theme()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         self.setWindowTitle("PDF AI Reader")
         self.resize(1400, 900)
@@ -206,6 +217,7 @@ class MainWindow(QMainWindow):
     def _create_menu_bar(self) -> None:
         """创建菜单栏。"""
         menubar: QMenuBar = self.menuBar()
+        self._menu_bar = menubar
 
         # 文件菜单
         file_menu = menubar.addMenu("文件(&F)")
@@ -263,12 +275,24 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
 
-    def _create_tool_bar(self) -> None:
-        """创建工具栏。"""
-        toolbar: QToolBar = self.addToolBar("主工具栏")
-        toolbar.setObjectName("main_toolbar")
-        toolbar.setMovable(False)
-        side_panel_toggle_style = """
+        self._left_panel_toggle_button = self._create_panel_toggle_button("left")
+        self._left_panel_toggle_corner = self._create_panel_toggle_corner(
+            self._left_panel_toggle_button,
+            "left",
+        )
+        menubar.setCornerWidget(self._left_panel_toggle_corner, Qt.Corner.TopLeftCorner)
+        self._update_left_panel_toggle_icon()
+
+        self._right_panel_toggle_button = self._create_panel_toggle_button("right")
+        self._right_panel_toggle_corner = self._create_panel_toggle_corner(
+            self._right_panel_toggle_button,
+            "right",
+        )
+        menubar.setCornerWidget(self._right_panel_toggle_corner, Qt.Corner.TopRightCorner)
+        self._update_right_panel_toggle_icon()
+
+    def _side_panel_toggle_style(self) -> str:
+        return """
             QToolButton#left_panel_toggle_button,
             QToolButton#right_panel_toggle_button {
                 background: #111827;
@@ -299,17 +323,41 @@ class MainWindow(QMainWindow):
             }
         """
 
-        self._left_panel_toggle_button = QToolButton()
-        self._left_panel_toggle_button.setObjectName("left_panel_toggle_button")
-        self._left_panel_toggle_button.setAutoRaise(True)
-        self._left_panel_toggle_button.setIconSize(QSize(18, 18))
-        self._left_panel_toggle_button.setFixedSize(30, 30)
-        self._left_panel_toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._left_panel_toggle_button.setStyleSheet(side_panel_toggle_style)
-        self._left_panel_toggle_button.clicked.connect(self._on_left_panel_toggle_clicked)
-        toolbar.addWidget(self._left_panel_toggle_button)
-        self._update_left_panel_toggle_icon()
-        toolbar.addSeparator()
+    def _create_panel_toggle_button(self, side: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName(f"{side}_panel_toggle_button")
+        button.setAutoRaise(True)
+        button.setIconSize(QSize(18, 18))
+        button.setFixedSize(30, 30)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setStyleSheet(self._side_panel_toggle_style())
+        if side == "left":
+            button.clicked.connect(self._on_left_panel_toggle_clicked)
+        else:
+            button.clicked.connect(self._on_right_panel_toggle_clicked)
+        return button
+
+    def _create_panel_toggle_corner(self, button: QToolButton, side: str) -> QWidget:
+        corner = QWidget()
+        corner.setObjectName(f"{side}_panel_toggle_corner")
+        corner.setMinimumWidth(48 if side == "right" else 42)
+        layout = QHBoxLayout(corner)
+        if side == "right":
+            layout.setContentsMargins(4, 0, 12, 0)
+            alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        else:
+            layout.setContentsMargins(6, 0, 6, 0)
+            alignment = Qt.AlignmentFlag.AlignCenter
+        layout.setSpacing(0)
+        layout.addWidget(button, 0, alignment)
+        return corner
+
+    def _create_tool_bar(self) -> None:
+        """创建工具栏。"""
+        toolbar: QToolBar = self.addToolBar("主工具栏")
+        self._main_toolbar = toolbar
+        toolbar.setObjectName("main_toolbar")
+        toolbar.setMovable(False)
 
         open_action = QAction("📂 打开", self)
         open_action.triggered.connect(self._on_open_pdf)
@@ -340,18 +388,12 @@ class MainWindow(QMainWindow):
         toolbar.addAction(formula_scan_action)
 
         toolbar_spacer = QWidget()
+        toolbar_spacer.setObjectName("toolbar_spacer")
+        toolbar_spacer.setMinimumWidth(80)
+        toolbar_spacer.setToolTip("双击隐藏工具栏")
         toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._toolbar_spacer = toolbar_spacer
         toolbar.addWidget(toolbar_spacer)
-        self._right_panel_toggle_button = QToolButton()
-        self._right_panel_toggle_button.setObjectName("right_panel_toggle_button")
-        self._right_panel_toggle_button.setAutoRaise(True)
-        self._right_panel_toggle_button.setIconSize(QSize(18, 18))
-        self._right_panel_toggle_button.setFixedSize(30, 30)
-        self._right_panel_toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._right_panel_toggle_button.setStyleSheet(side_panel_toggle_style)
-        self._right_panel_toggle_button.clicked.connect(self._on_right_panel_toggle_clicked)
-        toolbar.addWidget(self._right_panel_toggle_button)
-        self._update_right_panel_toggle_icon()
 
     def _create_status_bar(self) -> None:
         """创建状态栏。"""
@@ -370,8 +412,118 @@ class MainWindow(QMainWindow):
 
     def _create_central_widget(self) -> None:
         """创建中央 PDF 阅读区。"""
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+
+        self._toolbar_restore_handle = QFrame()
+        self._toolbar_restore_handle.setObjectName("toolbar_restore_handle")
+        self._toolbar_restore_handle.setFrameShape(QFrame.Shape.NoFrame)
+        self._toolbar_restore_handle.setFixedHeight(8)
+        self._toolbar_restore_handle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toolbar_restore_handle.setToolTip("双击显示工具栏")
+        self._toolbar_restore_handle.setStyleSheet(
+            "QFrame#toolbar_restore_handle {"
+            "background: #111827;"
+            "border-bottom: 1px solid #3b82f6;"
+            "}"
+            "QToolTip {"
+            "color: #ffffff;"
+            "background-color: #111827;"
+            "border: 1px solid #f8fafc;"
+            "padding: 4px 6px;"
+            "}"
+        )
+        self._toolbar_restore_handle.setVisible(False)
+        central_layout.addWidget(self._toolbar_restore_handle)
+
         self._pdf_viewer = PdfViewer(self._doc_engine, self._config.ui)
-        self.setCentralWidget(self._pdf_viewer)
+        central_layout.addWidget(self._pdf_viewer, 1)
+        self.setCentralWidget(central_widget)
+
+    def eventFilter(self, watched: QObject, event: object) -> bool:
+        event_type = getattr(event, "type", lambda: None)()
+        button = getattr(event, "button", lambda: None)()
+        if event_type == QEvent.Type.MouseButtonDblClick:
+            if button == Qt.MouseButton.LeftButton:
+                if self._event_is_menu_bar_double_click(watched, event):
+                    popup = QApplication.activePopupWidget()
+                    if popup is not None:
+                        popup.close()
+                    self._set_reader_chrome_collapsed(not self._reader_chrome_collapsed)
+                    return True
+                if watched is self._toolbar_restore_handle:
+                    self._set_reader_chrome_collapsed(False)
+                    return True
+                if watched is self._toolbar_spacer:
+                    self._set_reader_chrome_collapsed(True)
+                    return True
+                if watched is self._main_toolbar and self._toolbar_event_is_blank(event):
+                    self._set_reader_chrome_collapsed(not self._reader_chrome_collapsed)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _event_is_menu_bar_double_click(self, watched: QObject, event: object) -> bool:
+        if self._is_side_panel_toggle_widget(watched):
+            return False
+        global_pos = self._event_global_pos(watched, event)
+        return global_pos is not None and self._global_pos_in_menu_bar(global_pos)
+
+    def _is_side_panel_toggle_widget(self, watched: QObject) -> bool:
+        if not isinstance(watched, QWidget):
+            return False
+        widget: QWidget | None = watched
+        while widget is not None:
+            if widget in (self._left_panel_toggle_button, self._right_panel_toggle_button):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def _event_global_pos(self, watched: QObject, event: object) -> object | None:
+        if watched is self._menu_bar and self._menu_bar is not None:
+            if hasattr(event, "position"):
+                return self._menu_bar.mapToGlobal(event.position().toPoint())
+            if hasattr(event, "pos"):
+                return self._menu_bar.mapToGlobal(event.pos())
+        if hasattr(event, "globalPosition"):
+            return event.globalPosition().toPoint()
+        if hasattr(event, "globalPos"):
+            return event.globalPos()
+        return None
+
+    def _global_pos_in_menu_bar(self, global_pos: object) -> bool:
+        menu_bar = self._menu_bar
+        if menu_bar is None:
+            return False
+        rect = menu_bar.rect()
+        rect.moveTopLeft(menu_bar.mapToGlobal(rect.topLeft()))
+        return rect.adjusted(0, -2, 0, 2).contains(global_pos)
+
+    def _toolbar_event_is_blank(self, event: object) -> bool:
+        toolbar = self._main_toolbar
+        if toolbar is None:
+            return False
+        if hasattr(event, "position"):
+            pos = event.position().toPoint()
+        elif hasattr(event, "pos"):
+            pos = event.pos()
+        else:
+            return False
+        child = toolbar.childAt(pos)
+        if child is None:
+            return True
+        return child is self._toolbar_spacer or child.objectName() == "toolbar_spacer"
+
+    def _set_reader_chrome_collapsed(self, collapsed: bool) -> None:
+        if collapsed == self._reader_chrome_collapsed:
+            return
+        self._reader_chrome_collapsed = collapsed
+        if self._main_toolbar is not None:
+            self._main_toolbar.setVisible(not collapsed)
+        self.statusBar().setVisible(not collapsed)
+        if self._toolbar_restore_handle is not None:
+            self._toolbar_restore_handle.setVisible(collapsed)
 
     def _create_side_panels(self) -> None:
         """创建侧边栏面板。"""
@@ -389,6 +541,8 @@ class MainWindow(QMainWindow):
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
+        self._left_dock.topLevelChanged.connect(self._on_left_dock_top_level_changed)
+        self._left_dock.setTitleBarWidget(self._create_left_dock_title_bar())
         self._left_dock.setMinimumWidth(self._left_panel_min_width)
         self._left_dock.setWidget(self._toc_tree)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._left_dock)
@@ -567,6 +721,62 @@ class MainWindow(QMainWindow):
             painter.drawLine(center_x - 2, 9, center_x + 3, 14)
         painter.end()
         return QIcon(pixmap)
+
+    def _create_left_dock_title_bar(self) -> QWidget:
+        title_bar = QWidget()
+        title_bar.setObjectName("left_dock_title_bar")
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(8, 3, 6, 3)
+        title_layout.setSpacing(6)
+
+        title_label = QLabel("导航")
+        title_label.setObjectName("left_dock_title_label")
+        title_label.setStyleSheet("font-weight: 600;")
+        title_layout.addWidget(title_label, 1)
+
+        self._left_dock_float_button = QToolButton()
+        self._left_dock_float_button.setObjectName("left_dock_float_button")
+        self._left_dock_float_button.setAutoRaise(True)
+        self._left_dock_float_button.setIconSize(QSize(16, 16))
+        self._left_dock_float_button.setFixedSize(30, 26)
+        self._left_dock_float_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._left_dock_float_button.clicked.connect(self._on_left_dock_float_toggle_clicked)
+        title_layout.addWidget(self._left_dock_float_button, 0, Qt.AlignmentFlag.AlignRight)
+        self._update_left_dock_float_button()
+        return title_bar
+
+    def _on_left_dock_float_toggle_clicked(self) -> None:
+        """Float the navigation dock, or dock it back to the left side."""
+        if self._left_dock.isFloating():
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._left_dock)
+            self._left_dock.setFloating(False)
+            self.resizeDocks(
+                [self._left_dock],
+                [self._left_panel_expanded_width],
+                Qt.Orientation.Horizontal,
+            )
+        else:
+            current_width = self._left_dock.width()
+            if current_width >= self._left_panel_min_width:
+                self._left_panel_expanded_width = max(self._left_panel_min_width, current_width)
+            self._left_dock.setFloating(True)
+        self._update_left_dock_float_button()
+
+    def _on_left_dock_top_level_changed(self, _floating: bool) -> None:
+        self._update_left_dock_float_button()
+
+    def _update_left_dock_float_button(self) -> None:
+        button = getattr(self, "_left_dock_float_button", None)
+        if button is None:
+            return
+        if self._left_dock.isFloating():
+            button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton))
+            button.setToolTip("归位到左侧导航栏")
+            button.setAccessibleName("归位到左侧导航栏")
+        else:
+            button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
+            button.setToolTip("弹出为独立窗口")
+            button.setAccessibleName("弹出为独立窗口")
 
     def _create_right_dock_title_bar(self) -> QWidget:
         title_bar = QWidget()
@@ -1985,6 +2195,9 @@ class MainWindow(QMainWindow):
         清理顺序：文档引擎 → 知识库引擎 → 术语表 → 配置。
         确保 ChromaDB WAL 文件正确刷入磁盘。
         """
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         # 1. 关闭文档（停止解析线程，关闭 PDF 文件）
         self._formula_index_flow.stop()
         self._stop_formula_import_thread()

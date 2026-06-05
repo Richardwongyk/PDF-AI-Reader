@@ -261,8 +261,9 @@ def test_main_window_smoke() -> None:
     result = _run_python(
         """
         import sys
-        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtCore import Qt, QTimer, QPoint
         from PySide6.QtGui import QAction
+        from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication, QDockWidget, QToolBar, QToolButton, QWidget
         from PySide6.QtWebEngineCore import QWebEngineProfile
 
@@ -279,6 +280,7 @@ def test_main_window_smoke() -> None:
         services = build_services()
         window = main_window_module.MainWindow(services)
         window.show()
+        app.processEvents()
         app_style = app.styleSheet()
         assert "PDF_AI_READER_TOOLTIP_STYLE" in app_style
         assert "color: #ffffff" in app_style
@@ -292,8 +294,65 @@ def test_main_window_smoke() -> None:
         assert right_toggle is not None
         toolbar = window.findChild(QToolBar, "main_toolbar")
         assert toolbar is not None
-        assert toolbar.widgetForAction(toolbar.actions()[0]) is left_toggle
-        assert any(toolbar.widgetForAction(action) is right_toggle for action in toolbar.actions())
+        toolbar_spacer = window.findChild(QWidget, "toolbar_spacer")
+        restore_handle = window.findChild(QWidget, "toolbar_restore_handle")
+        assert toolbar_spacer is not None
+        assert restore_handle is not None
+        left_corner = window.menuBar().cornerWidget(Qt.Corner.TopLeftCorner)
+        right_corner = window.menuBar().cornerWidget(Qt.Corner.TopRightCorner)
+        assert left_corner is not None
+        assert right_corner is not None
+        assert left_corner.findChild(QToolButton, "left_panel_toggle_button") is left_toggle
+        assert right_corner.findChild(QToolButton, "right_panel_toggle_button") is right_toggle
+        assert right_corner.width() >= right_toggle.width() + 8
+        assert all(toolbar.widgetForAction(action) is not left_toggle for action in toolbar.actions())
+        assert all(toolbar.widgetForAction(action) is not right_toggle for action in toolbar.actions())
+        assert toolbar_spacer.width() >= 80
+        assert not window._reader_chrome_collapsed
+        assert not restore_handle.isVisible()
+        def close_active_popup():
+            popup = QApplication.activePopupWidget()
+            if popup is not None:
+                popup.close()
+                app.processEvents()
+            return popup
+        menu_pos = QPoint(64, max(1, window.menuBar().height() // 2))
+        QTest.mouseClick(window.menuBar(), Qt.MouseButton.LeftButton, pos=menu_pos)
+        app.processEvents()
+        assert not window._reader_chrome_collapsed
+        assert toolbar.isVisible()
+        assert window.statusBar().isVisible()
+        assert close_active_popup() is not None
+        QTest.mouseDClick(window.menuBar(), Qt.MouseButton.LeftButton, pos=menu_pos)
+        app.processEvents()
+        assert window._reader_chrome_collapsed
+        assert not toolbar.isVisible()
+        assert not window.statusBar().isVisible()
+        assert left_toggle.isVisible()
+        assert right_toggle.isVisible()
+        QTest.mouseClick(window.menuBar(), Qt.MouseButton.LeftButton, pos=menu_pos)
+        app.processEvents()
+        assert window._reader_chrome_collapsed
+        assert not toolbar.isVisible()
+        assert not window.statusBar().isVisible()
+        assert close_active_popup() is not None
+        QTest.mouseDClick(window.menuBar(), Qt.MouseButton.LeftButton, pos=menu_pos)
+        app.processEvents()
+        assert not window._reader_chrome_collapsed
+        assert toolbar.isVisible()
+        assert window.statusBar().isVisible()
+        QTest.mouseDClick(toolbar_spacer, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert window._reader_chrome_collapsed
+        assert not toolbar.isVisible()
+        assert not window.statusBar().isVisible()
+        assert restore_handle.isVisible()
+        QTest.mouseDClick(restore_handle, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert not window._reader_chrome_collapsed
+        assert toolbar.isVisible()
+        assert window.statusBar().isVisible()
+        assert not restore_handle.isVisible()
         assert left_toggle.width() <= 34
         assert right_toggle.width() <= 34
         assert "#111827" in left_toggle.styleSheet()
@@ -321,6 +380,22 @@ def test_main_window_smoke() -> None:
         assert left_toggle.toolTip() == "隐藏左侧导航栏"
         assert window._left_dock.isVisible()
         assert not (window._left_dock.features() & QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        left_float_button = window.findChild(QToolButton, "left_dock_float_button")
+        assert left_float_button is not None
+        assert left_float_button.isVisible()
+        assert left_float_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert left_float_button.text() == ""
+        assert not left_float_button.icon().isNull()
+        assert not window._left_dock.isFloating()
+        left_float_button.click()
+        app.processEvents()
+        assert window._left_dock.isFloating()
+        assert left_float_button.isVisible()
+        assert left_float_button.toolTip() == "归位到左侧导航栏"
+        left_float_button.click()
+        app.processEvents()
+        assert not window._left_dock.isFloating()
+        assert window.dockWidgetArea(window._left_dock) == Qt.DockWidgetArea.LeftDockWidgetArea
         assert right_toggle.text() == ""
         assert right_toggle.toolTip() == "隐藏右侧 AI 工具集"
         assert window._right_panel_body is not None

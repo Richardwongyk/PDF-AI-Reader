@@ -75,14 +75,17 @@ abstain 和缺模型 warning。
 
 - `src/ui/main_window.py`
   - 主工具栏设置 objectName `main_toolbar`。
-  - 工具栏最左侧增加 30px icon-only 线头 `left_panel_toggle_button`，用于隐藏/显示左侧导航 dock。
-  - 工具栏最右侧保留 30px icon-only 线头 `right_panel_toggle_button`，用于隐藏/显示右侧 AI 面板。
+  - 左侧 30px icon-only 线头 `left_panel_toggle_button` 已移动到菜单栏同层左上角，用于隐藏/显示左侧导航 dock。
+  - 右侧 30px icon-only 线头 `right_panel_toggle_button` 已移动到菜单栏同层右上角，用于隐藏/显示右侧 AI 面板。
   - 两个侧栏按钮是白色边框、黑底、蓝色自绘线条，不使用系统黑色箭头。
   - 左侧导航 dock 去掉 closable feature，保留 movable/floatable，最小宽度 220，默认展开宽度 240。
+  - 左侧导航 dock 使用自定义标题栏，`left_dock_float_button` 可在弹出独立窗口和归位左侧栏之间切换。
   - 右侧 `AI 工具集` dock 去掉 closable feature，保留 movable/floatable。
   - dock 内容拆成 `_right_panel_body`，工具栏按钮可隐藏/显示右侧 AI 面板，并保存展开宽度。
   - dock 使用自定义标题栏，`right_dock_float_button` 可在弹出独立窗口和归位右侧栏之间切换。
   - 最小宽度当前为 300，默认展开宽度当前为 360。
+  - 顶部工具栏空白区双击可折叠工具栏/状态栏，折叠后中央阅读区顶部细条双击可恢复。
+  - 菜单栏文字区域双击折叠未可靠实现，用户已决定暂不继续；后续不要把它当成已完成能力。
 - `src/ui/pdf_viewer.py`
   - 中央阅读区水平滚动条从禁用改为按需显示。
   - 缩放后页面宽度超过视口时会同步内容最小宽度和横向滚动范围。
@@ -92,8 +95,8 @@ abstain 和缺模型 warning。
 - `src/main.py` / `src/ui/main_window.py`
   - 默认生成路由走云端；非显式 `local_only` 启动检查只显示云端状态，不再弹 Ollama。
 - `tests/test_smoke.py`
-  - `test_main_window_smoke` 覆盖左右侧栏 toolbar toggle、按钮小尺寸、tooltip 状态、
-    左右 dock 不可关闭、右侧 float/restore 和右侧停靠区域。
+  - `test_main_window_smoke` 覆盖左右侧栏菜单栏同层 toggle、按钮小尺寸、tooltip 状态、
+    左右 dock 不可关闭、左右 float/restore、工具栏空白区双击和恢复细条双击。
 - `tests/test_pdf_viewer_navigation.py`
   - 覆盖按需水平滚动条和 bbox 横向跳转。
 - 已补跑：
