@@ -1,6 +1,6 @@
 # 当前目标与下一步
 
-最后更新：2026-06-02
+最后更新：2026-06-05
 
 本文是新会话接手时的短入口。历史流水账已从本文删除，避免把过期状态、
 旧指标和临时路线误当成下一步计划。TinyBDMath 的白话版执行方案见
@@ -32,7 +32,7 @@ radical、accent、fence、matrix/aligned、operator、text run、style/mathvari
 
 ## 2. 当前代码与提交状态
 
-最近已提交四类成果：
+最近已提交的主线成果：
 
 - `5b5b38e Optimize TinyBDMath relation scoring pipeline`
   - PyTorch batch/vectorized relation scoring。
@@ -54,10 +54,17 @@ radical、accent、fence、matrix/aligned、operator、text run、style/mathvari
   - 新增 Graph Parser M1 训练和纯 Python 推理 artifact。
   - r2a 主路径切到 Graph Parser artifact；缺模型时 abstain。
 
-- Clean legacy TinyBDMath scope（本轮提交）
+- `a77a37b Clean legacy TinyBDMath scope`
   - 提交节点保留/丢弃学习、节点分类头和结构监督收口。
   - 新增 AI/Math LaTeX 结构范围文档。
   - 删除旧 TinyBDMath quality/edge/sharded/gold/review 路线、孤立历史文档和旧脚本入口。
+
+- `a5091f8 Add AI dock panel controls`
+  - `src/ui/main_window.py` 右侧 `AI 工具集` dock 去掉关闭按钮，保留移动和浮动能力。
+  - 主工具栏新增 `right_panel_toggle_button`，可隐藏/显示右侧 AI 面板，并保存用户展开宽度。
+  - 自定义 dock 标题栏新增 `right_dock_float_button`，支持弹出独立窗口和归位右侧栏。
+  - `tests/test_smoke.py` 覆盖 `main_toolbar`、toggle 文案、dock 不可关闭和 float/restore。
+  - 已补跑 `tests/test_smoke.py -q`：11 passed；完整轻量接手测试尚未重跑完成。
 
 2026-06-02 当前已在 Graph Parser M1 上提交“节点保留/丢弃”学习：
 
@@ -81,6 +88,10 @@ r2a 只加载 Graph Parser artifact；缺少 Graph Parser artifact 时会写 can
 abstain 和缺模型 warning。
 
 `测试资料/` 是用户资料，不提交、不清理、不移动。
+
+当前主窗口右侧 AI 工具集仍是全文问答/证据/回答/追问入口；2026-06-05 起它可以
+通过主工具栏按钮隐藏/显示，也可以从自定义 dock 标题栏弹出为独立窗口或归位到右侧栏。
+这只是阅读界面可用性更新，不改变公式多轮索引、RAG/GraphRAG 或 accepted gate 边界。
 
 ## 3. 关键结论
 

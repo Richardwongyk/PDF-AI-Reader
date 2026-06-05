@@ -1,6 +1,6 @@
 # 新会话交接文档
 
-最后更新：2026-06-02
+最后更新：2026-06-05
 
 本文件是新终端/新 AI 助手接手项目时的交接入口。旧版长篇流水账已删除。
 当前真实下一步以本文、`TODO.md` 和
@@ -37,9 +37,15 @@
 - `a258fe2 Clean legacy TinyBDMath tooling and docs`
 - `1cbb9e1 Document neural symbolic TinyBDMath plan`
 - `c75d919 Add TinyBDMath graph parser pipeline`
-- Clean legacy TinyBDMath scope（本轮提交）
+- `a77a37b Clean legacy TinyBDMath scope`
+- `84496c4 Add TinyBDMath constrained layout verification`
+- `2b964aa Support TinyBDMath enclosure and equation tag relations`
+- `c6ae63d Rank TinyBDMath n-best candidates with verifier evidence`
+- `4e4a861 Complete TinyBDMath graph parser eval loop`
+- `aceba02 Improve TinyBDMath target parsing and eval tooling`
+- `a5091f8 Add AI dock panel controls`
 
-本轮提交已在 Graph Parser M1 基础上提交节点保留/丢弃学习和当前范围收口：
+此前 TinyBDMath 范围收口已在 Graph Parser M1 基础上提交节点保留/丢弃学习：
 
 - `src/core/tinybdmath_graph_parser.py`
   - artifact 新增节点分类头。
@@ -64,6 +70,22 @@
 
 当前 r2a 默认推理路径只保留 Graph Parser artifact。缺模型时写 candidate-only
 abstain 和缺模型 warning。
+
+2026-06-05 最新 UI 提交 `a5091f8 Add AI dock panel controls`：
+
+- `src/ui/main_window.py`
+  - 主工具栏设置 objectName `main_toolbar`，右侧增加 `right_panel_toggle_button`。
+  - 右侧 `AI 工具集` dock 去掉 closable feature，保留 movable/floatable。
+  - dock 内容拆成 `_right_panel_body`，工具栏按钮可隐藏/显示右侧 AI 面板，并保存展开宽度。
+  - dock 使用自定义标题栏，`right_dock_float_button` 可在弹出独立窗口和归位右侧栏之间切换。
+  - 最小宽度当前为 300，默认展开宽度当前为 360。
+- `tests/test_smoke.py`
+  - `test_main_window_smoke` 覆盖 toolbar/toggle、隐藏/显示文案、dock 不可关闭、
+    float/restore 和右侧停靠区域。
+- 已补跑：
+  - `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_smoke.py -q`
+  - 结果：11 passed，约 39 秒。
+- 轻量接手完整测试在用户打断后未完成；需要重新确认基线时按本文末尾命令重跑。
 
 2026-06-02 进一步收束：第一阶段目标不是开放科学记号识别，而是 AI/Math 论文
 中的通用数学排版结构恢复。数学公式不能按内容枚举；应按 LaTeX/amsmath/
