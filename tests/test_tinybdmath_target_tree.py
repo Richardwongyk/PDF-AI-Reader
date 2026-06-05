@@ -92,6 +92,21 @@ def test_target_tree_marks_katex_aligned_arrays_as_aligned_display() -> None:
     assert matrices[0].attrs["display_container"] == "aligned_display"
 
 
+def test_target_tree_wraps_top_level_display_alignment_with_comments() -> None:
+    result = TinyBDTargetTreeBuilder().build_from_latex(
+        r"A &= B\\ % dropped source comment C &= D\\ E &= F",
+        row_id="aligned-comment",
+        display_mode=True,
+    )
+
+    assert result.target_tree is not None, result.warnings
+    assert result.warnings == ("katex_display_alignment_wrapped", "katex_source_preprocessed")
+    matrices = [node for node in result.target_tree.nodes if node.node_type == "matrix"]
+    assert matrices
+    assert matrices[0].attrs["display_container"] == "aligned_display"
+    assert "dropped source comment" not in result.target_tree.to_latex()
+
+
 def test_target_tree_keeps_plain_matrix_separate_from_aligned_display() -> None:
     result = TinyBDTargetTreeBuilder().build_from_latex(
         r"\begin{matrix}a&b\\c&d\end{matrix}",

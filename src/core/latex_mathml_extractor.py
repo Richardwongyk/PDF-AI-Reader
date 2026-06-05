@@ -311,26 +311,241 @@ function cleanAst(value, seen) {{
 }}
 let mathml = '';
 let parseTree = [];
-try {{
-  mathml = katex.renderToString(payload.latex || '', {{
-    output: 'mathml',
-    displayMode: !!payload.display_mode,
-    throwOnError: false,
-    strict: 'ignore'
-  }});
-}} catch (err) {{
-  warnings.push('katex_render_error:' + String(err && err.message || err).slice(0, 160));
+function renderAndParse(rawLatex, displayMode) {{
+  const warnings = [];
+  let mathml = '';
+  let parseTree = [];
+  try {{
+    mathml = katex.renderToString(rawLatex || '', {{
+      output: 'mathml',
+      displayMode: !!displayMode,
+      throwOnError: false,
+      strict: 'ignore'
+    }});
+  }} catch (err) {{
+    warnings.push('katex_render_error:' + String(err && err.message || err).slice(0, 160));
+  }}
+  try {{
+    parseTree = katex.__parse(rawLatex || '', {{
+      displayMode: !!displayMode,
+      throwOnError: false,
+      strict: 'ignore'
+    }});
+    parseTree = cleanAst(parseTree);
+  }} catch (err) {{
+    warnings.push('katex_parse_error:' + String(err && err.message || err).slice(0, 160));
+  }}
+  return {{ mathml, parse_tree: parseTree, warnings }};
 }}
-try {{
-  parseTree = katex.__parse(payload.latex || '', {{
-    displayMode: !!payload.display_mode,
-    throwOnError: false,
-    strict: 'ignore'
-  }});
-  parseTree = cleanAst(parseTree);
-}} catch (err) {{
-  warnings.push('katex_parse_error:' + String(err && err.message || err).slice(0, 160));
+function hasParseTree(row) {{
+  return Array.isArray(row.parse_tree) ? row.parse_tree.length > 0 : !!row.parse_tree;
 }}
+function hasParseError(row) {{
+  return row.warnings.some((item) => String(item).startsWith('katex_parse_error:'));
+}}
+function isEscapedPercent(rawLatex, index) {{
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && rawLatex[cursor] === '\\\\'; cursor -= 1) {{
+    backslashes += 1;
+  }}
+  return backslashes % 2 === 1;
+}}
+function isEscapedCharacter(rawLatex, index) {{
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && rawLatex[cursor] === '\\\\'; cursor -= 1) {{
+    backslashes += 1;
+  }}
+  return backslashes % 2 === 1;
+}}
+function previousNonWhitespace(rawLatex, index) {{
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {{
+    if (rawLatex[cursor] !== ' ' && rawLatex[cursor] !== '\\t') {{
+      return rawLatex[cursor];
+    }}
+  }}
+  return '';
+}}
+function nextNonWhitespaceIndex(rawLatex, index) {{
+  let cursor = index;
+  while (cursor < rawLatex.length && (rawLatex[cursor] === ' ' || rawLatex[cursor] === '\\t')) {{
+    cursor += 1;
+  }}
+  return cursor;
+}}
+function stripLatexComments(rawLatex) {{
+  const text = String(rawLatex || '');
+  let output = '';
+  for (let index = 0; index < text.length; index += 1) {{
+    const char = text[index];
+    if (char !== '%' || isEscapedPercent(text, index)) {{
+      output += char;
+      continue;
+    }}
+    const afterPercent = nextNonWhitespaceIndex(text, index + 1);
+    if (previousNonWhitespace(text, index) === '{{' && text[afterPercent] === '\\\\') {{
+      index = afterPercent - 1;
+      continue;
+    }}
+    index += 1;
+    while (index < text.length && text[index] !== '\\n' && text[index] !== '\\r') {{
+      if (text[index] === '\\\\' && text[index + 1] === '\\\\') {{
+        index += 1;
+        break;
+      }}
+      index += 1;
+    }}
+    while (index + 1 < text.length && (text[index + 1] === ' ' || text[index + 1] === '\\t')) {{
+      index += 1;
+    }}
+  }}
+  return output;
+}}
+function stripMathShiftDelimiters(rawLatex) {{
+  const text = String(rawLatex || '');
+  let output = '';
+  for (let index = 0; index < text.length; index += 1) {{
+    if (text[index] === '$' && !isEscapedCharacter(text, index)) {{
+      continue;
+    }}
+    output += text[index];
+  }}
+  return output;
+}}
+function preprocessSourceLatex(rawLatex) {{
+  return stripMathShiftDelimiters(stripLatexComments(rawLatex));
+}}
+function displayAlignmentCandidate(rawLatex, displayMode) {{
+  if (!displayMode || typeof rawLatex !== 'string' || rawLatex.indexOf('&') < 0) {{
+    return '';
+  }}
+  const trimmed = rawLatex.trim();
+  if (trimmed.startsWith('\\\\begin{{aligned}}') || trimmed.startsWith('\\\\begin{{array}}')) {{
+    return '';
+  }}
+  return '\\\\begin{{aligned}}' + rawLatex + '\\\\end{{aligned}}';
+}}
+function controlWordEnd(rawLatex, index) {{
+  if (rawLatex[index] !== '\\\\') {{
+    return index;
+  }}
+  let cursor = index + 1;
+  while (cursor < rawLatex.length && /[A-Za-z]/.test(rawLatex[cursor])) {{
+    cursor += 1;
+  }}
+  return cursor > index + 1 ? cursor : Math.min(rawLatex.length, index + 2);
+}}
+function balancedGroupEnd(rawLatex, index) {{
+  if (rawLatex[index] !== '{{') {{
+    return index;
+  }}
+  let depth = 0;
+  for (let cursor = index; cursor < rawLatex.length; cursor += 1) {{
+    if (rawLatex[cursor] === '\\\\') {{
+      cursor += 1;
+      continue;
+    }}
+    if (rawLatex[cursor] === '{{') {{
+      depth += 1;
+    }} else if (rawLatex[cursor] === '}}') {{
+      depth -= 1;
+      if (depth === 0) {{
+        return cursor + 1;
+      }}
+    }}
+  }}
+  return index;
+}}
+function argumentEnd(rawLatex, index) {{
+  const start = nextNonWhitespaceIndex(rawLatex, index);
+  if (start >= rawLatex.length) {{
+    return start;
+  }}
+  if (rawLatex[start] === '{{') {{
+    return balancedGroupEnd(rawLatex, start);
+  }}
+  if (rawLatex[start] === '\\\\') {{
+    const commandEnd = controlWordEnd(rawLatex, start);
+    const afterCommand = nextNonWhitespaceIndex(rawLatex, commandEnd);
+    if (rawLatex[afterCommand] === '{{') {{
+      const groupEnd = balancedGroupEnd(rawLatex, afterCommand);
+      return groupEnd > afterCommand ? groupEnd : commandEnd;
+    }}
+    if (afterCommand < rawLatex.length && rawLatex[afterCommand] !== '&' && rawLatex[afterCommand] !== '\\\\') {{
+      return afterCommand + 1;
+    }}
+    return commandEnd;
+  }}
+  return start + 1;
+}}
+function unbracedControlArgumentCandidates(rawLatex) {{
+  const text = String(rawLatex || '');
+  const candidates = [];
+  const seen = new Set();
+  for (let index = 0; index < text.length; index += 1) {{
+    if (text[index] !== '\\\\') {{
+      continue;
+    }}
+    const commandEnd = controlWordEnd(text, index);
+    if (commandEnd <= index + 1) {{
+      continue;
+    }}
+    const argumentStart = nextNonWhitespaceIndex(text, commandEnd);
+    if (text[argumentStart] !== '\\\\') {{
+      continue;
+    }}
+    const wrappedEnd = argumentEnd(text, argumentStart);
+    if (wrappedEnd <= argumentStart) {{
+      continue;
+    }}
+    const candidate = text.slice(0, commandEnd) + '{{' + text.slice(argumentStart, wrappedEnd) + '}}' + text.slice(wrappedEnd);
+    if (!seen.has(candidate)) {{
+      seen.add(candidate);
+      candidates.push(candidate);
+    }}
+    if (candidates.length >= 12) {{
+      break;
+    }}
+  }}
+  return candidates;
+}}
+function parseWithFallbacks(rawLatex, displayMode) {{
+  const cleanedLatex = preprocessSourceLatex(rawLatex);
+  let row = renderAndParse(cleanedLatex, displayMode);
+  if (cleanedLatex !== rawLatex) {{
+    row.warnings.push('katex_source_preprocessed');
+  }}
+  if (hasParseTree(row) && !hasParseError(row)) {{
+    return row;
+  }}
+  const candidates = [];
+  const alignment = displayAlignmentCandidate(cleanedLatex, displayMode);
+  if (alignment) {{
+    candidates.push({{ latex: alignment, warnings: ['katex_display_alignment_wrapped'] }});
+  }}
+  for (const latex of unbracedControlArgumentCandidates(cleanedLatex)) {{
+    candidates.push({{ latex, warnings: ['katex_unbraced_control_argument_wrapped'] }});
+  }}
+  if (alignment) {{
+    for (const latex of unbracedControlArgumentCandidates(alignment)) {{
+      candidates.push({{ latex, warnings: ['katex_display_alignment_wrapped', 'katex_unbraced_control_argument_wrapped'] }});
+    }}
+  }}
+  for (const candidate of candidates) {{
+    const retried = renderAndParse(candidate.latex, true);
+    if (hasParseTree(retried) && !hasParseError(retried)) {{
+      retried.warnings.push(...candidate.warnings);
+      if (cleanedLatex !== rawLatex) {{
+        retried.warnings.push('katex_source_preprocessed');
+      }}
+      return retried;
+    }}
+  }}
+  return row;
+}}
+const row = parseWithFallbacks(payload.latex || '', !!payload.display_mode);
+mathml = row.mathml;
+parseTree = row.parse_tree;
+warnings.push(...row.warnings);
 console.log(JSON.stringify({{
   parser_version: katex.version || '',
   mathml,
@@ -379,30 +594,239 @@ function cleanAst(value, seen) {{
   return output;
 }}
 function extract(item) {{
-  const warnings = [];
-  let mathml = '';
-  let parseTree = [];
-  try {{
-    mathml = katex.renderToString(item.latex || '', {{
-      output: 'mathml',
-      displayMode: !!item.display_mode,
-      throwOnError: false,
-      strict: 'ignore'
-    }});
-  }} catch (err) {{
-    warnings.push('katex_render_error:' + String(err && err.message || err).slice(0, 160));
+  function renderAndParse(rawLatex, displayMode) {{
+    const warnings = [];
+    let mathml = '';
+    let parseTree = [];
+    try {{
+      mathml = katex.renderToString(rawLatex || '', {{
+        output: 'mathml',
+        displayMode: !!displayMode,
+        throwOnError: false,
+        strict: 'ignore'
+      }});
+    }} catch (err) {{
+      warnings.push('katex_render_error:' + String(err && err.message || err).slice(0, 160));
+    }}
+    try {{
+      parseTree = katex.__parse(rawLatex || '', {{
+        displayMode: !!displayMode,
+        throwOnError: false,
+        strict: 'ignore'
+      }});
+      parseTree = cleanAst(parseTree);
+    }} catch (err) {{
+      warnings.push('katex_parse_error:' + String(err && err.message || err).slice(0, 160));
+    }}
+    return {{ mathml, parse_tree: parseTree, warnings }};
   }}
-  try {{
-    parseTree = katex.__parse(item.latex || '', {{
-      displayMode: !!item.display_mode,
-      throwOnError: false,
-      strict: 'ignore'
-    }});
-    parseTree = cleanAst(parseTree);
-  }} catch (err) {{
-    warnings.push('katex_parse_error:' + String(err && err.message || err).slice(0, 160));
+  function hasParseTree(row) {{
+    return Array.isArray(row.parse_tree) ? row.parse_tree.length > 0 : !!row.parse_tree;
   }}
-  return {{ mathml, parse_tree: parseTree, warnings }};
+  function hasParseError(row) {{
+    return row.warnings.some((entry) => String(entry).startsWith('katex_parse_error:'));
+  }}
+  function isEscapedPercent(rawLatex, index) {{
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && rawLatex[cursor] === '\\\\'; cursor -= 1) {{
+      backslashes += 1;
+    }}
+    return backslashes % 2 === 1;
+  }}
+  function isEscapedCharacter(rawLatex, index) {{
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && rawLatex[cursor] === '\\\\'; cursor -= 1) {{
+      backslashes += 1;
+    }}
+    return backslashes % 2 === 1;
+  }}
+  function previousNonWhitespace(rawLatex, index) {{
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {{
+      if (rawLatex[cursor] !== ' ' && rawLatex[cursor] !== '\\t') {{
+        return rawLatex[cursor];
+      }}
+    }}
+    return '';
+  }}
+  function nextNonWhitespaceIndex(rawLatex, index) {{
+    let cursor = index;
+    while (cursor < rawLatex.length && (rawLatex[cursor] === ' ' || rawLatex[cursor] === '\\t')) {{
+      cursor += 1;
+    }}
+    return cursor;
+  }}
+  function stripLatexComments(rawLatex) {{
+    const text = String(rawLatex || '');
+    let output = '';
+    for (let index = 0; index < text.length; index += 1) {{
+      const char = text[index];
+      if (char !== '%' || isEscapedPercent(text, index)) {{
+        output += char;
+        continue;
+      }}
+      const afterPercent = nextNonWhitespaceIndex(text, index + 1);
+      if (previousNonWhitespace(text, index) === '{{' && text[afterPercent] === '\\\\') {{
+        index = afterPercent - 1;
+        continue;
+      }}
+      index += 1;
+      while (index < text.length && text[index] !== '\\n' && text[index] !== '\\r') {{
+        if (text[index] === '\\\\' && text[index + 1] === '\\\\') {{
+          index += 1;
+          break;
+        }}
+        index += 1;
+      }}
+      while (index + 1 < text.length && (text[index + 1] === ' ' || text[index + 1] === '\\t')) {{
+        index += 1;
+      }}
+    }}
+    return output;
+  }}
+  function stripMathShiftDelimiters(rawLatex) {{
+    const text = String(rawLatex || '');
+    let output = '';
+    for (let index = 0; index < text.length; index += 1) {{
+      if (text[index] === '$' && !isEscapedCharacter(text, index)) {{
+        continue;
+      }}
+      output += text[index];
+    }}
+    return output;
+  }}
+  function preprocessSourceLatex(rawLatex) {{
+    return stripMathShiftDelimiters(stripLatexComments(rawLatex));
+  }}
+  function displayAlignmentCandidate(rawLatex, displayMode) {{
+    if (!displayMode || typeof rawLatex !== 'string' || rawLatex.indexOf('&') < 0) {{
+      return '';
+    }}
+    const trimmed = rawLatex.trim();
+    if (trimmed.startsWith('\\\\begin{{aligned}}') || trimmed.startsWith('\\\\begin{{array}}')) {{
+      return '';
+    }}
+    return '\\\\begin{{aligned}}' + rawLatex + '\\\\end{{aligned}}';
+  }}
+  function controlWordEnd(rawLatex, index) {{
+    if (rawLatex[index] !== '\\\\') {{
+      return index;
+    }}
+    let cursor = index + 1;
+    while (cursor < rawLatex.length && /[A-Za-z]/.test(rawLatex[cursor])) {{
+      cursor += 1;
+    }}
+    return cursor > index + 1 ? cursor : Math.min(rawLatex.length, index + 2);
+  }}
+  function balancedGroupEnd(rawLatex, index) {{
+    if (rawLatex[index] !== '{{') {{
+      return index;
+    }}
+    let depth = 0;
+    for (let cursor = index; cursor < rawLatex.length; cursor += 1) {{
+      if (rawLatex[cursor] === '\\\\') {{
+        cursor += 1;
+        continue;
+      }}
+      if (rawLatex[cursor] === '{{') {{
+        depth += 1;
+      }} else if (rawLatex[cursor] === '}}') {{
+        depth -= 1;
+        if (depth === 0) {{
+          return cursor + 1;
+        }}
+      }}
+    }}
+    return index;
+  }}
+  function argumentEnd(rawLatex, index) {{
+    const start = nextNonWhitespaceIndex(rawLatex, index);
+    if (start >= rawLatex.length) {{
+      return start;
+    }}
+    if (rawLatex[start] === '{{') {{
+      return balancedGroupEnd(rawLatex, start);
+    }}
+    if (rawLatex[start] === '\\\\') {{
+      const commandEnd = controlWordEnd(rawLatex, start);
+      const afterCommand = nextNonWhitespaceIndex(rawLatex, commandEnd);
+      if (rawLatex[afterCommand] === '{{') {{
+        const groupEnd = balancedGroupEnd(rawLatex, afterCommand);
+        return groupEnd > afterCommand ? groupEnd : commandEnd;
+      }}
+      if (afterCommand < rawLatex.length && rawLatex[afterCommand] !== '&' && rawLatex[afterCommand] !== '\\\\') {{
+        return afterCommand + 1;
+      }}
+      return commandEnd;
+    }}
+    return start + 1;
+  }}
+  function unbracedControlArgumentCandidates(rawLatex) {{
+    const text = String(rawLatex || '');
+    const candidates = [];
+    const seen = new Set();
+    for (let index = 0; index < text.length; index += 1) {{
+      if (text[index] !== '\\\\') {{
+        continue;
+      }}
+      const commandEnd = controlWordEnd(text, index);
+      if (commandEnd <= index + 1) {{
+        continue;
+      }}
+      const argumentStart = nextNonWhitespaceIndex(text, commandEnd);
+      if (text[argumentStart] !== '\\\\') {{
+        continue;
+      }}
+      const wrappedEnd = argumentEnd(text, argumentStart);
+      if (wrappedEnd <= argumentStart) {{
+        continue;
+      }}
+      const candidate = text.slice(0, commandEnd) + '{{' + text.slice(argumentStart, wrappedEnd) + '}}' + text.slice(wrappedEnd);
+      if (!seen.has(candidate)) {{
+        seen.add(candidate);
+        candidates.push(candidate);
+      }}
+      if (candidates.length >= 12) {{
+        break;
+      }}
+    }}
+    return candidates;
+  }}
+  function parseWithFallbacks(rawLatex, displayMode) {{
+    const cleanedLatex = preprocessSourceLatex(rawLatex);
+    let row = renderAndParse(cleanedLatex, displayMode);
+    if (cleanedLatex !== rawLatex) {{
+      row.warnings.push('katex_source_preprocessed');
+    }}
+    if (hasParseTree(row) && !hasParseError(row)) {{
+      return row;
+    }}
+    const candidates = [];
+    const alignment = displayAlignmentCandidate(cleanedLatex, displayMode);
+    if (alignment) {{
+      candidates.push({{ latex: alignment, warnings: ['katex_display_alignment_wrapped'] }});
+    }}
+    for (const latex of unbracedControlArgumentCandidates(cleanedLatex)) {{
+      candidates.push({{ latex, warnings: ['katex_unbraced_control_argument_wrapped'] }});
+    }}
+    if (alignment) {{
+      for (const latex of unbracedControlArgumentCandidates(alignment)) {{
+        candidates.push({{ latex, warnings: ['katex_display_alignment_wrapped', 'katex_unbraced_control_argument_wrapped'] }});
+      }}
+    }}
+    for (const candidate of candidates) {{
+      const retried = renderAndParse(candidate.latex, true);
+      if (hasParseTree(retried) && !hasParseError(retried)) {{
+        retried.warnings.push(...candidate.warnings);
+        if (cleanedLatex !== rawLatex) {{
+          retried.warnings.push('katex_source_preprocessed');
+        }}
+        return retried;
+      }}
+    }}
+    return row;
+  }}
+  const row = parseWithFallbacks(item.latex || '', !!item.display_mode);
+  return row;
 }}
 const items = Array.isArray(payload.items) ? payload.items : [];
 console.log(JSON.stringify({{

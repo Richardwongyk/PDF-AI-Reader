@@ -13,10 +13,13 @@ if str(ROOT) not in sys.path:
 
 from src.core.tinybdmath_graph_parser import (
     TinyBDGraphParser,
+    TinyBDGraphParserArtifact,
+    candidate_pairs,
     graph_parser_predictions_to_structural_candidate,
+    graph_nodes,
+    graph_parser_features,
+    graph_parser_node_features,
 )
-from src.core.tinybdmath_latex_decoder import decode_latex_candidate
-from tools.formula_latex_audit import _formula_similarity, _normalize_formula_for_match
 
 
 def main() -> int:
@@ -29,17 +32,30 @@ def main() -> int:
         type=Path,
         help="Graph Parser JSON artifact; candidates are generated directly from graph rows.",
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--candidates-output",
+        type=Path,
+        help="Write generated Graph Parser structural candidates and exit before decoded LaTeX evaluation.",
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
         "--stream",
         action="store_true",
         help="Evaluate rows incrementally by joining graph rows and candidates in file order.",
     )
+    parser.add_argument(
+        "--torch-inference",
+        action="store_true",
+        help="Use PyTorch batched Graph Parser inference when --graph-parser-model is provided.",
+    )
+    parser.add_argument("--torch-batch-size", type=int, default=65536)
     args = parser.parse_args()
 
     if args.stream and args.graph_parser_model is not None:
         parser.error("--stream is only supported with --candidates")
+    if args.output is None and args.candidates_output is None:
+        parser.error("--output is required unless --candidates-output is used")
     if args.stream:
         decoded_rows, warnings = _decode_rows_stream(
             args.graph_rows,
@@ -49,12 +65,35 @@ def main() -> int:
     else:
         graph_rows = _read_jsonl(args.graph_rows, limit=args.limit)
         if args.graph_parser_model is not None:
-            candidates = _candidates_from_graph_parser(graph_rows, args.graph_parser_model)
+            if args.torch_inference:
+                candidates = _candidates_from_graph_parser_torch(
+                    graph_rows,
+                    args.graph_parser_model,
+                    batch_size=int(args.torch_batch_size),
+                )
+            else:
+                candidates = _candidates_from_graph_parser(graph_rows, args.graph_parser_model)
+            if args.candidates_output is not None:
+                _write_jsonl(args.candidates_output, candidates)
+                print(
+                    json.dumps(
+                        {
+                            "schema_version": "tinybdmath_graph_parser_candidates_export_v1",
+                            "rows": len(candidates),
+                            "torch_inference": bool(args.torch_inference),
+                            "output": str(args.candidates_output),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
         else:
             candidates = _read_jsonl(args.candidates, limit=args.limit)
         rows_by_id = {str(row.get("row_id", "")): row for row in graph_rows}
         decoded_rows, warnings = _decode_rows(candidates, rows_by_id)
     report = _build_report(decoded_rows, warnings, streaming=bool(args.stream))
+    assert args.output is not None
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     rows_path = args.output.with_suffix(".jsonl")
@@ -80,6 +119,201 @@ def _candidates_from_graph_parser(
     return candidates
 
 
+def _candidates_from_graph_parser_torch(
+    graph_rows: list[dict[str, Any]],
+    graph_parser_model: Path,
+    *,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - depends on optional training env
+        raise SystemExit(f"torch_unavailable: {exc}") from exc
+    predictor = _TorchGraphParserPredictor(
+        TinyBDGraphParserArtifact.load(graph_parser_model),
+        torch=torch,
+        batch_size=max(1, int(batch_size)),
+    )
+    candidates: list[dict[str, Any]] = []
+    for graph_row in graph_rows:
+        predictions = predictor.predict_row(graph_row)
+        structural = graph_parser_predictions_to_structural_candidate(predictions)
+        structural["row_id"] = str(graph_row.get("row_id", "") or "")
+        structural["kind"] = str(graph_row.get("kind", "") or "")
+        candidates.append(structural)
+    return candidates
+
+
+class _TorchGraphParserPredictor:
+    def __init__(self, artifact: TinyBDGraphParserArtifact, *, torch: Any, batch_size: int) -> None:
+        self.artifact = artifact
+        self.torch = torch
+        self.batch_size = max(1, int(batch_size))
+        self.relation_weights = _torch_weights(
+            hidden_weights=artifact.hidden_weights,
+            hidden_biases=artifact.hidden_biases,
+            output_weights=artifact.output_weights,
+            output_bias=artifact.output_bias,
+            torch=torch,
+        )
+        self.node_weights = _torch_weights(
+            hidden_weights=artifact.node_hidden_weights,
+            hidden_biases=artifact.node_hidden_biases,
+            output_weights=artifact.node_output_weights,
+            output_bias=artifact.node_output_bias,
+            torch=torch,
+        )
+        self.relation_means = torch.tensor(artifact.means or [0.0 for _ in artifact.feature_names], dtype=torch.float32)
+        self.relation_scales = torch.tensor(artifact.scales or [1.0 for _ in artifact.feature_names], dtype=torch.float32).clamp_min(1e-6)
+        self.node_means = torch.tensor(artifact.node_means or [0.0 for _ in artifact.node_feature_names], dtype=torch.float32)
+        self.node_scales = torch.tensor(artifact.node_scales or [1.0 for _ in artifact.node_feature_names], dtype=torch.float32).clamp_min(1e-6)
+
+    def predict_row(self, graph_row: dict[str, Any]) -> dict[str, Any]:
+        all_nodes = graph_nodes(graph_row, include_blank=True)
+        nodes = [node for node in all_nodes if node.get("node_type") == "vector" or str(node.get("text", "") or "").strip()]
+        pairs = candidate_pairs(nodes)
+        predictions: list[dict[str, Any]] = []
+        relation_alternatives: list[dict[str, Any]] = []
+        if pairs:
+            feature_rows = [
+                [float(graph_parser_features(source, target, nodes).get(name, 0.0) or 0.0) for name in self.artifact.feature_names]
+                for source, target in pairs
+            ]
+            probabilities = self._predict_probabilities(
+                feature_rows,
+                means=self.relation_means,
+                scales=self.relation_scales,
+                weights=self.relation_weights,
+            )
+            labels = self.artifact.relation_labels
+            cutoff = float(self.artifact.threshold)
+            for index, (source, target) in enumerate(pairs):
+                row_probabilities = probabilities[index]
+                best_index = int(row_probabilities.argmax().item())
+                relation = labels[best_index]
+                confidence = float(row_probabilities[best_index].item())
+                if relation == "NONE" or confidence < cutoff:
+                    continue
+                relation_alternatives.append(
+                    {
+                        "source": str(source["node_id"]),
+                        "target": str(target["node_id"]),
+                        "alternatives": _top_torch_relation_alternatives(row_probabilities, labels),
+                    }
+                )
+                predictions.append(
+                    {
+                        "source": str(source["node_id"]),
+                        "target": str(target["node_id"]),
+                        "relation": relation,
+                        "confidence": round(confidence, 6),
+                    }
+                )
+        node_predictions = self._predict_node_labels(all_nodes)
+        return {
+            "schema_version": "tinybdmath_graph_parser_predictions_v1",
+            "model_version": self.artifact.model_version,
+            "feature_version": self.artifact.feature_version,
+            "input_hash": "",
+            "node_count": len(nodes),
+            "candidate_pairs": len(pairs),
+            "node_predictions": node_predictions,
+            "node_filter_threshold": float(self.artifact.node_filter_threshold),
+            "predictions": sorted(predictions, key=lambda item: (item["source"], item["target"], item["relation"])),
+            "relation_alternatives": sorted(
+                relation_alternatives,
+                key=lambda item: (str(item.get("source", "")), str(item.get("target", ""))),
+            ),
+            "candidate_only": True,
+        }
+
+    def _predict_node_labels(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self.node_weights:
+            return []
+        feature_rows = [
+            [float(graph_parser_node_features(node, nodes).get(name, 0.0) or 0.0) for name in self.artifact.node_feature_names]
+            for node in nodes
+        ]
+        if not feature_rows:
+            return []
+        probabilities = self._predict_probabilities(
+            feature_rows,
+            means=self.node_means,
+            scales=self.node_scales,
+            weights=self.node_weights,
+        )
+        output: list[dict[str, Any]] = []
+        labels = self.artifact.node_label_names
+        for index, node in enumerate(nodes):
+            row_probabilities = probabilities[index]
+            best_index = int(row_probabilities.argmax().item())
+            output.append(
+                {
+                    "node_id": str(node.get("node_id", "") or ""),
+                    "label": labels[best_index],
+                    "confidence": round(float(row_probabilities[best_index].item()), 6),
+                }
+            )
+        return output
+
+    def _predict_probabilities(
+        self,
+        feature_rows: list[list[float]],
+        *,
+        means: Any,
+        scales: Any,
+        weights: tuple[tuple[Any, Any], ...],
+    ) -> Any:
+        if not feature_rows or not weights:
+            return self.torch.empty((0, 0), dtype=self.torch.float32)
+        outputs: list[Any] = []
+        with self.torch.no_grad():
+            for start in range(0, len(feature_rows), self.batch_size):
+                batch = self.torch.tensor(feature_rows[start : start + self.batch_size], dtype=self.torch.float32)
+                activations = (batch - means[: batch.shape[1]]) / scales[: batch.shape[1]].clamp_min(1e-6)
+                for layer_index, (weight, bias) in enumerate(weights):
+                    activations = activations.matmul(weight.t()) + bias
+                    if layer_index < len(weights) - 1:
+                        activations = self.torch.relu(activations)
+                outputs.append(self.torch.softmax(activations, dim=1).cpu())
+        return self.torch.cat(outputs, dim=0)
+
+
+def _torch_weights(
+    *,
+    hidden_weights: tuple[tuple[tuple[float, ...], ...], ...],
+    hidden_biases: tuple[tuple[float, ...], ...],
+    output_weights: tuple[tuple[float, ...], ...],
+    output_bias: tuple[float, ...],
+    torch: Any,
+) -> tuple[tuple[Any, Any], ...]:
+    if not output_weights:
+        return ()
+    layers: list[tuple[Any, Any]] = []
+    for weight, bias in zip(hidden_weights, hidden_biases):
+        layers.append((torch.tensor(weight, dtype=torch.float32), torch.tensor(bias, dtype=torch.float32)))
+    layers.append((torch.tensor(output_weights, dtype=torch.float32), torch.tensor(output_bias, dtype=torch.float32)))
+    return tuple(layers)
+
+
+def _top_torch_relation_alternatives(
+    probabilities: Any,
+    labels: tuple[str, ...],
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    values, indices = probabilities[: len(labels)].sort(descending=True)
+    alternatives: list[dict[str, Any]] = []
+    for value, index in zip(values.tolist(), indices.tolist()):
+        label = str(labels[int(index)])
+        if label == "NONE":
+            continue
+        alternatives.append({"relation": label, "confidence": round(float(value), 6)})
+        if len(alternatives) >= limit:
+            break
+    return alternatives
+
+
 def _decode_rows(
     candidates: list[dict[str, Any]],
     rows_by_id: dict[str, dict[str, Any]],
@@ -100,6 +334,8 @@ def _decoded_eval_row(
     graph_row: dict[str, Any],
     candidate: dict[str, Any],
 ) -> dict[str, Any]:
+    from src.core.tinybdmath_latex_decoder import decode_latex_candidate
+
     decoded = decode_latex_candidate(
         list(graph_row.get("glyph_nodes", []) or graph_row.get("glyphs", []) or []),
         candidate,
@@ -252,6 +488,13 @@ def _read_jsonl(path: Path, *, limit: int = 0) -> list[dict[str, Any]]:
     return rows
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
 def _read_next_json_object(handle: Any) -> dict[str, Any] | None:
     for line in handle:
         text = line.strip()
@@ -273,6 +516,8 @@ def _fallback_text(row: dict[str, Any]) -> str:
 
 
 def _similarity(expected: str, actual: str) -> float:
+    from tools.formula_latex_audit import _formula_similarity, _normalize_formula_for_match
+
     expected_compact = _compact_latex(expected)
     actual_compact = _compact_latex(actual)
     if expected_compact and actual_compact and expected_compact == actual_compact:

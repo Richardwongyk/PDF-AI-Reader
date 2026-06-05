@@ -9,13 +9,18 @@ import json
 from typing import Any
 from xml.etree import ElementTree
 
-from src.core.latex_mathml_extractor import KaTeXMathMLExtractor
+from src.core.latex_mathml_extractor import KaTeXMathMLExtractor, LatexMathMLExtraction
 from src.core.symbol_identity_repair import latex_for_unicode_text
 from src.core.tinybdmath_cslt_schema import CSLTBuilder, CSLTTree
 
 
 TARGET_TREE_SCHEMA_VERSION = "tinybdmath_target_tree_rows_v1"
 TARGET_TREE_BUILDER_VERSION = "tinybdmath_katex_to_cslt_v3"
+NONFATAL_EXTRACTION_WARNINGS = {
+    "katex_display_alignment_wrapped",
+    "katex_source_preprocessed",
+    "katex_unbraced_control_argument_wrapped",
+}
 
 
 @dataclass(frozen=True)
@@ -62,9 +67,26 @@ class TinyBDTargetTreeBuilder:
     ) -> TinyBDTargetTreeResult:
         text = str(latex or "")
         extracted = self._extractor.extract(text, display_mode=display_mode)
+        return self.build_from_extraction(
+            extracted,
+            row_id=row_id,
+            latex=text,
+            display_mode=display_mode,
+        )
+
+    def build_from_extraction(
+        self,
+        extracted: LatexMathMLExtraction,
+        *,
+        row_id: str = "",
+        latex: str = "",
+        display_mode: bool = False,
+    ) -> TinyBDTargetTreeResult:
+        text = str(latex if latex else extracted.latex or "")
         parser_summary = _parser_summary(extracted.parse_tree, extracted.mathml)
         warnings = set(str(item) for item in extracted.warnings if item)
-        if extracted.warnings or not extracted.parse_tree:
+        fatal_warnings = {item for item in warnings if item not in NONFATAL_EXTRACTION_WARNINGS}
+        if fatal_warnings or not extracted.parse_tree:
             warnings.add("target_tree_parse_empty_or_failed")
             return TinyBDTargetTreeResult(
                 row_id=str(row_id or ""),
@@ -125,29 +147,17 @@ class TinyBDTargetTreeBuilder:
         *,
         latex_key: str = "label_latex",
         limit: int = 0,
+        batch_size: int = 512,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         selected = rows[: max(0, int(limit))] if limit > 0 else rows
         output: list[dict[str, Any]] = []
         warnings: Counter[str] = Counter()
         structure_counts: Counter[str] = Counter()
-        for row in selected:
-            result = self.build_from_latex(
-                str(row.get(latex_key, "") or ""),
-                row_id=str(row.get("row_id", "") or ""),
-                display_mode=str(row.get("kind", "") or "") == "display",
-            )
-            payload = result.to_json()
-            payload["source_row"] = {
-                "case": row.get("case", ""),
-                "kind": row.get("kind", ""),
-                "page_num": row.get("page_num"),
-                "graph_input_hash": row.get("input_hash", ""),
-                "latex_key": latex_key,
-            }
-            output.append(payload)
-            warnings.update(str(item) for item in result.warnings if item)
-            if result.target_tree is not None:
-                structure_counts.update(node.node_type for node in result.target_tree.nodes)
+        for chunk in _chunks(selected, max(1, int(batch_size or 512))):
+            output_chunk, chunk_warnings, chunk_structures = self.build_row_chunk(chunk, latex_key=latex_key)
+            output.extend(output_chunk)
+            warnings.update(chunk_warnings)
+            structure_counts.update(chunk_structures)
         manifest = {
             "schema_version": "tinybdmath_target_tree_manifest_v1",
             "builder_version": TARGET_TREE_BUILDER_VERSION,
@@ -163,6 +173,44 @@ class TinyBDTargetTreeBuilder:
             ],
         }
         return output, manifest
+
+    def build_row_chunk(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        latex_key: str = "label_latex",
+    ) -> tuple[list[dict[str, Any]], Counter[str], Counter[str]]:
+        batch = [
+            {
+                "latex": str(row.get(latex_key, "") or ""),
+                "display_mode": str(row.get("kind", "") or "") == "display",
+            }
+            for row in rows
+        ]
+        extracted_rows = self._extractor.extract_batch(batch)
+        output: list[dict[str, Any]] = []
+        warnings: Counter[str] = Counter()
+        structure_counts: Counter[str] = Counter()
+        for row, extracted in zip(rows, extracted_rows):
+            result = self.build_from_extraction(
+                extracted,
+                row_id=str(row.get("row_id", "") or ""),
+                latex=str(row.get(latex_key, "") or ""),
+                display_mode=str(row.get("kind", "") or "") == "display",
+            )
+            payload = result.to_json()
+            payload["source_row"] = {
+                "case": row.get("case", ""),
+                "kind": row.get("kind", ""),
+                "page_num": row.get("page_num"),
+                "graph_input_hash": row.get("input_hash", ""),
+                "latex_key": latex_key,
+            }
+            output.append(payload)
+            warnings.update(str(item) for item in result.warnings if item)
+            if result.target_tree is not None:
+                structure_counts.update(node.node_type for node in result.target_tree.nodes)
+        return output, warnings, structure_counts
 
 
 class _KaTeXToCSLT:
@@ -671,6 +719,11 @@ class _KaTeXToCSLT:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _chunks(rows: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    chunk_size = max(1, int(size or 1))
+    return [rows[index : index + chunk_size] for index in range(0, len(rows), chunk_size)]
 
 
 def _is_line_break_node(value: Any) -> bool:
