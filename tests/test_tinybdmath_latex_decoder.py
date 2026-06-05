@@ -279,6 +279,34 @@ def test_decoder_serializes_operator_text_run_from_model_node_label() -> None:
     assert decoded.accepted is False
 
 
+def test_decoder_requires_high_confidence_text_run_before_wrapping() -> None:
+    decoded = decode_latex_candidate(
+        [
+            {"node_id": "g0", "unicode": "m", "bbox": [0, 0, 4, 10]},
+            {"node_id": "g1", "unicode": "o", "bbox": [5, 0, 9, 10]},
+            {"node_id": "g2", "unicode": "d", "bbox": [10, 0, 14, 10]},
+        ],
+        {
+            "selected_relations": [
+                {"source": "g0", "target": "g1", "relation": "TEXT_RUN_NEXT", "confidence": 0.94},
+                {"source": "g1", "target": "g2", "relation": "TEXT_RUN_NEXT", "confidence": 0.94},
+            ],
+            "node_predictions": [
+                {"node_id": "g0", "label": "TEXT", "confidence": 0.80},
+                {"node_id": "g1", "label": "TEXT", "confidence": 0.80},
+                {"node_id": "g2", "label": "TEXT", "confidence": 0.80},
+            ],
+            "verifier_warnings": [],
+        },
+        fallback_text="mod",
+    )
+
+    assert decoded.latex == "mod"
+    assert r"\text{" not in decoded.latex
+    assert decoded.candidate_only is True
+    assert decoded.accepted is False
+
+
 def test_decoder_keeps_text_run_relations_linear_without_text_node_evidence() -> None:
     decoded = decode_latex_candidate(
         [
@@ -439,6 +467,12 @@ def test_decoder_keeps_duplicate_latex_alternative_structure_evidence() -> None:
     assert evidence["layout_status"] == "pass"
     assert decoded.verifier_ranked_candidates[0]["cslt_candidate_id"] == "acyclic_projection"
     assert decoded.verifier_ranked_candidates[0]["layout_status"] == "pass"
+    assert decoded.verifier_ranked_candidates[0]["verifier_score"] > decoded.verifier_ranked_candidates[1]["verifier_score"]
+    assert "relation_node_coverage" in decoded.verifier_ranked_candidates[0]["ranking_features"]
+    assert decoded.preferred_candidate["recommended_rank"] == 1
+    assert decoded.preferred_candidate["source"] == "selected_structural_candidate"
+    assert decoded.preferred_candidate["requires_cloud_semantic_review"] is True
+    assert "cloud_review_required_for_layout_abstain" in decoded.preferred_candidate["selection_blockers"]
     assert decoded.manual_review_recommendation["recommended_rank"] == 2
     assert decoded.manual_review_recommendation["cslt_candidate_id"] == "acyclic_projection"
     assert "manual_review_required_for_non_rank_one_candidate" in decoded.manual_review_recommendation["selection_blockers"]

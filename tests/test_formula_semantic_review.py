@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 from src.app import formula_semantic_review as semantic_module
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
 from src.app.formula_semantic_review import FormulaSemanticReviewFlow, FormulaSemanticReviewService
-from src.core.ai_engine import BaseLLMClient
+from src.core.ai_engine import BaseLLMClient, MockLLMClient
 from src.core.models import BlockType, DocumentBlock
 
 
@@ -43,6 +43,17 @@ class _ReviewClient(BaseLLMClient):
 
     def check_availability(self) -> bool:
         return True
+
+
+class _UnavailableReviewClient(_ReviewClient):
+    def __init__(self) -> None:
+        super().__init__('{"suggested_latex":"","should_replace":false,"confidence":0,"reason":"","risks":[]}')
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: object) -> str:
+        raise AssertionError("unavailable r3 backend should be skipped before generate")
+
+    def check_availability(self) -> bool:
+        return False
 
 
 class _Signal:
@@ -358,6 +369,47 @@ def test_formula_semantic_review_records_bad_json_failure(tmp_path) -> None:
     assert record.status == "failed"
     assert "JSON" in record.error
     assert "raw_response_excerpt=not json" in record.error
+
+
+def test_formula_semantic_review_skips_mock_backend_without_polluting_failures(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [block],
+    )
+    service = FormulaSemanticReviewService(store, MockLLMClient())
+
+    counts = service.run_batch("doc-1", [block])
+
+    assert counts == {"done": 0, "failed": 0, "skipped": 1}
+    record = store.list_round_records("doc-1")[0]
+    assert record.status == "skipped"
+    assert "semantic_review_backend_unavailable:mock_model=mock" in record.error
+    assert record.result_json == {}
+
+
+def test_formula_semantic_review_skips_unavailable_backend_before_generate(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    block = _formula()
+    store.enqueue_round_records(
+        "doc-1",
+        "paper.pdf",
+        FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+        "block",
+        [block],
+    )
+    service = FormulaSemanticReviewService(store, _UnavailableReviewClient())
+
+    counts = service.run_batch("doc-1", [block])
+
+    assert counts == {"done": 0, "failed": 0, "skipped": 1}
+    record = store.list_round_records("doc-1")[0]
+    assert record.status == "skipped"
+    assert "semantic_review_backend_unavailable:model=fake-reasoning" in record.error
 
 
 def test_formula_semantic_review_prompt_requires_json_only(tmp_path) -> None:

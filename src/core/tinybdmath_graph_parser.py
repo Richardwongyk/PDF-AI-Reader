@@ -50,6 +50,10 @@ GRAPH_PARSER_RELATIONS = (
     "ABOVE",
     "BELOW",
 )
+GRAPH_PARSER_NON_RUNTIME_SUPERVISION_RELATIONS = {
+    "BASE",
+    "CHILD",
+}
 
 GRAPH_PARSER_FEATURES = (
     "bias",
@@ -91,6 +95,9 @@ GRAPH_PARSER_NODE_LABELS = (
     "EQUATION_TAG",
 )
 GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD = 0.80
+GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR = 0.85
+GRAPH_PARSER_ALTERNATIVE_CONFIDENCE_FLOOR = 0.20
+GRAPH_PARSER_ALTERNATIVE_THRESHOLD_FACTOR = 0.50
 GRAPH_PARSER_OPERATOR_KATEX_TYPES = (
     "op",
     "bin",
@@ -236,7 +243,15 @@ class TinyBDGraphParser:
         pairs = candidate_pairs(nodes)
         predictions: list[TinyBDGraphParserPrediction] = []
         relation_alternatives: list[dict[str, Any]] = []
-        cutoff = self.artifact.threshold if threshold is None else float(threshold)
+        cutoff = (
+            max(float(self.artifact.threshold), GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR)
+            if threshold is None
+            else float(threshold)
+        )
+        alternative_cutoff = max(
+            GRAPH_PARSER_ALTERNATIVE_CONFIDENCE_FLOOR,
+            cutoff * GRAPH_PARSER_ALTERNATIVE_THRESHOLD_FACTOR,
+        )
         for source, target in pairs:
             features = graph_parser_features(source, target, nodes)
             probabilities = self._predict_probabilities(features)
@@ -245,18 +260,21 @@ class TinyBDGraphParser:
             best_index = max(range(len(probabilities)), key=lambda index: probabilities[index])
             relation = self.artifact.relation_labels[best_index]
             confidence = float(probabilities[best_index])
-            if relation == "NONE" or confidence < cutoff:
-                continue
-            relation_alternatives.append(
-                {
-                    "source": str(source["node_id"]),
-                    "target": str(target["node_id"]),
-                    "alternatives": _top_relation_alternatives(
-                        probabilities,
-                        self.artifact.relation_labels,
-                    ),
-                }
+            alternatives = _top_relation_alternatives(
+                probabilities,
+                self.artifact.relation_labels,
             )
+            selected = relation != "NONE" and confidence >= cutoff
+            if alternatives and (selected or float(alternatives[0].get("confidence", 0.0) or 0.0) >= alternative_cutoff):
+                relation_alternatives.append(
+                    {
+                        "source": str(source["node_id"]),
+                        "target": str(target["node_id"]),
+                        "alternatives": alternatives,
+                    }
+                )
+            if not selected:
+                continue
             predictions.append(
                 TinyBDGraphParserPrediction(
                     source=str(source["node_id"]),
@@ -278,7 +296,7 @@ class TinyBDGraphParser:
             "predictions": [item.to_json() for item in sorted(predictions, key=lambda item: (item.source, item.target, item.relation))],
             "relation_alternatives": sorted(
                 relation_alternatives,
-                key=lambda item: (str(item.get("source", "")), str(item.get("target", ""))),
+                key=_relation_alternative_sort_key,
             ),
             "candidate_only": True,
         }
@@ -327,6 +345,21 @@ class TinyBDGraphParser:
                 }
             )
         return output
+
+
+def _relation_alternative_sort_key(item: dict[str, Any]) -> tuple[float, str, str]:
+    alternatives = item.get("alternatives", []) if isinstance(item, dict) else []
+    top_confidence = 0.0
+    if alternatives and isinstance(alternatives[0], dict):
+        top_confidence = _safe_float(alternatives[0].get("confidence"))
+    return (-top_confidence, str(item.get("source", "")), str(item.get("target", "")))
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _feed_forward_probabilities(
@@ -490,6 +523,14 @@ def graph_parser_node_features(node: dict[str, Any], nodes: list[dict[str, Any]]
     }
 
 
+def _is_runtime_training_relation(relation: str) -> bool:
+    return (
+        relation in GRAPH_PARSER_RELATIONS
+        and relation != "NONE"
+        and relation not in GRAPH_PARSER_NON_RUNTIME_SUPERVISION_RELATIONS
+    )
+
+
 def training_samples_from_rows(
     graph_rows: list[dict[str, Any]],
     alignment_rows: list[dict[str, Any]],
@@ -508,7 +549,7 @@ def training_samples_from_rows(
             source = str(label.get("source", "") or "")
             target = str(label.get("target", "") or "")
             relation = str(label.get("relation", "") or "")
-            if relation not in GRAPH_PARSER_RELATIONS or relation == "NONE":
+            if not _is_runtime_training_relation(relation):
                 continue
             confidence = float(label.get("confidence", 0.0) or 0.0)
             current = positive.get((source, target))
@@ -517,7 +558,7 @@ def training_samples_from_rows(
         nodes = graph_nodes(row)
         for label in _structure_relation_labels_from_structure(nodes, alignment):
             relation = str(label.get("relation", "") or "")
-            if relation not in GRAPH_PARSER_RELATIONS or relation == "NONE":
+            if not _is_runtime_training_relation(relation):
                 continue
             source = str(label.get("source", "") or "")
             target = str(label.get("target", "") or "")

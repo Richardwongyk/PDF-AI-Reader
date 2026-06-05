@@ -73,7 +73,7 @@ def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Pa
         [
             {
                 "candidate_id": "p0_b1_inline_0",
-                "latex": "ht",
+                "latex": "source_latex_should_not_mask_tinybdmath_candidate",
                 "page_num": 1,
                 "bbox": [0, 0, 12, 12],
                 "inline_pdf_evidence": {
@@ -91,6 +91,8 @@ def test_tinybdmath_candidate_service_processes_inline_pdf_evidence(tmp_path: Pa
 
     assert summary["processed"] == 1
     result = store.list_recognition_results("doc", candidate_id="p0_b1_inline_0", stage="tinybdmath_structural")[0]
+    assert result.latex == "ht"
+    assert result.normalized_latex == "ht"
     assert result.evidence["source"] == "tinybdmath_r2a_inline_structural_candidate"
     assert result.evidence["inline_pdf_evidence"]["has_script_size"] is True
     assert result.evidence["graph_parser"]["model_version"] == "toy_graph_parser"
@@ -133,11 +135,17 @@ def test_tinybdmath_candidate_service_scores_verifier_recommended_n_best_candida
 
     assert result.accepted is False
     assert decoded["layout_status"] == "abstain"
+    assert decoded["preferred_candidate"]["recommended_rank"] == 1
+    assert decoded["preferred_candidate"]["source"] == "selected_structural_candidate"
+    assert decoded["preferred_candidate"]["accepted"] is False
+    assert decoded["preferred_candidate"]["requires_cloud_semantic_review"] is True
     assert decoded["manual_review_recommendation"]["cslt_candidate_id"] == "acyclic_projection"
     assert decoded["manual_review_recommendation"]["accepted"] is False
     assert decoded["verifier_ranked_candidates"][0]["cslt_candidate_id"] == "acyclic_projection"
-    assert score_evidence["source"] == "manual_review_recommendation_layout_confidence"
-    assert score_evidence["cslt_candidate_id"] == "acyclic_projection"
+    assert score_evidence["source"] == "preferred_candidate_verifier_score"
+    assert score_evidence["recommended_rank"] == 1
+    assert score_evidence["source_candidate"] == "selected_structural_candidate"
+    assert score_evidence["requires_cloud_semantic_review"] is True
     assert score_evidence["candidate_only"] is True
     assert score_evidence["accepted"] is False
     assert result.score == score_evidence["score"]

@@ -18,6 +18,7 @@ from src.core.tinybdmath_layout_verifier import verify_layout_candidate
 
 
 TINYBDMATH_LATEX_DECODER_VERSION = "tinybdmath_slt_latex_candidate_v3_layout_verified"
+MODEL_TEXT_RUN_WRAP_CONFIDENCE_THRESHOLD = 0.85
 DECODER_SUPPORTED_RELATIONS = {
     "HORIZONTAL",
     "SUP",
@@ -63,6 +64,7 @@ class TinyBDDecodedLatex:
     n_best_cslt: tuple[dict[str, Any], ...] = ()
     latex_candidates: tuple[dict[str, Any], ...] = ()
     verifier_ranked_candidates: tuple[dict[str, Any], ...] = ()
+    preferred_candidate: dict[str, Any] = field(default_factory=dict)
     manual_review_recommendation: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -314,7 +316,7 @@ def _model_text_run_label(node_id: str, node_by_id: dict[str, dict[str, Any]]) -
     node = node_by_id.get(node_id, {})
     label = str(node.get("model_label", "") or node.get("label", "") or "")
     confidence = _float(node.get("model_confidence", node.get("label_confidence", 0.0)))
-    if label in {"TEXT", "OPERATOR"} and confidence >= 0.65:
+    if label in {"TEXT", "OPERATOR"} and confidence >= MODEL_TEXT_RUN_WRAP_CONFIDENCE_THRESHOLD:
         return label
     return ""
 
@@ -716,8 +718,10 @@ def _finalize_decoded(
         layout_status=verification.status,
         layout_confidence=verification.confidence,
         layout_warnings=verification.warnings,
+        layout_verification=verification.to_json(),
     )
     verifier_ranked_candidates = _verifier_ranked_candidates(latex_candidates)
+    preferred_candidate = _preferred_candidate_recommendation(latex_candidates)
     return TinyBDDecodedLatex(
         decoder_version=decoded.decoder_version,
         latex=decoded.latex,
@@ -734,6 +738,7 @@ def _finalize_decoded(
         n_best_cslt=tuple(item for item in n_best_cslt if isinstance(item, dict)),
         latex_candidates=latex_candidates,
         verifier_ranked_candidates=verifier_ranked_candidates,
+        preferred_candidate=preferred_candidate,
         manual_review_recommendation=_manual_review_recommendation(latex_candidates),
     )
 
@@ -749,6 +754,7 @@ def _latex_candidates_from_cslt(
     layout_status: str,
     layout_confidence: float,
     layout_warnings: tuple[str, ...],
+    layout_verification: dict[str, Any],
 ) -> tuple[dict[str, Any], ...]:
     candidates: list[dict[str, Any]] = []
     by_latex: dict[str, dict[str, Any]] = {}
@@ -760,6 +766,7 @@ def _latex_candidates_from_cslt(
             "layout_status": layout_status,
             "layout_confidence": float(layout_confidence),
             "layout_warnings": list(layout_warnings),
+            "layout_verification": dict(layout_verification),
             "selection_blockers": _candidate_selection_blockers(
                 rank=1,
                 layout_status=layout_status,
@@ -869,6 +876,8 @@ def _alternative_structure_evidence(candidate: dict[str, Any]) -> dict[str, Any]
         "confidence": float(candidate.get("confidence", 0.0) or 0.0),
         "layout_status": str(candidate.get("layout_status", "") or ""),
         "layout_confidence": float(candidate.get("layout_confidence", 0.0) or 0.0),
+        "layout_verification": candidate.get("layout_verification", {})
+        if isinstance(candidate.get("layout_verification", {}), dict) else {},
         "selection_blockers": list(candidate.get("selection_blockers", []) or []),
         "warnings": list(candidate.get("warnings", []) or []),
         "candidate_only": True,
@@ -904,6 +913,7 @@ def _verifier_ranked_candidates(candidates: list[dict[str, Any]] | tuple[dict[st
         sorted(
             ranked,
             key=lambda item: (
+                float(item.get("verifier_score", 0.0) or 0.0),
                 _layout_status_rank(str(item.get("layout_status", "") or "")),
                 float(item.get("layout_confidence", 0.0) or 0.0),
                 float(item.get("confidence", 0.0) or 0.0),
@@ -915,18 +925,74 @@ def _verifier_ranked_candidates(candidates: list[dict[str, Any]] | tuple[dict[st
 
 
 def _verifier_ranking_entry(candidate: dict[str, Any]) -> dict[str, Any]:
+    features = _candidate_ranking_features(candidate)
     return {
         "rank": int(candidate.get("rank", 999) or 999),
         "latex": str(candidate.get("latex", "") or ""),
         "confidence": float(candidate.get("confidence", 0.0) or 0.0),
         "layout_status": str(candidate.get("layout_status", "") or ""),
         "layout_confidence": float(candidate.get("layout_confidence", 0.0) or 0.0),
+        "verifier_score": features["verifier_score"],
+        "ranking_features": features,
         "selection_blockers": list(candidate.get("selection_blockers", []) or []),
         "warnings": list(candidate.get("warnings", candidate.get("layout_warnings", [])) or []),
         "source": str(candidate.get("source", "") or ""),
         "cslt_candidate_id": str(candidate.get("cslt_candidate_id", "") or ""),
         "candidate_only": True,
         "accepted": False,
+    }
+
+
+def _candidate_ranking_features(candidate: dict[str, Any]) -> dict[str, float]:
+    verification = candidate.get("layout_verification", {})
+    if not isinstance(verification, dict):
+        verification = {}
+    constrained = verification.get("constrained_decode", {})
+    if not isinstance(constrained, dict):
+        constrained = {}
+    layout_status = str(candidate.get("layout_status", "") or "")
+    status_score = {"pass": 1.0, "review": 0.55, "abstain": 0.0}.get(layout_status, 0.0)
+    layout_confidence = _float(candidate.get("layout_confidence", 0.0))
+    confidence = _float(candidate.get("confidence", 0.0))
+    coverage = _float(
+        verification.get(
+            "relation_node_coverage",
+            constrained.get("relation_node_coverage", 0.0),
+        )
+    )
+    semantic_nodes = max(0.0, _float(verification.get("semantic_node_count", constrained.get("semantic_node_count", 0))))
+    supported_relations = max(0.0, _float(verification.get("supported_relation_count", constrained.get("serialized_relation_count", 0))))
+    relation_density = min(1.0, supported_relations / semantic_nodes) if semantic_nodes > 0 else 0.0
+    warnings = set(str(item) for item in candidate.get("warnings", candidate.get("layout_warnings", [])) or [] if str(item))
+    warnings.update(str(item) for item in candidate.get("layout_warnings", []) or [] if str(item))
+    blockers = {
+        str(item)
+        for item in candidate.get("selection_blockers", []) or []
+        if str(item) and str(item) != "not_rank_one_selected_candidate"
+    }
+    rank = int(candidate.get("rank", 999) or 999)
+    rank_penalty = 0.0 if rank <= 1 else min(0.24, 0.12 * (rank - 1))
+    blocking_penalty = min(0.45, 0.18 * len(blockers))
+    warning_penalty = min(0.35, 0.035 * len(warnings))
+    score = (
+        0.38 * status_score
+        + 0.24 * layout_confidence
+        + 0.18 * coverage
+        + 0.10 * relation_density
+        + 0.10 * confidence
+        - rank_penalty
+        - blocking_penalty
+        - warning_penalty
+    )
+    return {
+        "verifier_score": round(max(0.0, min(1.0, score)), 6),
+        "status_score": round(status_score, 6),
+        "layout_confidence": round(layout_confidence, 6),
+        "relation_node_coverage": round(coverage, 6),
+        "relation_density": round(relation_density, 6),
+        "rank_penalty": round(rank_penalty, 6),
+        "warning_penalty": round(warning_penalty, 6),
+        "blocking_penalty": round(blocking_penalty, 6),
     }
 
 
@@ -1010,6 +1076,49 @@ def _manual_review_recommendation(candidates: tuple[dict[str, Any], ...]) -> dic
         "cslt_candidate_id": str(best.get("cslt_candidate_id", "") or ""),
         "reason": "highest_verifier_confidence_candidate_for_manual_review",
     }
+
+
+def _preferred_candidate_recommendation(candidates: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    if not candidates:
+        return {
+            "candidate_only": True,
+            "accepted": False,
+            "auto_accept_allowed": False,
+            "requires_cloud_semantic_review": True,
+            "reason": "no_latex_candidates",
+        }
+    ranked = _verifier_ranked_candidates(candidates)
+    best = _automatic_preferred_entry(ranked)
+    rank = int(best.get("rank", 0) or 0)
+    layout_status = str(best.get("layout_status", "") or "")
+    blockers = set(str(item) for item in best.get("selection_blockers", []) or [])
+    if rank != 1:
+        blockers.add("cloud_review_required_for_non_rank_one_candidate")
+    if layout_status != "pass":
+        blockers.add(f"cloud_review_required_for_layout_{layout_status or 'unknown'}")
+    return {
+        "candidate_only": True,
+        "accepted": False,
+        "auto_accept_allowed": False,
+        "requires_cloud_semantic_review": bool(blockers),
+        "recommended_rank": rank,
+        "latex": str(best.get("latex", "") or ""),
+        "confidence": float(best.get("confidence", 0.0) or 0.0),
+        "layout_status": layout_status,
+        "layout_confidence": float(best.get("layout_confidence", 0.0) or 0.0),
+        "verifier_score": float(best.get("verifier_score", 0.0) or 0.0),
+        "selection_blockers": sorted(blockers),
+        "source": str(best.get("source", "") or ""),
+        "cslt_candidate_id": str(best.get("cslt_candidate_id", "") or ""),
+        "reason": "rank_one_selected_candidate_for_default_output",
+    }
+
+
+def _automatic_preferred_entry(ranked: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    if not ranked:
+        return {}
+    selected = next((item for item in ranked if int(item.get("rank", 999) or 999) == 1), None)
+    return selected or ranked[0]
 
 
 def _layout_status_rank(status: str) -> int:

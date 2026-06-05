@@ -18,6 +18,7 @@ from src.core.tinybdmath_graph_parser import (
     GRAPH_PARSER_FEATURE_VERSION,
     GRAPH_PARSER_FEATURES,
     GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD,
+    GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR,
     GRAPH_PARSER_NODE_FEATURES,
     GRAPH_PARSER_NODE_LABELS,
     GRAPH_PARSER_RELATIONS,
@@ -40,7 +41,7 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=0.003)
     parser.add_argument("--weight-decay", type=float, default=0.0001)
     parser.add_argument("--validation-fraction", type=float, default=0.15)
-    parser.add_argument("--threshold", type=float, default=0.55)
+    parser.add_argument("--threshold", type=float, default=GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR)
     parser.add_argument("--node-filter-threshold", type=float, default=GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD)
     parser.add_argument("--eval-batch-size", type=int, default=65536)
     parser.add_argument("--max-train-eval-samples", type=int, default=100000)

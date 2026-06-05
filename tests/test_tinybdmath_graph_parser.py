@@ -24,6 +24,7 @@ def test_graph_parser_training_samples_include_positive_and_none_edges() -> None
 
     assert any(sample["relation"] == "SUB" for sample in samples)
     assert any(sample["relation"] == "NONE" for sample in samples)
+    assert not any(sample["relation"] in {"BASE", "CHILD"} for sample in samples)
     assert set(GRAPH_PARSER_FEATURES).issubset(samples[0]["features"])
 
 

@@ -315,9 +315,12 @@ class TestCommandBridge(QObject):
         evidence = getattr(self._window, "_ai_evidence_tree", None)
         answer = getattr(self._window, "_ai_answer_view", None)
         status = getattr(self._window, "_ai_doc_status", None)
+        answer_text = str(getattr(self._window, "_dock_answer_text", "") or "")
+        if not answer_text and answer is not None and hasattr(answer, "toPlainText"):
+            answer_text = str(answer.toPlainText() or "")
         return {
             "dock_evidence_count": evidence.topLevelItemCount() if evidence else 0,
-            "dock_answer_chars": len(answer.toPlainText()) if answer else 0,
+            "dock_answer_chars": len(answer_text),
             "dock_status": status.text() if status else "",
             "dock_followup_count": len(getattr(self._window, "_dock_followup_questions", [])),
         }

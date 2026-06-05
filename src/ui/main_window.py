@@ -1366,17 +1366,15 @@ class MainWindow(QMainWindow):
         if self._formula_index_flow.is_running or self._formula_semantic_review_flow.is_running:
             self._formula_idle_timer.start(5000)
             return
+        self._reconcile_stale_cached_formula_jobs()
         before_pending = self._pending_formula_work_count()
         if before_pending <= 0:
             return
-        if (
-            self._pending_formula_block_count() > 0
-            or self._formula_index_flow.pending_count(self._current_doc_hash) > 0
-        ):
+        if self._pending_formula_block_count() > 0:
             self._schedule_formula_scan(pages=set(), trigger=FormulaScanTrigger.BACKGROUND)
-        elif not self._start_formula_semantic_review_batch():
+        elif not self._run_formula_knowledge_update_batch():
             if not self._run_formula_knowledge_graph_batch():
-                if not self._run_formula_knowledge_update_batch():
+                if not self._start_formula_semantic_review_batch():
                     self._start_import_page_scan_batch()
         if self._pending_formula_work_count() > 0:
             self._formula_idle_timer.start(8000)
@@ -1514,8 +1512,14 @@ class MainWindow(QMainWindow):
                 queued_reviews,
                 queued_graph,
             )
+            kb_prefix = "知识库构建中"
+            try:
+                if self._knowledge_engine.check_exists(self._current_doc_hash):
+                    kb_prefix = "知识库就绪"
+            except Exception:
+                pass
             self._ai_doc_status.setText(
-                f"知识库构建中\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}，复核 {queued_reviews}，图谱 {queued_graph}"
+                f"{kb_prefix}\n公式任务已入队: 页面 {queued_pages}，公式 {queued_blocks}，复核 {queued_reviews}，图谱 {queued_graph}"
             )
         if self._pending_formula_work_count() > 0:
             self._formula_idle_timer.start(8000)
@@ -1647,6 +1651,34 @@ class MainWindow(QMainWindow):
             + self._formula_knowledge_graph_service.pending_count(self._current_doc_hash)
             + self._formula_knowledge_update_service.pending_count(self._current_doc_hash)
         )
+
+    def _reconcile_stale_cached_formula_jobs(self) -> int:
+        """Skip stale r1 jobs after the full document parse has settled."""
+        if not self._current_doc_hash or not self._document_blocks_fully_loaded():
+            return 0
+        try:
+            skipped = self._formula_index_flow.store.reconcile_cached_recognition_jobs(
+                self._current_doc_hash,
+                self._current_blocks,
+            )
+        except Exception:
+            self.logger.warning("公式 r1 任务对账失败", exc_info=True)
+            return 0
+        if skipped:
+            self.logger.info("公式 r1 任务对账: skipped_stale=%d", skipped)
+        return skipped
+
+    def _document_blocks_fully_loaded(self) -> bool:
+        try:
+            page_count = int(self._doc_engine.page_count)
+        except (TypeError, ValueError):
+            return False
+        if page_count <= 0 or len(self._loaded_block_pages) < page_count:
+            return False
+        thread = getattr(self._doc_engine, "_background_thread", None)
+        if thread is not None and getattr(thread, "isRunning", lambda: False)():
+            return False
+        return True
 
     # =========================================================================
     # KnowledgeEngine 回调

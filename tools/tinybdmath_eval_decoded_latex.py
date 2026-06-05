@@ -12,6 +12,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.core.tinybdmath_graph_parser import (
+    GRAPH_PARSER_ALTERNATIVE_CONFIDENCE_FLOOR,
+    GRAPH_PARSER_ALTERNATIVE_THRESHOLD_FACTOR,
+    GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR,
     TinyBDGraphParser,
     TinyBDGraphParserArtifact,
     candidate_pairs,
@@ -186,21 +189,31 @@ class _TorchGraphParserPredictor:
                 weights=self.relation_weights,
             )
             labels = self.artifact.relation_labels
-            cutoff = float(self.artifact.threshold)
+            cutoff = max(
+                float(self.artifact.threshold),
+                GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR,
+            )
+            alternative_cutoff = max(
+                GRAPH_PARSER_ALTERNATIVE_CONFIDENCE_FLOOR,
+                cutoff * GRAPH_PARSER_ALTERNATIVE_THRESHOLD_FACTOR,
+            )
             for index, (source, target) in enumerate(pairs):
                 row_probabilities = probabilities[index]
                 best_index = int(row_probabilities.argmax().item())
                 relation = labels[best_index]
                 confidence = float(row_probabilities[best_index].item())
-                if relation == "NONE" or confidence < cutoff:
+                alternatives = _top_torch_relation_alternatives(row_probabilities, labels)
+                selected = relation != "NONE" and confidence >= cutoff
+                if alternatives and (selected or float(alternatives[0].get("confidence", 0.0) or 0.0) >= alternative_cutoff):
+                    relation_alternatives.append(
+                        {
+                            "source": str(source["node_id"]),
+                            "target": str(target["node_id"]),
+                            "alternatives": alternatives,
+                        }
+                    )
+                if not selected:
                     continue
-                relation_alternatives.append(
-                    {
-                        "source": str(source["node_id"]),
-                        "target": str(target["node_id"]),
-                        "alternatives": _top_torch_relation_alternatives(row_probabilities, labels),
-                    }
-                )
                 predictions.append(
                     {
                         "source": str(source["node_id"]),
@@ -222,7 +235,7 @@ class _TorchGraphParserPredictor:
             "predictions": sorted(predictions, key=lambda item: (item["source"], item["target"], item["relation"])),
             "relation_alternatives": sorted(
                 relation_alternatives,
-                key=lambda item: (str(item.get("source", "")), str(item.get("target", ""))),
+                key=_torch_relation_alternative_sort_key,
             ),
             "candidate_only": True,
         }
@@ -314,6 +327,17 @@ def _top_torch_relation_alternatives(
     return alternatives
 
 
+def _torch_relation_alternative_sort_key(item: dict[str, Any]) -> tuple[float, str, str]:
+    alternatives = item.get("alternatives", []) if isinstance(item, dict) else []
+    top_confidence = 0.0
+    if alternatives and isinstance(alternatives[0], dict):
+        try:
+            top_confidence = float(alternatives[0].get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            top_confidence = 0.0
+    return (-top_confidence, str(item.get("source", "")), str(item.get("target", "")))
+
+
 def _decode_rows(
     candidates: list[dict[str, Any]],
     rows_by_id: dict[str, dict[str, Any]],
@@ -348,6 +372,7 @@ def _decoded_eval_row(
     n_best_similarity = max(
         [similarity] + [float(item.get("similarity", 0.0) or 0.0) for item in latex_candidates]
     )
+    preferred = _preferred_candidate_eval_row(label, decoded.get("preferred_candidate", {}))
     recommendation = _manual_recommendation_eval_row(label, decoded.get("manual_review_recommendation", {}))
     return {
         "row_id": row_id,
@@ -356,6 +381,7 @@ def _decoded_eval_row(
         "decoded_latex": str(decoded.get("latex", "") or ""),
         "similarity": round(similarity, 6),
         "n_best_similarity": round(n_best_similarity, 6),
+        "preferred_candidate_similarity": float(preferred.get("similarity", 0.0) or 0.0),
         "manual_recommendation_similarity": float(recommendation.get("similarity", 0.0) or 0.0),
         "decoded_confidence": float(decoded.get("confidence", 0.0) or 0.0),
         "candidate_abstain": bool(candidate.get("abstain")),
@@ -365,6 +391,7 @@ def _decoded_eval_row(
         "layout_confidence": float(decoded.get("layout_confidence", 0.0) or 0.0),
         "layout_warnings": list(decoded.get("layout_warnings", []) or []),
         "latex_candidates": latex_candidates,
+        "preferred_candidate": preferred,
         "manual_review_recommendation": recommendation,
         "warnings": list(decoded.get("warnings", []) or []),
     }
@@ -412,6 +439,26 @@ def _manual_recommendation_eval_row(label: str, recommendation: object) -> dict[
     }
 
 
+def _preferred_candidate_eval_row(label: str, preferred: object) -> dict[str, Any]:
+    if not isinstance(preferred, dict):
+        preferred = {}
+    latex = str(preferred.get("latex", "") or "")
+    return {
+        "latex": latex,
+        "similarity": round(_similarity(label, latex), 6) if latex.strip() else 0.0,
+        "recommended_rank": int(preferred.get("recommended_rank", 0) or 0),
+        "confidence": float(preferred.get("confidence", 0.0) or 0.0),
+        "layout_status": str(preferred.get("layout_status", "") or ""),
+        "layout_confidence": float(preferred.get("layout_confidence", 0.0) or 0.0),
+        "verifier_score": float(preferred.get("verifier_score", 0.0) or 0.0),
+        "selection_blockers": list(preferred.get("selection_blockers", []) or []),
+        "requires_cloud_semantic_review": bool(preferred.get("requires_cloud_semantic_review", True)),
+        "candidate_only": bool(preferred.get("candidate_only", True)),
+        "accepted": bool(preferred.get("accepted", False)),
+        "auto_accept_allowed": bool(preferred.get("auto_accept_allowed", False)),
+    }
+
+
 def _decode_rows_stream(
     graph_rows_path: Path,
     candidates_path: Path,
@@ -444,6 +491,7 @@ def _build_report(decoded_rows: list[dict[str, Any]], warnings: Counter[str], *,
         "rows": len(decoded_rows),
         "metrics": metrics,
         "n_best_oracle_metrics": _n_best_oracle_metrics(decoded_rows),
+        "preferred_candidate_metrics": _preferred_candidate_metrics(decoded_rows),
         "manual_recommendation_metrics": _manual_recommendation_metrics(decoded_rows),
         "layout_gate": _layout_gate_metrics(decoded_rows),
         "warning_counts": dict(sorted(warnings.items())),
@@ -455,10 +503,12 @@ def _build_report(decoded_rows: list[dict[str, Any]], warnings: Counter[str], *,
                 "decoded_latex": row["decoded_latex"],
                 "similarity": row["similarity"],
                 "n_best_similarity": row.get("n_best_similarity", row["similarity"]),
+                "preferred_candidate_similarity": row.get("preferred_candidate_similarity", row["similarity"]),
                 "manual_recommendation_similarity": row.get("manual_recommendation_similarity", row["similarity"]),
                 "layout_status": row.get("layout_status", "unknown"),
                 "final_abstain": bool(row.get("final_abstain")),
                 "latex_candidates": row.get("latex_candidates", [])[:3],
+                "preferred_candidate": row.get("preferred_candidate", {}),
                 "manual_review_recommendation": row.get("manual_review_recommendation", {}),
                 "warnings": row["warnings"][:8],
             }
@@ -592,6 +642,35 @@ def _manual_recommendation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]
         "recommendation_near_match_rate": round(sum(1 for value in scored if value >= 0.80) / len(scored), 6),
         "recommendation_average_similarity": round(sum(scored) / len(scored), 6),
         "non_rank_one_recommendation_rate": round(non_rank_one / len(scored), 6),
+        "auto_accept_allowed_count": int(auto_accept_allowed),
+    }
+
+
+def _preferred_candidate_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    scored = [float(row.get("preferred_candidate_similarity", row.get("similarity", 0.0)) or 0.0) for row in rows]
+    preferred = [
+        row.get("preferred_candidate", {})
+        for row in rows
+        if isinstance(row.get("preferred_candidate", {}), dict)
+    ]
+    if not scored:
+        return {
+            "preferred_exact_match_rate": 0.0,
+            "preferred_near_match_rate": 0.0,
+            "preferred_average_similarity": 0.0,
+            "non_rank_one_preferred_rate": 0.0,
+            "cloud_review_required_rate": 0.0,
+            "auto_accept_allowed_count": 0,
+        }
+    non_rank_one = sum(1 for item in preferred if int(item.get("recommended_rank", 1) or 1) not in {0, 1})
+    cloud_review = sum(1 for item in preferred if bool(item.get("requires_cloud_semantic_review", True)))
+    auto_accept_allowed = sum(1 for item in preferred if bool(item.get("auto_accept_allowed", False)))
+    return {
+        "preferred_exact_match_rate": round(sum(1 for value in scored if value >= 0.98) / len(scored), 6),
+        "preferred_near_match_rate": round(sum(1 for value in scored if value >= 0.80) / len(scored), 6),
+        "preferred_average_similarity": round(sum(scored) / len(scored), 6),
+        "non_rank_one_preferred_rate": round(non_rank_one / len(scored), 6),
+        "cloud_review_required_rate": round(cloud_review / len(scored), 6),
         "auto_accept_allowed_count": int(auto_accept_allowed),
     }
 

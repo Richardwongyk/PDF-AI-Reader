@@ -103,6 +103,19 @@ class FormulaSemanticReviewService:
             [record.target_id for record in records],
         )
         counts = {"done": 0, "failed": 0, "skipped": 0}
+        backend_skip_reason = _semantic_review_backend_skip_reason(self._client)
+        if backend_skip_reason:
+            for record in records:
+                self._store.mark_round_failed(
+                    doc_hash,
+                    FormulaScanRound.CLOUD_SEMANTIC_REVIEW,
+                    "block",
+                    record.target_id,
+                    backend_skip_reason,
+                    status="skipped",
+                )
+                counts["skipped"] += 1
+            return counts
         for record in records:
             block = block_map.get(record.target_id) or _block_from_record_payload(record)
             started = time.perf_counter()
@@ -410,6 +423,24 @@ class FormulaSemanticReviewParseError(ValueError):
     def __init__(self, raw: str) -> None:
         self.raw = str(raw or "")
         super().__init__("semantic review response is not JSON")
+
+
+def _semantic_review_backend_skip_reason(client: BaseLLMClient) -> str:
+    try:
+        model = str(client.model_name or "").strip()
+    except Exception as exc:
+        return f"semantic_review_backend_unavailable:model_name_error={str(exc)[:200]}"
+    if not model:
+        return "semantic_review_backend_unavailable:empty_model"
+    if model.lower() == "mock" or client.__class__.__name__ == "MockLLMClient":
+        return f"semantic_review_backend_unavailable:mock_model={model}"
+    try:
+        available = client.check_availability()
+    except Exception as exc:
+        return f"semantic_review_backend_unavailable:model={model}; availability_error={str(exc)[:200]}"
+    if not available:
+        return f"semantic_review_backend_unavailable:model={model}"
+    return ""
 
 
 def _review_error_message(exc: Exception) -> str:

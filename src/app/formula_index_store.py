@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from src.core.models import DocumentBlock, wrap_math_text
+from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 FormulaTaskStatus = Literal["queued", "running", "done", "failed", "skipped"]
 FormulaPageScanStatus = Literal["queued", "running", "done", "failed", "skipped"]
@@ -748,6 +748,49 @@ class FormulaIndexStore:
     def pending_count(self, doc_hash: str) -> int:
         counts = self.counts(doc_hash)
         return counts.get("queued", 0) + counts.get("running", 0)
+
+    def reconcile_cached_recognition_jobs(
+        self,
+        doc_hash: str,
+        blocks: list[DocumentBlock],
+    ) -> int:
+        """Skip r1 OCR jobs that are no longer actionable for current blocks."""
+        if not doc_hash:
+            return 0
+        current_blocks = {block.id: block for block in blocks if block.id}
+        actionable_ids = {
+            block.id
+            for block in current_blocks.values()
+            if block.block_type == BlockType.FORMULA
+            and block.metadata.get("needs_ocr")
+            and not block.metadata.get("mfr_recognized")
+        }
+        round_name = FormulaScanRound.CACHED_RECOGNITION.value
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT block_id FROM formula_index_jobs
+                   WHERE doc_hash=? AND scan_round=? AND status IN ('queued', 'running')""",
+                (doc_hash, round_name),
+            ).fetchall()
+
+        skipped = 0
+        for row in rows:
+            block_id = str(row[0])
+            block = current_blocks.get(block_id)
+            if block is None:
+                reason = "stale_cached_recognition_orphaned_block"
+            elif block_id not in actionable_ids:
+                reason = "no_longer_needs_ocr"
+            else:
+                continue
+            self.mark_skipped(
+                doc_hash,
+                block_id,
+                reason,
+                scan_round=FormulaScanRound.CACHED_RECOGNITION,
+            )
+            skipped += 1
+        return skipped
 
     def page_counts(self, doc_hash: str) -> dict[str, int]:
         with self._lock:

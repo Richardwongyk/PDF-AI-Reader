@@ -250,6 +250,45 @@ def test_formula_index_flow_can_persist_plan_without_starting_worker(tmp_path) -
     }
 
 
+def test_formula_index_store_reconciles_stale_cached_recognition_jobs(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    active = _formula("p0_b1", 0)
+    resolved = _formula("p0_b2", 0)
+    orphaned = _formula("p9_b1", 9)
+    store.enqueue_blocks(
+        "doc-1",
+        "paper.pdf",
+        [active, resolved, orphaned],
+        scan_round=FormulaScanRound.CACHED_RECOGNITION,
+    )
+
+    skipped = store.reconcile_cached_recognition_jobs(
+        "doc-1",
+        [
+            active,
+            resolved.model_copy(
+                update={"metadata": {"needs_ocr": False, "mfr_recognized": True}},
+                deep=True,
+            ),
+        ],
+    )
+
+    assert skipped == 2
+    assert store.counts("doc-1") == {"queued": 1, "skipped": 2}
+    assert store.round_counts("doc-1", FormulaScanRound.CACHED_RECOGNITION) == {
+        "r1_cached_recognition:queued": 1,
+        "r1_cached_recognition:skipped": 2,
+    }
+    assert [
+        task.block_id
+        for task in store.list_tasks(
+            "doc-1",
+            statuses={"queued"},
+            scan_round=FormulaScanRound.CACHED_RECOGNITION,
+        )
+    ] == [active.id]
+
+
 def test_formula_import_plan_thread_persists_all_rounds(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     formula = _formula("p0_b1", 0)

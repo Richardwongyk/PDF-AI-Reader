@@ -88,6 +88,10 @@ class TinyBDMathCandidateService:
                 warnings = list(result["warnings"])
                 if self._graph_parser is None:
                     warnings.append("tinybdmath_graph_parser_model_missing")
+                output_latex = _storage_latex_from_scored_result(
+                    result,
+                    fallback=str(record.latex or record.normalized_latex or ""),
+                )
                 self._store.put_recognition_result(
                     doc_hash=doc_hash,
                     candidate_id=record.candidate_id,
@@ -96,8 +100,8 @@ class TinyBDMathCandidateService:
                     model_version=self.model_version,
                     preprocess_version=TINYBDMATH_PREPROCESS_VERSION,
                     input_hash=input_hash,
-                    latex=record.latex,
-                    normalized_latex=record.normalized_latex or record.latex,
+                    latex=output_latex,
+                    normalized_latex=output_latex,
                     score=result["score"],
                     duration_ms=0,
                     warnings=warnings,
@@ -198,6 +202,7 @@ class TinyBDMathCandidateService:
                 if self._graph_parser is None:
                     warnings.append("tinybdmath_graph_parser_model_missing")
                 latex = str(item.get("latex", "") or "")
+                output_latex = _storage_latex_from_scored_result(result, fallback=latex)
                 self._store.put_recognition_result(
                     doc_hash=doc_hash,
                     candidate_id=candidate_id,
@@ -206,8 +211,8 @@ class TinyBDMathCandidateService:
                     model_version=self.model_version,
                     preprocess_version=TINYBDMATH_PREPROCESS_VERSION,
                     input_hash=input_hash,
-                    latex=latex,
-                    normalized_latex=latex,
+                    latex=output_latex,
+                    normalized_latex=output_latex,
                     score=result["score"],
                     duration_ms=0,
                     warnings=warnings,
@@ -608,6 +613,27 @@ def _bbox_from_payload(payload: dict[str, Any]) -> tuple[float, float, float, fl
 
 
 def _decoded_candidate_score(decoded_latex: dict[str, Any]) -> dict[str, Any]:
+    preferred = decoded_latex.get("preferred_candidate", {})
+    if isinstance(preferred, dict):
+        preferred_score = (
+            _float(preferred.get("verifier_score"))
+            or _float(preferred.get("layout_confidence"))
+            or _float(preferred.get("confidence"))
+        )
+        preferred_latex = str(preferred.get("latex", "") or "")
+        if preferred_latex.strip():
+            return {
+                "score": preferred_score,
+                "source": "preferred_candidate_verifier_score",
+                "recommended_rank": _int(preferred.get("recommended_rank")),
+                "latex": preferred_latex,
+                "layout_status": str(preferred.get("layout_status", "") or ""),
+                "source_candidate": str(preferred.get("source", "") or ""),
+                "cslt_candidate_id": str(preferred.get("cslt_candidate_id", "") or ""),
+                "requires_cloud_semantic_review": bool(preferred.get("requires_cloud_semantic_review", True)),
+                "candidate_only": True,
+                "accepted": False,
+            }
     recommendation = decoded_latex.get("manual_review_recommendation", {})
     if isinstance(recommendation, dict):
         recommended_confidence = _float(recommendation.get("layout_confidence"))
@@ -638,6 +664,20 @@ def _decoded_candidate_score(decoded_latex: dict[str, Any]) -> dict[str, Any]:
         "candidate_only": True,
         "accepted": False,
     }
+
+
+def _storage_latex_from_scored_result(result: dict[str, Any], *, fallback: str = "") -> str:
+    score_evidence = result.get("score_evidence", {})
+    if isinstance(score_evidence, dict):
+        latex = str(score_evidence.get("latex", "") or "").strip()
+        if latex:
+            return latex
+    decoded_latex = result.get("decoded_latex", {})
+    if isinstance(decoded_latex, dict):
+        latex = str(decoded_latex.get("latex", "") or "").strip()
+        if latex:
+            return latex
+    return str(fallback or "").strip()
 
 
 def _json_hash(payload: dict[str, object]) -> str:
