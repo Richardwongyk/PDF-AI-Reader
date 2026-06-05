@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
@@ -50,6 +51,36 @@ def test_pdf_viewer_scrolls_to_bbox_and_shows_highlight() -> None:
     assert viewer._evidence_highlight is not None
     assert viewer._evidence_highlight.objectName() == "formula_evidence_highlight"
     assert viewer.verticalScrollBar().value() > 0
+    assert viewer.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+
+
+def test_pdf_viewer_enables_horizontal_scroll_for_zoomed_pages() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(320, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[]))
+
+    viewer._set_zoom(2.0)
+    viewer._sync_scroll_range(max(viewer.viewport().height(), 1))
+
+    assert viewer.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert viewer.horizontalScrollBar().maximum() > 0
+
+
+def test_pdf_viewer_scroll_to_bbox_moves_horizontally_for_wide_pages() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(320, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[]))
+    viewer._set_zoom(2.0)
+    viewer._sync_scroll_range(max(viewer.viewport().height(), 1))
+
+    moved = viewer.scroll_to_bbox(0, [300, 120, 360, 150])
+
+    assert moved is True
+    assert viewer.horizontalScrollBar().value() > 0
 
 
 def test_pdf_viewer_rejects_invalid_bbox() -> None:

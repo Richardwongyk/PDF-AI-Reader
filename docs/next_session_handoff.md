@@ -71,21 +71,35 @@
 当前 r2a 默认推理路径只保留 Graph Parser artifact。缺模型时写 candidate-only
 abstain 和缺模型 warning。
 
-2026-06-05 最新 UI 提交 `a5091f8 Add AI dock panel controls`：
+2026-06-05 UI 状态（`a5091f8 Add AI dock panel controls` 后接续完善左侧开关）：
 
 - `src/ui/main_window.py`
-  - 主工具栏设置 objectName `main_toolbar`，右侧增加 `right_panel_toggle_button`。
+  - 主工具栏设置 objectName `main_toolbar`。
+  - 工具栏最左侧增加 30px icon-only 线头 `left_panel_toggle_button`，用于隐藏/显示左侧导航 dock。
+  - 工具栏最右侧保留 30px icon-only 线头 `right_panel_toggle_button`，用于隐藏/显示右侧 AI 面板。
+  - 两个侧栏按钮是白色边框、黑底、蓝色自绘线条，不使用系统黑色箭头。
+  - 左侧导航 dock 去掉 closable feature，保留 movable/floatable，最小宽度 220，默认展开宽度 240。
   - 右侧 `AI 工具集` dock 去掉 closable feature，保留 movable/floatable。
   - dock 内容拆成 `_right_panel_body`，工具栏按钮可隐藏/显示右侧 AI 面板，并保存展开宽度。
   - dock 使用自定义标题栏，`right_dock_float_button` 可在弹出独立窗口和归位右侧栏之间切换。
   - 最小宽度当前为 300，默认展开宽度当前为 360。
+- `src/ui/pdf_viewer.py`
+  - 中央阅读区水平滚动条从禁用改为按需显示。
+  - 缩放后页面宽度超过视口时会同步内容最小宽度和横向滚动范围。
+  - `scroll_to_bbox` 会同步横向滚动到 bbox 的 x 坐标附近。
+- `src/ui/pdf_viewer.py` / `src/ui/theme.py`
+  - 全局 tooltip 改成白字深底，移除旧的紫色 tooltip 文本注入。
+- `src/main.py` / `src/ui/main_window.py`
+  - 默认生成路由走云端；非显式 `local_only` 启动检查只显示云端状态，不再弹 Ollama。
 - `tests/test_smoke.py`
-  - `test_main_window_smoke` 覆盖 toolbar/toggle、隐藏/显示文案、dock 不可关闭、
-    float/restore 和右侧停靠区域。
+  - `test_main_window_smoke` 覆盖左右侧栏 toolbar toggle、按钮小尺寸、tooltip 状态、
+    左右 dock 不可关闭、右侧 float/restore 和右侧停靠区域。
+- `tests/test_pdf_viewer_navigation.py`
+  - 覆盖按需水平滚动条和 bbox 横向跳转。
 - 已补跑：
   - `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_smoke.py -q`
-  - 结果：11 passed，约 39 秒。
-- 轻量接手完整测试在用户打断后未完成；需要重新确认基线时按本文末尾命令重跑。
+  - `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_pdf_viewer_navigation.py -q`
+  - 结果：smoke 11 passed；PDF viewer navigation 14 passed。
 
 2026-06-02 进一步收束：第一阶段目标不是开放科学记号识别，而是 AI/Math 论文
 中的通用数学排版结构恢复。数学公式不能按内容枚举；应按 LaTeX/amsmath/

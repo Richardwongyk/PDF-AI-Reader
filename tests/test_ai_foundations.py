@@ -96,6 +96,9 @@ def test_app_config_exposes_rag_and_reasoning_models() -> None:
     assert cfg.model.formula_ocr_model == "PP-FormulaNet_plus-S"
     assert cfg.rag.backend == "legacy_chroma"
     assert cfg.rag.candidate_pool == 48
+    assert cfg.routing.translation == "cloud_only"
+    assert cfg.routing.qa == "cloud_only"
+    assert cfg.routing.summarization == "cloud_only"
 
 
 def test_deepseek_reasoning_model_name_is_litellm_compatible() -> None:

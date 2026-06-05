@@ -203,8 +203,8 @@ def _make_light_palette() -> QPalette:
     p.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
     p.setColor(QPalette.ColorRole.AlternateBase, QColor(245, 245, 250))
     p.setColor(QPalette.ColorRole.Text, QColor(30, 30, 30))
-    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 245))
-    p.setColor(QPalette.ColorRole.ToolTipText, QColor(30, 30, 30))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(17, 24, 39))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 255, 255))
 
     # 按钮
     p.setColor(QPalette.ColorRole.Button, QColor(245, 245, 250))
@@ -239,8 +239,8 @@ def _make_dark_palette() -> QPalette:
     p.setColor(QPalette.ColorRole.Base, QColor(42, 42, 60))
     p.setColor(QPalette.ColorRole.AlternateBase, QColor(37, 37, 56))
     p.setColor(QPalette.ColorRole.Text, QColor(205, 214, 244))
-    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(50, 50, 70))
-    p.setColor(QPalette.ColorRole.ToolTipText, QColor(220, 220, 240))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(17, 24, 39))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 255, 255))
 
     p.setColor(QPalette.ColorRole.Button, QColor(50, 50, 70))
     p.setColor(QPalette.ColorRole.ButtonText, QColor(205, 214, 244))
@@ -271,8 +271,8 @@ def _make_sepia_palette() -> QPalette:
     p.setColor(QPalette.ColorRole.Base, QColor(252, 240, 210))
     p.setColor(QPalette.ColorRole.AlternateBase, QColor(245, 230, 195))
     p.setColor(QPalette.ColorRole.Text, QColor(60, 40, 20))
-    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 250, 235))
-    p.setColor(QPalette.ColorRole.ToolTipText, QColor(60, 40, 20))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(17, 24, 39))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 255, 255))
 
     p.setColor(QPalette.ColorRole.Button, QColor(240, 220, 180))
     p.setColor(QPalette.ColorRole.ButtonText, QColor(60, 40, 20))

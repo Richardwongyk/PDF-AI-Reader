@@ -279,24 +279,62 @@ def test_main_window_smoke() -> None:
         services = build_services()
         window = main_window_module.MainWindow(services)
         window.show()
+        app_style = app.styleSheet()
+        assert "PDF_AI_READER_TOOLTIP_STYLE" in app_style
+        assert "color: #ffffff" in app_style
+        assert "#4a3f6b" not in app_style
         assert window.findChild(QWidget, "ai_question_input") is not None
         assert window.findChild(QWidget, "ai_evidence_tree") is not None
         assert window.findChild(QWidget, "ai_answer_view") is not None
-        toggle = window.findChild(QToolButton, "right_panel_toggle_button")
-        assert toggle is not None
+        left_toggle = window.findChild(QToolButton, "left_panel_toggle_button")
+        right_toggle = window.findChild(QToolButton, "right_panel_toggle_button")
+        assert left_toggle is not None
+        assert right_toggle is not None
         toolbar = window.findChild(QToolBar, "main_toolbar")
         assert toolbar is not None
-        assert any(toolbar.widgetForAction(action) is toggle for action in toolbar.actions())
-        assert toggle.text() == "隐藏 AI"
+        assert toolbar.widgetForAction(toolbar.actions()[0]) is left_toggle
+        assert any(toolbar.widgetForAction(action) is right_toggle for action in toolbar.actions())
+        assert left_toggle.width() <= 34
+        assert right_toggle.width() <= 34
+        assert "#111827" in left_toggle.styleSheet()
+        assert "#3b82f6" in left_toggle.styleSheet()
+        assert "#f8fafc" in left_toggle.styleSheet()
+        assert "QToolTip" in left_toggle.styleSheet()
+        assert "color: #ffffff" in left_toggle.styleSheet()
+        assert left_toggle.styleSheet() == right_toggle.styleSheet()
+        assert left_toggle.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert right_toggle.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert not left_toggle.icon().isNull()
+        assert not right_toggle.icon().isNull()
+        assert not window._left_panel_collapsed
+        assert left_toggle.text() == ""
+        assert left_toggle.toolTip() == "隐藏左侧导航栏"
+        left_toggle.click()
+        assert window._left_panel_collapsed
+        assert left_toggle.text() == ""
+        assert not left_toggle.icon().isNull()
+        assert left_toggle.toolTip() == "显示左侧导航栏"
+        assert not window._left_dock.isVisible()
+        left_toggle.click()
+        assert not window._left_panel_collapsed
+        assert left_toggle.text() == ""
+        assert left_toggle.toolTip() == "隐藏左侧导航栏"
+        assert window._left_dock.isVisible()
+        assert not (window._left_dock.features() & QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        assert right_toggle.text() == ""
+        assert right_toggle.toolTip() == "隐藏右侧 AI 工具集"
         assert window._right_panel_body is not None
         assert not window._right_panel_collapsed
-        toggle.click()
+        right_toggle.click()
         assert window._right_panel_collapsed
-        assert toggle.text() == "显示 AI"
+        assert right_toggle.text() == ""
+        assert not right_toggle.icon().isNull()
+        assert right_toggle.toolTip() == "显示右侧 AI 工具集"
         assert not window._right_dock.isVisible()
-        toggle.click()
+        right_toggle.click()
         assert not window._right_panel_collapsed
-        assert toggle.text() == "隐藏 AI"
+        assert right_toggle.text() == ""
+        assert right_toggle.toolTip() == "隐藏右侧 AI 工具集"
         assert window._right_dock.isVisible()
         assert not (window._right_dock.features() & QDockWidget.DockWidgetFeature.DockWidgetClosable)
         float_button = window.findChild(QToolButton, "right_dock_float_button")

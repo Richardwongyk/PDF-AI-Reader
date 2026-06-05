@@ -251,7 +251,15 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
         )
 
         local_client: BaseLLMClient | None = None
-        if test_mode:
+        local_routes = {
+            config.routing.translation,
+            config.routing.qa,
+            config.routing.summarization,
+        }
+        uses_local_generation = bool(local_routes & {"local_first", "local_only"})
+        if not uses_local_generation:
+            logging.info("生成任务默认使用云端路由，跳过本地 Ollama 生成模型探测")
+        elif test_mode:
             logging.info("测试模式：跳过本地生成模型探测，不连接 Ollama")
         elif not _ollama_host_reachable(config.model.ollama_host):
             logging.info("Ollama 服务不可达，跳过本地生成模型探测")

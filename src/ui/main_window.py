@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, QSize, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QShortcut
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -163,6 +163,10 @@ class MainWindow(QMainWindow):
         self._dock_answer_pending_js: str | None = None
         self._dock_answer_pending_theme: str | None = None
         self._dock_answer_bridge: _DockAnswerBridge | None = None
+        self._left_panel_toggle_button: QToolButton | None = None
+        self._left_panel_collapsed: bool = False
+        self._left_panel_expanded_width: int = 240
+        self._left_panel_min_width: int = 220
         self._right_panel_body: QWidget | None = None
         self._right_panel_toggle_button: QToolButton | None = None
         self._right_panel_collapsed: bool = False
@@ -264,6 +268,48 @@ class MainWindow(QMainWindow):
         toolbar: QToolBar = self.addToolBar("主工具栏")
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
+        side_panel_toggle_style = """
+            QToolButton#left_panel_toggle_button,
+            QToolButton#right_panel_toggle_button {
+                background: #111827;
+                color: #3b82f6;
+                border: 1px solid #f8fafc;
+                border-radius: 6px;
+                padding: 0;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QToolButton#left_panel_toggle_button:hover,
+            QToolButton#right_panel_toggle_button:hover {
+                background: #0f172a;
+                color: #60a5fa;
+                border-color: #ffffff;
+            }
+            QToolButton#left_panel_toggle_button:pressed,
+            QToolButton#right_panel_toggle_button:pressed {
+                background: #020617;
+                color: #2563eb;
+                border-color: #e5e7eb;
+            }
+            QToolTip {
+                color: #ffffff;
+                background-color: #111827;
+                border: 1px solid #f8fafc;
+                padding: 4px 6px;
+            }
+        """
+
+        self._left_panel_toggle_button = QToolButton()
+        self._left_panel_toggle_button.setObjectName("left_panel_toggle_button")
+        self._left_panel_toggle_button.setAutoRaise(True)
+        self._left_panel_toggle_button.setIconSize(QSize(18, 18))
+        self._left_panel_toggle_button.setFixedSize(30, 30)
+        self._left_panel_toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._left_panel_toggle_button.setStyleSheet(side_panel_toggle_style)
+        self._left_panel_toggle_button.clicked.connect(self._on_left_panel_toggle_clicked)
+        toolbar.addWidget(self._left_panel_toggle_button)
+        self._update_left_panel_toggle_icon()
+        toolbar.addSeparator()
 
         open_action = QAction("📂 打开", self)
         open_action.triggered.connect(self._on_open_pdf)
@@ -298,29 +344,12 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(toolbar_spacer)
         self._right_panel_toggle_button = QToolButton()
         self._right_panel_toggle_button.setObjectName("right_panel_toggle_button")
-        self._right_panel_toggle_button.setAutoRaise(False)
-        self._right_panel_toggle_button.setIconSize(QSize(16, 16))
-        self._right_panel_toggle_button.setMinimumSize(92, 30)
-        self._right_panel_toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._right_panel_toggle_button.setAutoRaise(True)
+        self._right_panel_toggle_button.setIconSize(QSize(18, 18))
+        self._right_panel_toggle_button.setFixedSize(30, 30)
+        self._right_panel_toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._right_panel_toggle_button.setStyleSheet(side_panel_toggle_style)
         self._right_panel_toggle_button.clicked.connect(self._on_right_panel_toggle_clicked)
-        self._right_panel_toggle_button.setStyleSheet(
-            """
-            QToolButton#right_panel_toggle_button {
-                background: #2563eb;
-                color: white;
-                border: 1px solid #1d4ed8;
-                border-radius: 6px;
-                padding: 4px 10px;
-                font-weight: 600;
-            }
-            QToolButton#right_panel_toggle_button:hover {
-                background: #1d4ed8;
-            }
-            QToolButton#right_panel_toggle_button:pressed {
-                background: #1e40af;
-            }
-            """
-        )
         toolbar.addWidget(self._right_panel_toggle_button)
         self._update_right_panel_toggle_icon()
 
@@ -355,8 +384,20 @@ class MainWindow(QMainWindow):
         self._toc_tree = QTreeWidget()
         self._toc_tree.setHeaderLabel("目录")
         self._toc_tree.itemClicked.connect(self._on_toc_item_clicked)
+        self._toc_tree.setMinimumWidth(self._left_panel_min_width)
+        self._left_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self._left_dock.setMinimumWidth(self._left_panel_min_width)
         self._left_dock.setWidget(self._toc_tree)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._left_dock)
+        self.resizeDocks(
+            [self._left_dock],
+            [self._left_panel_expanded_width],
+            Qt.Orientation.Horizontal,
+        )
+        self._update_left_panel_toggle_icon()
 
         # 右侧：全文问答与证据面板
         self._right_dock = QDockWidget("AI 工具集", self)
@@ -451,6 +492,82 @@ class MainWindow(QMainWindow):
         )
         self._update_right_panel_toggle_icon()
 
+    def _on_left_panel_toggle_clicked(self) -> None:
+        """折叠或展开左侧导航面板。"""
+        self._set_left_panel_collapsed(not self._left_panel_collapsed)
+
+    def _set_left_panel_collapsed(self, collapsed: bool) -> None:
+        """Hide or restore the navigation dock while preserving its width."""
+        if not hasattr(self, "_left_dock"):
+            return
+        if collapsed == self._left_panel_collapsed:
+            return
+        self._left_panel_collapsed = collapsed
+        if collapsed:
+            current_width = self._left_dock.width()
+            if current_width >= self._left_panel_min_width:
+                self._left_panel_expanded_width = max(self._left_panel_min_width, current_width)
+            self._left_dock.setVisible(False)
+        else:
+            self._left_dock.setMaximumWidth(16777215)
+            self._left_dock.setMinimumWidth(self._left_panel_min_width)
+            content_widget = self._left_dock.widget()
+            if content_widget is not None:
+                content_widget.setMaximumWidth(16777215)
+                content_widget.setMinimumWidth(self._left_panel_min_width)
+            self._left_dock.setVisible(True)
+            self.resizeDocks(
+                [self._left_dock],
+                [self._left_panel_expanded_width],
+                Qt.Orientation.Horizontal,
+            )
+        self._update_left_panel_toggle_icon()
+
+    def _update_left_panel_toggle_icon(self) -> None:
+        if self._left_panel_toggle_button is None:
+            return
+        if self._left_panel_collapsed:
+            icon = self._make_panel_toggle_icon("left", collapsed=True)
+            tooltip = "显示左侧导航栏"
+        else:
+            icon = self._make_panel_toggle_icon("left", collapsed=False)
+            tooltip = "隐藏左侧导航栏"
+        self._left_panel_toggle_button.setIcon(icon)
+        self._left_panel_toggle_button.setText("")
+        self._left_panel_toggle_button.setToolTip(tooltip)
+        self._left_panel_toggle_button.setAccessibleName(tooltip)
+        self._left_panel_toggle_button.setStatusTip(tooltip)
+
+    def _make_panel_toggle_icon(self, side: str, *, collapsed: bool) -> QIcon:
+        pixmap = QPixmap(18, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor("#3b82f6"))
+        pen.setWidthF(2.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+
+        if side == "left":
+            bar_x = 4
+            center_x = 11
+            points_right = collapsed
+        else:
+            bar_x = 14
+            center_x = 7
+            points_right = not collapsed
+
+        painter.drawLine(bar_x, 4, bar_x, 14)
+        if points_right:
+            painter.drawLine(center_x - 3, 4, center_x + 2, 9)
+            painter.drawLine(center_x + 2, 9, center_x - 3, 14)
+        else:
+            painter.drawLine(center_x + 3, 4, center_x - 2, 9)
+            painter.drawLine(center_x - 2, 9, center_x + 3, 14)
+        painter.end()
+        return QIcon(pixmap)
+
     def _create_right_dock_title_bar(self) -> QWidget:
         title_bar = QWidget()
         title_bar.setObjectName("right_dock_title_bar")
@@ -542,17 +659,16 @@ class MainWindow(QMainWindow):
         if self._right_panel_toggle_button is None:
             return
         if self._right_panel_collapsed:
-            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton)
-            tooltip = "展开 AI 工具集"
-            text = "显示 AI"
+            icon = self._make_panel_toggle_icon("right", collapsed=True)
+            tooltip = "显示右侧 AI 工具集"
         else:
-            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMinButton)
-            tooltip = "折叠 AI 工具集"
-            text = "隐藏 AI"
+            icon = self._make_panel_toggle_icon("right", collapsed=False)
+            tooltip = "隐藏右侧 AI 工具集"
         self._right_panel_toggle_button.setIcon(icon)
-        self._right_panel_toggle_button.setText(text)
+        self._right_panel_toggle_button.setText("")
         self._right_panel_toggle_button.setToolTip(tooltip)
         self._right_panel_toggle_button.setAccessibleName(tooltip)
+        self._right_panel_toggle_button.setStatusTip(tooltip)
 
     def _apply_theme(self) -> None:
         """应用主题。light=系统原生，dark/sepia=QPalette。广播到所有裂缝。"""
@@ -1790,8 +1906,12 @@ class MainWindow(QMainWindow):
 
 
     def _check_first_launch(self) -> None:
-        """首次启动检查：默认检查云端配置，本地模式才检查 Ollama。"""
-        if self._config.routing.translation == "cloud_only" or self._config.routing.qa == "cloud_only":
+        """首次启动检查：默认走云端状态提示，只有显式 local_only 才检查 Ollama。"""
+        local_only = (
+            self._config.routing.translation == "local_only"
+            and self._config.routing.qa == "local_only"
+        )
+        if not local_only:
             cloud = self._config.model.cloud_translation or self._config.model.cloud
             key = self._services.get("config_manager").get_api_key(cloud)
             if key and key.strip() and "在此填入" not in key:
@@ -1800,13 +1920,6 @@ class MainWindow(QMainWindow):
                 )
                 return
             self._status_model_label.setText("⚠️ 未配置云端 API，当前为测试模式")
-            QMessageBox.information(
-                self,
-                "模型配置",
-                "当前默认使用云端模型生成翻译和回答，但尚未配置 API Key。\n\n"
-                "在配置前，应用会使用模拟回答，知识库检索和翻译质量不能代表真实效果。\n"
-                "配置云端模型后，翻译/问答内容会发送到对应 API 服务；PDF 解析和本地索引仍保存在本机。",
-            )
             return
 
         model_status = self._ai_engine.check_local_model_status()

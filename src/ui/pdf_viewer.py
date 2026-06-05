@@ -504,15 +504,26 @@ class PdfViewer(QScrollArea):
 
         self.setWidget(self._content)
         self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setBackgroundRole(QPalette.ColorRole.Base)
 
         # 异步渲染：连接 DocumentEngine 的完成信号
         self._doc_engine.page_rendered.connect(self._on_page_rendered_async)
 
         app = QApplication.instance()
-        if app:
-            app.setStyleSheet(app.styleSheet() + " QToolTip { color: #4a3f6b; }")
+        if app and "PDF_AI_READER_TOOLTIP_STYLE" not in app.styleSheet():
+            app.setStyleSheet(
+                app.styleSheet()
+                + """
+                /* PDF_AI_READER_TOOLTIP_STYLE */
+                QToolTip {
+                    color: #ffffff;
+                    background-color: #111827;
+                    border: 1px solid #f8fafc;
+                    padding: 4px 6px;
+                }
+                """
+            )
 
     # ── 页面段构建（始终渲染，用于裂开后的上下半页） ──
 
@@ -621,7 +632,7 @@ class PdfViewer(QScrollArea):
             }]
 
         self._vlayout = _VirtualPageLayout(page_heights)
-        self._content.setMinimumHeight(int(self._vlayout.total_height))
+        self._sync_content_size(max(self.viewport().height(), 1))
         _logger.info("PdfViewer.load_document: _VirtualPageLayout 已构建 (%d pages, total_h=%.0f)",
                      len(page_heights), self._vlayout.total_height)
 
@@ -995,7 +1006,7 @@ class PdfViewer(QScrollArea):
         last_bottom = self._vlayout.page_y(last_page) + self._vlayout.page_height(last_page)
         bottom_h = int(self._vlayout.total_height - last_bottom)
         self._bottom_spacer.setFixedHeight(max(0, bottom_h))
-        self._content.setMinimumHeight(int(self._vlayout.total_height))
+        self._sync_content_size(max(self.viewport().height(), 1))
 
     def _capture_scroll_anchor(self) -> tuple[int | None, float]:
         """Capture the page-relative top-of-viewport position before layout changes."""
@@ -1581,9 +1592,7 @@ class PdfViewer(QScrollArea):
         self._request_page_blocks(page_num)
         y = int(self._vlayout.page_y(page_num))
         viewport_h = max(self.viewport().height(), 1)
-        total_h = max(int(self._vlayout.total_height), viewport_h)
-        self._content.setMinimumHeight(total_h)
-        self.verticalScrollBar().setRange(0, max(0, total_h - viewport_h))
+        self._sync_content_size(viewport_h)
         self._scroll_history.clear()
         self.verticalScrollBar().setValue(y)
         if page_num in self._page_metas and page_num not in self._split_pages:
@@ -1622,6 +1631,7 @@ class PdfViewer(QScrollArea):
         page_y = self._vlayout.page_y(page_num)
         target_y = int(page_y + y0 * self._scale - viewport_h * 0.25)
         self.verticalScrollBar().setValue(max(0, target_y))
+        self._scroll_horizontally_to_pdf_x(x0, x1)
         self._show_evidence_highlight(page_num, (x0, y0, x1, y1))
         QTimer.singleShot(0, self._update_visible_pages)
         _logger.info(
@@ -1690,15 +1700,42 @@ class PdfViewer(QScrollArea):
         if highlight is not None and _isValid(highlight):
             highlight.deleteLater()
 
-    def _sync_scroll_range(self, viewport_h: int) -> None:
+    def _content_min_width(self) -> int:
+        if not self._page_metas:
+            return max(self.viewport().width(), 1)
+        margins = self._layout.contentsMargins()
+        max_page_w = max(int(meta.get("width", 0) or 0) for meta in self._page_metas.values())
+        return max(1, max_page_w + margins.left() + margins.right())
+
+    def _sync_content_size(self, viewport_h: int) -> None:
         if self._vlayout is None:
             return
+        viewport_w = max(self.viewport().width(), 1)
         total_h = max(int(self._vlayout.total_height), viewport_h)
+        content_w = max(self._content_min_width(), viewport_w)
+        self._content.setMinimumWidth(content_w)
         self._content.setMinimumHeight(total_h)
-        self._content.resize(max(self.viewport().width(), self._content.width()), total_h)
+        self._content.resize(content_w, total_h)
         self._layout.activate()
         self._content.adjustSize()
         self.verticalScrollBar().setRange(0, max(0, total_h - viewport_h))
+        self.horizontalScrollBar().setRange(0, max(0, content_w - viewport_w))
+
+    def _sync_scroll_range(self, viewport_h: int) -> None:
+        self._sync_content_size(viewport_h)
+
+    def _scroll_horizontally_to_pdf_x(self, x0: float, x1: float) -> None:
+        hbar = self.horizontalScrollBar()
+        if hbar is None or not _isValid(hbar):
+            return
+        viewport_w = max(self.viewport().width(), 1)
+        margins = self._layout.contentsMargins()
+        target_left = int(margins.left() + x0 * self._scale - viewport_w * 0.15)
+        target_right = int(margins.left() + x1 * self._scale - viewport_w * 0.85)
+        if target_right > hbar.value():
+            hbar.setValue(max(0, target_right))
+        elif target_left < hbar.value():
+            hbar.setValue(max(0, target_left))
 
     # ── 缩放 ──
 
@@ -1764,6 +1801,7 @@ class PdfViewer(QScrollArea):
                     seg["y0"] = int(seg["y0_pt"] * self._scale)
                     seg["y1"] = int(seg["y1_pt"] * self._scale)
         self._vlayout.rebuild(page_heights)
+        self._sync_content_size(viewport_h)
 
         # 处理已渲染的页面：复用旧 pixmap 过渡显示 + 清除旧 overlay + 请求精确渲染。
         # 不在 UI 线程生成 scaled QPixmap；paintEvent 会把旧图拉伸到新 widget 尺寸。
