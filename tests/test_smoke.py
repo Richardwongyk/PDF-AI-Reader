@@ -368,7 +368,14 @@ def test_main_window_smoke() -> None:
         assert not window._left_panel_collapsed
         assert left_toggle.text() == ""
         assert left_toggle.toolTip() == "隐藏左侧导航栏"
+        center_calls = []
+        window._pdf_viewer.center_horizontally = lambda: center_calls.append("center")
+        center_count = len(center_calls)
         left_toggle.click()
+        app.processEvents()
+        QTest.qWait(120)
+        app.processEvents()
+        assert len(center_calls) > center_count
         assert window._left_panel_collapsed
         assert left_toggle.text() == ""
         assert not left_toggle.icon().isNull()
@@ -400,7 +407,12 @@ def test_main_window_smoke() -> None:
         assert right_toggle.toolTip() == "隐藏右侧 AI 工具集"
         assert window._right_panel_body is not None
         assert not window._right_panel_collapsed
+        center_count = len(center_calls)
         right_toggle.click()
+        app.processEvents()
+        QTest.qWait(120)
+        app.processEvents()
+        assert len(center_calls) > center_count
         assert window._right_panel_collapsed
         assert right_toggle.text() == ""
         assert not right_toggle.icon().isNull()

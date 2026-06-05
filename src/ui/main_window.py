@@ -676,6 +676,8 @@ class MainWindow(QMainWindow):
                 Qt.Orientation.Horizontal,
             )
         self._update_left_panel_toggle_icon()
+        if collapsed:
+            self._center_pdf_after_panel_collapse()
 
     def _update_left_panel_toggle_icon(self) -> None:
         if self._left_panel_toggle_button is None:
@@ -864,6 +866,19 @@ class MainWindow(QMainWindow):
                 Qt.Orientation.Horizontal,
             )
         self._update_right_panel_toggle_icon()
+        if collapsed:
+            self._center_pdf_after_panel_collapse()
+
+    def _center_pdf_after_panel_collapse(self) -> None:
+        """Center the reader after dock removal has resized the central area."""
+        QTimer.singleShot(0, self._center_pdf_horizontally_if_available)
+        QTimer.singleShot(80, self._center_pdf_horizontally_if_available)
+
+    def _center_pdf_horizontally_if_available(self) -> None:
+        viewer = getattr(self, "_pdf_viewer", None)
+        if viewer is None:
+            return
+        viewer.center_horizontally()
 
     def _update_right_panel_toggle_icon(self) -> None:
         if self._right_panel_toggle_button is None:

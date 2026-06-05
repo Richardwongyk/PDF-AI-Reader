@@ -77,6 +77,59 @@ def test_pdf_viewer_enables_horizontal_scroll_for_zoomed_pages() -> None:
     assert viewer.horizontalScrollBar().maximum() > 0
 
 
+def test_pdf_viewer_centers_page_widget_in_wide_viewport() -> None:
+    app = _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(900, 480)
+    viewer.show()
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[]))
+
+    viewer.scroll_to_page(0)
+    app.processEvents()
+
+    container = viewer._page_containers[0]
+    viewer._sync_content_size(max(viewer.viewport().height(), 1))
+    viewer._layout.activate()
+    expected_x = (viewer._content.width() - container.width()) // 2
+    assert abs(container.x() - expected_x) <= 2
+    assert viewer.horizontalScrollBar().maximum() == 0
+    viewer.close()
+
+
+def test_pdf_viewer_center_horizontally_keeps_wide_page_scrollable() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(320, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[]))
+    viewer._set_zoom(2.0)
+
+    viewer.center_horizontally()
+
+    hbar = viewer.horizontalScrollBar()
+    assert viewer.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert hbar.maximum() > 0
+    assert hbar.value() == hbar.maximum() // 2
+
+
+def test_pdf_viewer_recenters_horizontally_after_zooming_back_out() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(320, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[]))
+    viewer.scroll_to_page(0)
+
+    viewer._set_zoom(2.0)
+    viewer.horizontalScrollBar().setValue(viewer.horizontalScrollBar().maximum())
+    viewer._set_zoom(1.2)
+
+    hbar = viewer.horizontalScrollBar()
+    assert hbar.maximum() > 0
+    assert hbar.value() == hbar.maximum() // 2
+
+
 def test_pdf_viewer_scroll_to_bbox_moves_horizontally_for_wide_pages() -> None:
     _app()
     engine = _DocEngine()
@@ -219,7 +272,7 @@ def test_pdf_viewer_split_segment_uses_cropped_label_pixmap() -> None:
     label = widget.findChild(QLabel)
     assert label is not None
     assert label.pixmap() is not None
-    assert label.pixmap().height() == 240
+    assert int(label.pixmap().deviceIndependentSize().height()) == 240
     assert widget.findChild(BlockOverlay) is not None
 
 
@@ -352,6 +405,49 @@ def test_pdf_viewer_restores_offscreen_split_page_after_zoom_rerender() -> None:
     assert restored_top.height() == 240
 
 
+def test_pdf_viewer_rebuilds_split_segments_at_current_page_width() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(900, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[]))
+    page_w = viewer._page_metas[0]["width"]
+
+    top = QWidget()
+    split = QWidget()
+    bottom = QWidget()
+    for widget in (top, split, bottom):
+        widget.setFixedSize(page_w, 80)
+        viewer._remember_widget_page(widget, 0)
+    viewer._insert_page_content_widget(1, top)
+    viewer._insert_page_content_widget(2, split)
+    viewer._insert_page_content_widget(3, bottom)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 120, "blocks": [], "widget": top},
+        {"split_id": "p0_b0"},
+        {"y0": 120, "y1": 240, "blocks": [], "widget": bottom},
+    ]
+    viewer._splits["p0_b0"] = split  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+    viewer._screen_dpr = 2.0
+
+    physical_pixmap = QPixmap(page_w * 2, 800 * 2)
+    physical_pixmap.fill()
+    rebuilt = viewer._rebuild_split_segments_from_pixmap(
+        0,
+        physical_pixmap,
+        only_if_in_layout=False,
+    )
+
+    rebuilt_top = viewer._page_segments[0][0]["widget"]
+    rebuilt_bottom = viewer._page_segments[0][2]["widget"]
+    assert rebuilt == 2
+    assert rebuilt_top.width() == page_w
+    assert rebuilt_bottom.width() == page_w
+    assert physical_pixmap.devicePixelRatio() == 2.0
+
+
 def test_pdf_viewer_zoom_prioritizes_visible_split_pages() -> None:
     _app()
     engine = _DocEngine()
@@ -401,6 +497,10 @@ def test_pdf_viewer_zoom_prioritizes_visible_split_pages() -> None:
     assert 0 in engine.rendered_pages
     assert 5 not in engine.rendered_pages
     assert {0, 5}.issubset(viewer._pending_split_rerenders)
+    assert visible_top.width() == viewer._page_metas[0]["width"]
+    assert visible_split.width() == viewer._page_metas[0]["width"]
+    assert visible_bottom.width() == viewer._page_metas[0]["width"]
+    assert visible_top.height() > 80
 
 
 def test_pdf_viewer_restores_scroll_anchor_when_split_above_changes_height() -> None:

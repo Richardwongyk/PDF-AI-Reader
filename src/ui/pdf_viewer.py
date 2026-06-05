@@ -537,12 +537,14 @@ class PdfViewer(QScrollArea):
     ) -> QWidget:
         """创建裁切图片 + 透明叠加层的段组件（始终渲染）。"""
         h = max(y1 - y0, 1)
-        dpr = pixmap.devicePixelRatio()
         segment_page = page_num if page_num is not None else self._segment_page_from_blocks(blocks)
+        pixmap.setDevicePixelRatio(self._screen_dpr)
+        dpr = max(float(pixmap.devicePixelRatio()), 1.0)
+        display_w = self._segment_display_width(pixmap, segment_page)
 
         if not blocks:
             w = QWidget()
-            w.setFixedSize(pixmap.width(), h)
+            w.setFixedSize(display_w, h)
             if segment_page is not None:
                 self._remember_widget_page(w, segment_page)
             return w
@@ -550,15 +552,16 @@ class PdfViewer(QScrollArea):
         # QPixmap.copy() 使用物理像素坐标；这是翻译裂缝的正确性路径。
         phys_y0 = int(y0 * dpr)
         phys_h = int(h * dpr)
-        cropped = pixmap.copy(0, phys_y0, int(pixmap.width() * dpr), phys_h)
+        cropped = pixmap.copy(0, phys_y0, pixmap.width(), phys_h)
         cropped.setDevicePixelRatio(dpr)
 
         w = QWidget()
-        w.setFixedSize(pixmap.width(), h)
+        w.setFixedSize(display_w, h)
         if segment_page is not None:
             self._remember_widget_page(w, segment_page)
         label = QLabel(w)
         label.setPixmap(cropped)
+        label.resize(display_w, h)
         label.move(0, 0)
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -581,6 +584,19 @@ class PdfViewer(QScrollArea):
 
     def _segment_page_from_blocks(self, blocks: list[DocumentBlock]) -> int | None:
         return blocks[0].page_num if blocks else None
+
+    def _segment_display_width(self, pixmap: QPixmap, page_num: int | None) -> int:
+        if page_num is not None:
+            meta = self._page_metas.get(page_num)
+            if meta is not None:
+                width = int(meta.get("width", 0) or 0)
+                if width > 0:
+                    return width
+        dpr = max(float(pixmap.devicePixelRatio()), 1.0)
+        return max(1, int(round(pixmap.width() / dpr)))
+
+    def _insert_page_content_widget(self, index: int, widget: QWidget) -> None:
+        self._layout.insertWidget(index, widget, 0, Qt.AlignmentFlag.AlignHCenter)
 
     # ── 文档加载 ──
 
@@ -865,7 +881,7 @@ class PdfViewer(QScrollArea):
                 self._precise_render_pending.discard(page_num)
             if not container.isVisible():
                 insert_idx = self._layout_index_for_page(page_num)
-                self._layout.insertWidget(insert_idx, container)
+                self._insert_page_content_widget(insert_idx, container)
                 container.show()
                 _logger.debug("PdfViewer: p%d 从池复用 → layout[%d]", page_num, insert_idx)
             self._page_containers[page_num] = container
@@ -890,7 +906,7 @@ class PdfViewer(QScrollArea):
                 break
 
         insert_idx = self._layout_index_for_page(page_num)
-        self._layout.insertWidget(insert_idx, container)
+        self._insert_page_content_widget(insert_idx, container)
         _logger.debug("PdfViewer: p%d 新 widget → layout[%d] (%dx%d)",
                      page_num, insert_idx, meta["width"], meta["height"])
         return container
@@ -1082,7 +1098,7 @@ class PdfViewer(QScrollArea):
                 continue
             current_idx = self._layout.indexOf(widget)
             if current_idx < 0:
-                self._layout.insertWidget(insert_idx, widget)
+                self._insert_page_content_widget(insert_idx, widget)
                 insert_idx += 1
             else:
                 insert_idx = current_idx + 1
@@ -1301,7 +1317,7 @@ class PdfViewer(QScrollArea):
             new_w = self._build_segment_widget(
                 pixmap, seg["y0"], seg["y1"], seg["blocks"], page_num=page_num)
             if idx >= 0:
-                self._layout.insertWidget(idx, new_w)
+                self._insert_page_content_widget(idx, new_w)
             else:
                 new_w.hide()
             seg["widget"] = new_w
@@ -1520,13 +1536,13 @@ class PdfViewer(QScrollArea):
 
         top_w = self._build_segment_widget(
             pixmap, seg["y0"], cut_y, above_blocks, page_num=page_num)
-        self._layout.insertWidget(old_idx, top_w)
+        self._insert_page_content_widget(old_idx, top_w)
 
-        self._layout.insertWidget(old_idx + 1, split)
+        self._insert_page_content_widget(old_idx + 1, split)
 
         bot_w = self._build_segment_widget(
             pixmap, cut_y, seg["y1"], below_blocks, page_num=page_num)
-        self._layout.insertWidget(old_idx + 2, bot_w)
+        self._insert_page_content_widget(old_idx + 2, bot_w)
 
         split.open(mode)
         self._splits[block_id] = split
@@ -1737,6 +1753,15 @@ class PdfViewer(QScrollArea):
     def _sync_scroll_range(self, viewport_h: int) -> None:
         self._sync_content_size(viewport_h)
 
+    def center_horizontally(self) -> None:
+        """Center PDF content in the current viewport while keeping horizontal scroll available."""
+        if self._vlayout is None:
+            return
+        self._sync_content_size(max(self.viewport().height(), 1))
+        hbar = self.horizontalScrollBar()
+        if hbar is not None and _isValid(hbar):
+            hbar.setValue(hbar.maximum() // 2)
+
     def _scroll_horizontally_to_pdf_x(self, x0: float, x1: float) -> None:
         hbar = self.horizontalScrollBar()
         if hbar is None or not _isValid(hbar):
@@ -1868,19 +1893,20 @@ class PdfViewer(QScrollArea):
                 if old_w is None:
                     continue
                 seg_h = max(seg["y1"] - seg["y0"], 1)
+                display_w = self._page_metas[pn]["width"]
                 for label in old_w.findChildren(QLabel):
                     if label.pixmap() and not label.pixmap().isNull():
                         old_pm = label.pixmap()
                         scaled = old_pm.scaled(
-                            self._page_metas[pn]["width"],
-                            seg_h,
+                            max(1, int(display_w * self._screen_dpr)),
+                            max(1, int(seg_h * self._screen_dpr)),
                             Qt.AspectRatioMode.IgnoreAspectRatio,
                             Qt.TransformationMode.FastTransformation,
                         )
                         scaled.setDevicePixelRatio(self._screen_dpr)
                         label.setPixmap(scaled)
-                        label.resize(self._page_metas[pn]["width"], seg_h)
-                old_w.setFixedSize(self._page_metas[pn]["width"], seg_h)
+                        label.resize(display_w, seg_h)
+                old_w.setFixedSize(display_w, seg_h)
                 self._refresh_segment_overlays(old_w, seg.get("blocks", []), seg["y0"], seg_h)
             # 异步渲染 → 完成后在 _on_page_rendered_async 中重建段
             self._pending_split_rerenders.add(pn)
@@ -1891,6 +1917,8 @@ class PdfViewer(QScrollArea):
 
         # 调整 spacer 高度
         self._adjust_spacers(self._active_pages)
+        self.center_horizontally()
+        QTimer.singleShot(50, self._center_horizontally_if_valid)
 
         # 恢复视口位置：保持缩放前视口中心的内容在同一位置（借鉴 SumatraPDF fixPt）
         if center_page is not None:
@@ -1901,6 +1929,10 @@ class PdfViewer(QScrollArea):
         elapsed = (time.perf_counter() - t0) * 1000
         _logger.info("PdfViewer: 缩放完成 (%.1fms, 即时显示 %d 页, 后台渲染 %d 页)",
                      elapsed, rerender_count, rerender_count)
+
+    def _center_horizontally_if_valid(self) -> None:
+        if _isValid(self):
+            self.center_horizontally()
 
     def _set_scroll_value_if_valid(self, value: int) -> None:
         """Set scrollbar value from delayed callbacks only while Qt objects are alive."""
@@ -2108,7 +2140,7 @@ class PdfViewer(QScrollArea):
                         self._forget_widget_page(nw)
                         pw.hide(); self._layout.removeWidget(pw); pw.deleteLater()
                         nw.hide(); self._layout.removeWidget(nw); nw.deleteLater()
-                        self._layout.insertWidget(idx_p, merged_w)
+                        self._insert_page_content_widget(idx_p, merged_w)
                         new_segs = segs[:i - 1] + [{
                             "y0": prev_seg["y0"], "y1": next_seg["y1"],
                             "y0_pt": prev_seg["y0"] / self._scale if self._scale else 0.0,
