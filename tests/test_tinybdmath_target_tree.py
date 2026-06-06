@@ -50,6 +50,30 @@ def test_target_tree_stores_parser_derived_identity_aliases() -> None:
     assert symbols[0].attrs["identity_aliases"] == ["⊆"]
 
 
+def test_target_tree_treats_mathchoice_as_layout_group_not_symbol_text() -> None:
+    source = "f " + chr(92) + "colon X " + chr(92) + "to Y"
+    result = TinyBDTargetTreeBuilder().build_from_latex(source, row_id="mathchoice")
+
+    assert result.target_tree is not None, result.warnings
+    assert "target_tree_unsupported_katex_type:mathchoice" not in result.warnings
+    assert not any(node.node_type == "symbol" and "[{" in node.value for node in result.target_tree.nodes)
+    assert any(node.node_type == "group" and node.attrs.get("role") == "mathchoice" for node in result.target_tree.nodes)
+
+
+def test_target_tree_uses_htmlmathml_layout_branch_with_mathml_identity_metadata() -> None:
+    source = "x " + chr(92) + "coloneqq y"
+    result = TinyBDTargetTreeBuilder().build_from_latex(source, row_id="htmlmathml")
+
+    assert result.target_tree is not None, result.warnings
+    assert "target_tree_unsupported_katex_type:htmlmathml" not in result.warnings
+    groups = [node for node in result.target_tree.nodes if node.node_type == "group" and node.attrs.get("role") == "htmlmathml"]
+    assert groups
+    assert groups[0].attrs["selected_branch"] == "html"
+    assert groups[0].attrs["mathml_text"]
+    assert ":" in result.target_tree.to_latex()
+    assert "=" in result.target_tree.to_latex()
+
+
 def test_target_tree_records_parser_summary_for_audit() -> None:
     result = TinyBDTargetTreeBuilder().build_from_latex(r"\sqrt{d_k}", row_id="summary")
     payload = result.to_json()
@@ -172,6 +196,19 @@ def test_target_tree_represents_operatorname_as_operator_text_run() -> None:
     assert operators
     assert operators[0].value == "foo"
     assert operators[0].attrs["operator"] is True
+
+
+def test_target_tree_represents_named_math_operators_as_operator_text_runs() -> None:
+    result = TinyBDTargetTreeBuilder().build_from_latex(r"\lim_x+\sin y", row_id="named-operators", display_mode=True)
+
+    assert result.target_tree is not None, result.warnings
+    operators = [
+        node
+        for node in result.target_tree.nodes
+        if node.node_type == "text_run" and node.attrs.get("katex_type") == "op"
+    ]
+    assert [node.value for node in operators] == ["lim", "sin"]
+    assert all(node.attrs["operator"] is True for node in operators)
 
 
 def test_target_tree_represents_line_annotations_as_accents() -> None:

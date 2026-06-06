@@ -17,3 +17,10 @@ def test_symbol_equivalence_uses_pdf_latex_identity_without_local_table() -> Non
     resolver = TinyBDSymbolEquivalence()
 
     assert resolver.equivalent("x", "", "x")
+
+
+def test_symbol_equivalence_uses_standard_unicode_latex_identity_resource() -> None:
+    resolver = TinyBDSymbolEquivalence()
+
+    assert resolver.equivalent(r"\cdot", "·", "", ("⋅",))
+    assert resolver.equivalent(r"\sqrt", "√")

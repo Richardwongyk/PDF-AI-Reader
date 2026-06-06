@@ -15,7 +15,7 @@ from src.core.tinybdmath_cslt_schema import CSLTBuilder, CSLTTree
 
 
 TARGET_TREE_SCHEMA_VERSION = "tinybdmath_target_tree_rows_v1"
-TARGET_TREE_BUILDER_VERSION = "tinybdmath_katex_to_cslt_v3"
+TARGET_TREE_BUILDER_VERSION = "tinybdmath_katex_to_cslt_v4"
 NONFATAL_EXTRACTION_WARNINGS = {
     "katex_display_alignment_wrapped",
     "katex_source_preprocessed",
@@ -251,6 +251,8 @@ class _KaTeXToCSLT:
             return self.builder.add_node("artifact", attrs={"reason": "non_object_node"})
         node_type = str(node.get("type", "") or "")
         if node_type in {"mathord", "textord", "atom", "op", "bin", "rel", "open", "close", "punct"}:
+            if node_type == "op" and _is_named_operator_node(node):
+                return self._named_operator_text_run(node)
             if node_type == "op" and not _symbol_text(node) and isinstance(node.get("body"), list):
                 return self._operator_body(node)
             text = _symbol_text(node)
@@ -291,6 +293,10 @@ class _KaTeXToCSLT:
             return self._color(node)
         if node_type == "font":
             return self._font(node)
+        if node_type == "mathchoice":
+            return self._mathchoice(node)
+        if node_type == "htmlmathml":
+            return self._htmlmathml(node)
         if node_type == "leftright":
             return self._fence(node)
         if node_type == "accent":
@@ -448,6 +454,35 @@ class _KaTeXToCSLT:
             self.warnings.add("target_tree_color_missing_body")
         return group
 
+    def _mathchoice(self, node: dict[str, Any]) -> str:
+        branch_name, branch = _mathchoice_branch(node)
+        if not branch:
+            return self.builder.add_node("artifact", attrs={"reason": "empty_mathchoice", "katex_type": "mathchoice"})
+        group = self.builder.add_node(
+            "group",
+            attrs={"role": "mathchoice", "katex_type": "mathchoice", "selected_branch": branch_name},
+        )
+        for index, child in enumerate(branch):
+            self.builder.add_edge(group, self.build_node(child), "child", order=index)
+        return group
+
+    def _htmlmathml(self, node: dict[str, Any]) -> str:
+        branch_name, branch = _htmlmathml_branch(node)
+        if not branch:
+            return self.builder.add_node("artifact", attrs={"reason": "empty_htmlmathml", "katex_type": "htmlmathml"})
+        attrs: dict[str, Any] = {
+            "role": "htmlmathml",
+            "katex_type": "htmlmathml",
+            "selected_branch": branch_name,
+        }
+        mathml_text = _node_text_content(node.get("mathml"))
+        if mathml_text:
+            attrs["mathml_text"] = mathml_text
+        group = self.builder.add_node("group", attrs=attrs)
+        for index, child in enumerate(branch):
+            self.builder.add_edge(group, self.build_node(child), "child", order=index)
+        return group
+
     def _operator_name(self, node: dict[str, Any]) -> str:
         value = _node_text_content(node.get("body"))
         self._consume_mathml_aliases(value)
@@ -462,6 +497,24 @@ class _KaTeXToCSLT:
             attrs["always_handle_supsub"] = bool(node.get("alwaysHandleSupSub"))
         if not value:
             self.warnings.add("target_tree_operatorname_empty_body")
+        return self.builder.add_node("text_run", value=value, attrs=attrs)
+
+    def _named_operator_text_run(self, node: dict[str, Any]) -> str:
+        name = str(node.get("name", "") or _symbol_text(node))
+        value = _operator_display_name(name)
+        self._consume_mathml_aliases(value)
+        attrs: dict[str, Any] = {
+            "katex_type": "op",
+            "mode": str(node.get("mode", "") or ""),
+            "operator": True,
+            "source_operator_name": name,
+        }
+        if "limits" in node:
+            attrs["limits"] = bool(node.get("limits"))
+        if "alwaysHandleSupSub" in node:
+            attrs["always_handle_supsub"] = bool(node.get("alwaysHandleSupSub"))
+        if "parentIsSupSub" in node:
+            attrs["parent_is_supsub"] = bool(node.get("parentIsSupSub"))
         return self.builder.add_node("text_run", value=value, attrs=attrs)
 
     def _operator_body(self, node: dict[str, Any]) -> str:
@@ -764,6 +817,38 @@ def _is_limits_script(node: dict[str, Any]) -> bool:
     return bool(base.get("limits") or base.get("alwaysHandleSupSub"))
 
 
+def _is_named_operator_node(node: dict[str, Any]) -> bool:
+    if bool(node.get("symbol")):
+        return False
+    name = str(node.get("name", "") or "")
+    if not name.startswith("\\"):
+        return False
+    return bool(_operator_display_name(name))
+
+
+def _operator_display_name(name: str) -> str:
+    value = str(name or "").strip()
+    if value.startswith("\\"):
+        value = value[1:]
+    return value
+
+
+def _mathchoice_branch(node: dict[str, Any]) -> tuple[str, list[Any]]:
+    for key in ("text", "display", "script", "scriptscript"):
+        value = node.get(key)
+        if isinstance(value, list) and value:
+            return key, value
+    return "", []
+
+
+def _htmlmathml_branch(node: dict[str, Any]) -> tuple[str, list[Any]]:
+    for key in ("html", "mathml", "body"):
+        value = node.get(key)
+        if isinstance(value, list) and value:
+            return key, value
+    return "", []
+
+
 def _genfrac_attrs(node: dict[str, Any]) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
     for key, output_key in (
@@ -814,9 +899,11 @@ def _array_tags(node: dict[str, Any]) -> list[Any]:
 
 def _symbol_text(node: dict[str, Any]) -> str:
     for key in ("text", "name", "value", "delim"):
-        value = str(node.get(key, "") or "")
-        if value:
+        value = node.get(key, "")
+        if isinstance(value, str) and value:
             return value
+        if isinstance(value, (int, float)):
+            return str(value)
     return ""
 
 

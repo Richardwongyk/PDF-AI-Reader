@@ -33,6 +33,8 @@ def main() -> int:
 def audit_alignment_rows(rows: list[dict[str, Any]], *, min_hard_row_rate: float = 0.70) -> dict[str, Any]:
     warnings: Counter[str] = Counter()
     relation_counts: Counter[str] = Counter()
+    structure_counts: Counter[str] = Counter()
+    vector_role_counts: Counter[str] = Counter()
     supervision_counts: Counter[str] = Counter()
     ignored_reasons: Counter[str] = Counter()
     unmatched_reasons: Counter[str] = Counter()
@@ -40,6 +42,11 @@ def audit_alignment_rows(rows: list[dict[str, Any]], *, min_hard_row_rate: float
     leaf_rates: list[float] = []
     rows_with_hard = 0
     rows_with_relation_labels = 0
+    rows_with_structure_labels = 0
+    rows_with_group_boundary = 0
+    rows_with_text_or_operator_run = 0
+    rows_with_vector_role = 0
+    rows_with_identity_evidence = 0
     top_failures: list[dict[str, Any]] = []
     for row in rows:
         row_warnings = [str(item) for item in row.get("warnings", []) if item]
@@ -56,6 +63,24 @@ def audit_alignment_rows(rows: list[dict[str, Any]], *, min_hard_row_rate: float
             rows_with_relation_labels += 1
         relation_counts.update(str(item.get("relation", "") or "") for item in labels)
         supervision_counts.update(str(item.get("supervision", "") or "") for item in labels)
+        structure_labels = [item for item in row.get("structure_labels", []) or [] if isinstance(item, dict)]
+        if structure_labels:
+            rows_with_structure_labels += 1
+        structure_roles = {str(item.get("role", "") or "") for item in structure_labels}
+        structure_counts.update(str(item.get("role", "") or "") for item in structure_labels)
+        vector_role_counts.update(
+            str(item.get("vector_role", "") or "")
+            for item in structure_labels
+            if str(item.get("role", "") or "") == "TARGET_VECTOR_ROLE_EVIDENCE"
+        )
+        if any("GROUP_BOUNDARY" in role for role in structure_roles):
+            rows_with_group_boundary += 1
+        if structure_roles.intersection({"TARGET_TEXT_RUN_EVIDENCE", "TARGET_OPERATOR_TEXT_RUN_EVIDENCE"}):
+            rows_with_text_or_operator_run += 1
+        if "TARGET_VECTOR_ROLE_EVIDENCE" in structure_roles:
+            rows_with_vector_role += 1
+        if "TARGET_IDENTITY_REPAIR_EVIDENCE" in structure_roles:
+            rows_with_identity_evidence += 1
         ignored_reasons.update(
             str(item.get("reason", "") or "")
             for item in row.get("ignored_pdf_nodes", []) or []
@@ -81,6 +106,7 @@ def audit_alignment_rows(rows: list[dict[str, Any]], *, min_hard_row_rate: float
     row_count = len(rows)
     hard_row_rate = rows_with_hard / row_count if row_count else 0.0
     relation_row_rate = rows_with_relation_labels / row_count if row_count else 0.0
+    structure_row_rate = rows_with_structure_labels / row_count if row_count else 0.0
     gate_failures: list[str] = []
     if row_count <= 0:
         gate_failures.append("no_alignment_rows")
@@ -93,12 +119,20 @@ def audit_alignment_rows(rows: list[dict[str, Any]], *, min_hard_row_rate: float
         "rows": row_count,
         "rows_with_hard_alignment": rows_with_hard,
         "rows_with_relation_labels": rows_with_relation_labels,
+        "rows_with_structure_labels": rows_with_structure_labels,
+        "rows_with_group_boundary": rows_with_group_boundary,
+        "rows_with_text_or_operator_run": rows_with_text_or_operator_run,
+        "rows_with_vector_role": rows_with_vector_role,
+        "rows_with_identity_evidence": rows_with_identity_evidence,
         "hard_row_rate": round(hard_row_rate, 6),
         "relation_row_rate": round(relation_row_rate, 6),
+        "structure_row_rate": round(structure_row_rate, 6),
         "avg_hard_alignment_rate": round(sum(hard_rates) / row_count, 6) if row_count else 0.0,
         "avg_leaf_alignment_rate": round(sum(leaf_rates) / row_count, 6) if row_count else 0.0,
         "warnings": dict(sorted(warnings.items())),
         "relation_counts": dict(sorted(relation_counts.items())),
+        "structure_counts": dict(sorted(structure_counts.items())),
+        "vector_role_counts": dict(sorted(vector_role_counts.items())),
         "supervision_counts": dict(sorted(supervision_counts.items())),
         "ignored_reasons": dict(sorted(ignored_reasons.items())),
         "unmatched_reasons": dict(sorted(unmatched_reasons.items())),

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.core.tinybdmath_target_tree import TinyBDTargetTreeBuilder
+from src.core.tinybdmath_target_tree import TARGET_TREE_BUILDER_VERSION, TinyBDTargetTreeBuilder
 
 
 def main() -> int:
@@ -54,7 +54,7 @@ def main() -> int:
                 )
     manifest = {
         "schema_version": "tinybdmath_target_tree_manifest_v1",
-        "builder_version": "tinybdmath_katex_to_cslt_v3",
+        "builder_version": TARGET_TREE_BUILDER_VERSION,
         "rows": rows,
         "success_rows": success_rows,
         "failed_rows": rows - success_rows,

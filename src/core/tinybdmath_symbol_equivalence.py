@@ -10,6 +10,8 @@ from __future__ import annotations
 from functools import lru_cache
 import unicodedata
 
+from src.core.symbol_identity_repair import latex_for_unicode_text
+
 
 class TinyBDSymbolEquivalence:
     """Resolve target/PDF symbol equality from existing identity evidence."""
@@ -48,6 +50,10 @@ def _basic_keys(value: str) -> set[str]:
     folded = normalized.casefold()
     if folded:
         keys.add(folded)
+    latex = _canonical_text(latex_for_unicode_text(normalized))
+    if latex and latex != normalized:
+        keys.add(latex)
+        keys.add(latex.casefold())
     return keys
 
 

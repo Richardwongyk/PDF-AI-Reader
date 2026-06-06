@@ -14,7 +14,7 @@ from src.core.tinybdmath_cslt_schema import CSLTEdge, CSLTNode, CSLTTree, cslt_f
 
 
 ALIGNMENT_SCHEMA_VERSION = "tinybdmath_alignment_v1"
-ALIGNMENT_BUILDER_VERSION = "tinybdmath_pdf_graph_to_cslt_alignment_m1"
+ALIGNMENT_BUILDER_VERSION = "tinybdmath_pdf_graph_to_cslt_alignment_m2"
 
 SEMANTIC_NODE_TYPES = {"symbol", "text_run"}
 STRUCTURE_RELATION_TO_LABEL = {
@@ -54,6 +54,11 @@ class TinyBDNodeAlignment:
     target_value: str = ""
     target_latex: str = ""
     target_attrs: dict[str, Any] = field(default_factory=dict)
+    pdf_text: str = ""
+    pdf_latex: str = ""
+    pdf_font: str = ""
+    pdf_bbox: list[float] = field(default_factory=list)
+    identity_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,6 +116,7 @@ class TinyBDAlignmentBuilder:
             return _empty_result(row_id, graph_row, target_row, "missing_target_tree")
         tree = cslt_from_json(target_payload)
         pdf_nodes = _pdf_nodes(graph_row)
+        vector_nodes = _pdf_vector_nodes(graph_row)
         target_leaves = _target_leaf_units(tree)
         node_alignments, used_pdf_ids, used_target_ids, warnings = _align_leaf_units(pdf_nodes, target_leaves)
         ignored_pdf_nodes = tuple(
@@ -132,7 +138,7 @@ class TinyBDAlignmentBuilder:
             for leaf in target_leaves
             if leaf.key not in used_target_ids
         )
-        structure_labels = _structure_labels(tree, node_alignments)
+        structure_labels = _structure_labels(tree, node_alignments, vector_nodes=vector_nodes)
         relation_labels = _relation_labels(tree, node_alignments)
         stats = _stats(
             pdf_nodes,
@@ -177,7 +183,12 @@ class TinyBDAlignmentBuilder:
         warnings: Counter[str] = Counter()
         relation_counts: Counter[str] = Counter()
         structure_counts: Counter[str] = Counter()
+        vector_role_counts: Counter[str] = Counter()
         hard_rates: list[float] = []
+        rows_with_group_boundary = 0
+        rows_with_text_or_operator_run = 0
+        rows_with_vector_role = 0
+        rows_with_identity_evidence = 0
         for graph_row in graph_rows:
             row_id = str(graph_row.get("row_id", "") or "")
             target_row = targets_by_row_id.get(row_id)
@@ -189,7 +200,22 @@ class TinyBDAlignmentBuilder:
             output.append(payload)
             warnings.update(str(item) for item in result.warnings if item)
             relation_counts.update(str(item.get("relation", "")) for item in payload.get("relation_labels", []) if item)
-            structure_counts.update(str(item.get("role", "")) for item in payload.get("structure_labels", []) if item)
+            structure_labels = [item for item in payload.get("structure_labels", []) if isinstance(item, dict)]
+            structure_counts.update(str(item.get("role", "")) for item in structure_labels if item)
+            vector_role_counts.update(
+                str(item.get("vector_role", "") or "")
+                for item in structure_labels
+                if str(item.get("role", "") or "") == "TARGET_VECTOR_ROLE_EVIDENCE"
+            )
+            structure_roles = {str(item.get("role", "") or "") for item in structure_labels}
+            if any("GROUP_BOUNDARY" in role for role in structure_roles):
+                rows_with_group_boundary += 1
+            if structure_roles.intersection({"TARGET_TEXT_RUN_EVIDENCE", "TARGET_OPERATOR_TEXT_RUN_EVIDENCE"}):
+                rows_with_text_or_operator_run += 1
+            if "TARGET_VECTOR_ROLE_EVIDENCE" in structure_roles:
+                rows_with_vector_role += 1
+            if "TARGET_IDENTITY_REPAIR_EVIDENCE" in structure_roles:
+                rows_with_identity_evidence += 1
             hard_rates.append(float(payload.get("stats", {}).get("hard_alignment_rate", 0.0)))
         manifest = {
             "schema_version": "tinybdmath_alignment_manifest_v1",
@@ -197,10 +223,15 @@ class TinyBDAlignmentBuilder:
             "rows": len(output),
             "rows_with_hard_labels": sum(1 for item in output if item.get("relation_labels")),
             "rows_with_structure_labels": sum(1 for item in output if item.get("structure_labels")),
+            "rows_with_group_boundary": rows_with_group_boundary,
+            "rows_with_text_or_operator_run": rows_with_text_or_operator_run,
+            "rows_with_vector_role": rows_with_vector_role,
+            "rows_with_identity_evidence": rows_with_identity_evidence,
             "avg_hard_alignment_rate": round(sum(hard_rates) / len(hard_rates), 6) if hard_rates else 0.0,
             "warnings": dict(sorted(warnings.items())),
             "relation_counts": dict(sorted(relation_counts.items())),
             "structure_counts": dict(sorted(structure_counts.items())),
+            "vector_role_counts": dict(sorted(vector_role_counts.items())),
             "notes": [
                 "Alignment labels are training/audit supervision.",
                 "Low-confidence or unmatched nodes are ignore labels, not decoder repairs.",
@@ -239,6 +270,28 @@ def _pdf_nodes(row: dict[str, Any]) -> list[dict[str, Any]]:
                 "bbox": [float(value or 0.0) for value in bbox],
                 "font": str(item.get("font", "") or ""),
                 "is_math_font": bool(item.get("is_math_font", False)),
+            }
+        )
+    return sorted(nodes, key=lambda item: (float(item["bbox"][0]), float(item["bbox"][1]), str(item["node_id"])))
+
+
+def _pdf_vector_nodes(row: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for index, item in enumerate(row.get("vector_nodes", []) or []):
+        if not isinstance(item, dict):
+            continue
+        node_id = str(item.get("node_id", "") or f"v{index:04d}")
+        bbox = item.get("bbox", [0.0, 0.0, 0.0, 0.0])
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            bbox = [0.0, 0.0, 0.0, 0.0]
+        nodes.append(
+            {
+                "node_id": node_id,
+                "node_type": "vector",
+                "bbox": [float(value or 0.0) for value in bbox],
+                "vector_type": str(item.get("vector_type", "") or item.get("type", "") or item.get("kind", "") or "vector"),
+                "is_horizontal_rule_candidate": bool(item.get("is_horizontal_rule_candidate", False)),
+                "is_vertical_rule_candidate": bool(item.get("is_vertical_rule_candidate", False)),
             }
         )
     return sorted(nodes, key=lambda item: (float(item["bbox"][0]), float(item["bbox"][1]), str(item["node_id"])))
@@ -320,6 +373,14 @@ def _align_leaf_units(
         if best_index < 0 or best_score < 0.45:
             continue
         pdf_node = pdf_nodes[best_index]
+        pdf_text = str(pdf_node.get("text", "") or "")
+        pdf_latex = str(pdf_node.get("latex", "") or "")
+        identity_evidence = _alignment_identity_evidence(
+            target_text,
+            pdf_text,
+            pdf_latex,
+            leaf.aliases,
+        )
         confidence = round(max(0.0, min(1.0, best_score)), 6)
         label = "hard" if confidence >= 0.90 else "soft"
         alignments.append(
@@ -334,6 +395,11 @@ def _align_leaf_units(
                 target_value=leaf.node.value,
                 target_latex=leaf.node.latex,
                 target_attrs=dict(leaf.node.attrs or {}),
+                pdf_text=pdf_text,
+                pdf_latex=pdf_latex,
+                pdf_font=str(pdf_node.get("font", "") or ""),
+                pdf_bbox=list(pdf_node.get("bbox", []) or []),
+                identity_evidence=identity_evidence,
             )
         )
         used_pdf_ids.add(str(pdf_node["node_id"]))
@@ -376,13 +442,20 @@ def _relation_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment])
     return _dedupe_relation_labels(labels)
 
 
-def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]) -> list[dict[str, Any]]:
+def _structure_labels(
+    tree: CSLTTree,
+    node_alignments: list[TinyBDNodeAlignment],
+    *,
+    vector_nodes: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     pdf_by_target: defaultdict[str, list[TinyBDNodeAlignment]] = defaultdict(list)
     for item in node_alignments:
         if item.label in {"hard", "soft"}:
             pdf_by_target[item.target_node_id].append(item)
     leaves_by_subtree = _aligned_leaves_by_subtree(tree, pdf_by_target)
     labels: list[dict[str, Any]] = []
+    labels.extend(_identity_structure_labels(node_alignments))
+    labels.extend(_group_boundary_structure_labels(tree, leaves_by_subtree))
     for node in tree.nodes:
         if node.node_type == "text_run":
             text_run = _ordered_alignments_for_target(node_alignments, node.node_id)
@@ -497,22 +570,40 @@ def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]
                 )
         elif node.node_type == "matrix":
             labels.extend(_matrix_structure_labels(tree, node.node_id, leaves_by_subtree))
-        elif node.node_type == "group" and str(node.attrs.get("role", "") or "") == "enclosure":
-            body = [
-                item
-                for item in _structure_child_leaves(tree, node.node_id, "child", leaves_by_subtree)
-                if item.target_node_type != "artifact"
-            ]
-            if body:
-                labels.append(
-                    {
-                        "target_node_id": node.node_id,
-                        "role": "TARGET_ENCLOSURE_EVIDENCE",
-                        "body_pdf_node_ids": _pdf_ids(body),
-                        "confidence": _structure_confidence(body),
-                        "supervision": _structure_supervision(body),
-                    }
-                )
+        elif node.node_type == "group":
+            group_role = str(node.attrs.get("role", "") or "")
+            if group_role == "operator_body":
+                operator_run = [
+                    item
+                    for item in leaves_by_subtree.get(node.node_id, [])
+                    if item.target_node_type != "artifact"
+                ]
+                if operator_run:
+                    labels.append(
+                        {
+                            "target_node_id": node.node_id,
+                            "role": "TARGET_OPERATOR_TEXT_RUN_EVIDENCE",
+                            "text_pdf_node_ids": _ordered_pdf_ids(operator_run),
+                            "confidence": _structure_confidence(operator_run),
+                            "supervision": _structure_supervision(operator_run),
+                        }
+                    )
+            if group_role == "enclosure":
+                body = [
+                    item
+                    for item in _structure_child_leaves(tree, node.node_id, "child", leaves_by_subtree)
+                    if item.target_node_type != "artifact"
+                ]
+                if body:
+                    labels.append(
+                        {
+                            "target_node_id": node.node_id,
+                            "role": "TARGET_ENCLOSURE_EVIDENCE",
+                            "body_pdf_node_ids": _pdf_ids(body),
+                            "confidence": _structure_confidence(body),
+                            "supervision": _structure_supervision(body),
+                        }
+                    )
         elif node.node_type == "equation_number":
             tag = leaves_by_subtree.get(node.node_id, [])
             if tag:
@@ -525,6 +616,7 @@ def _structure_labels(tree: CSLTTree, node_alignments: list[TinyBDNodeAlignment]
                         "supervision": _structure_supervision(tag),
                     }
                 )
+    labels.extend(_vector_role_structure_labels(vector_nodes or [], labels, node_alignments))
     return labels
 
 
@@ -578,6 +670,539 @@ def _matrix_structure_labels(
     return labels
 
 
+def _vector_role_structure_labels(
+    vector_nodes: list[dict[str, Any]],
+    structure_labels: list[dict[str, Any]],
+    node_alignments: list[TinyBDNodeAlignment],
+) -> list[dict[str, Any]]:
+    labels: list[dict[str, Any]] = []
+    bbox_by_id = {
+        item.pdf_node_id: list(item.pdf_bbox)
+        for item in node_alignments
+        if item.pdf_node_id and isinstance(item.pdf_bbox, list) and len(item.pdf_bbox) == 4
+    }
+    for node in vector_nodes:
+        role, confidence = _generic_vector_role(node)
+        labels.append(
+            {
+                "target_node_id": "",
+                "role": "TARGET_VECTOR_ROLE_EVIDENCE",
+                "vector_pdf_node_id": str(node.get("node_id", "") or ""),
+                "vector_role": role,
+                "vector_type": str(node.get("vector_type", "") or ""),
+                "bbox": list(node.get("bbox", [0.0, 0.0, 0.0, 0.0])),
+                "confidence": confidence,
+                "supervision": "pdf_evidence",
+            }
+        )
+    for item in structure_labels:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "") or "")
+        target_node_id = str(item.get("target_node_id", "") or "")
+        confidence = float(item.get("confidence", 1.0) or 1.0)
+        if role == "TARGET_FRACTION_SEPARATOR_EVIDENCE":
+            above = _bbox_for_pdf_ids(item.get("above_pdf_node_ids", []), bbox_by_id)
+            below = _bbox_for_pdf_ids(item.get("below_pdf_node_ids", []), bbox_by_id)
+            vector, score = _best_vector_role_match(
+                vector_nodes,
+                lambda candidate: _fraction_vector_role_score(candidate, above, below),
+            )
+            if score >= 0.45:
+                labels.append(
+                    _target_vector_role_label(
+                        vector,
+                        "FRACTION_BAR",
+                        target_node_id=target_node_id,
+                        related_structure_role=role,
+                        confidence=score * confidence,
+                    )
+                )
+        elif role == "TARGET_RADICAL_MARK_EVIDENCE":
+            body = _bbox_for_pdf_ids(item.get("body_pdf_node_ids", []), bbox_by_id)
+            vector, score = _best_vector_role_match(
+                vector_nodes,
+                lambda candidate: _radical_vector_role_score(candidate, body),
+            )
+            if score >= 0.45:
+                labels.append(
+                    _target_vector_role_label(
+                        vector,
+                        "RADICAL_MARK",
+                        target_node_id=target_node_id,
+                        related_structure_role=role,
+                        confidence=score * confidence,
+                    )
+                )
+        elif role == "TARGET_ACCENT_ANNOTATION_EVIDENCE":
+            base = _bbox_for_pdf_ids(item.get("base_pdf_node_ids", []), bbox_by_id)
+            position = str(item.get("annotation_position", "") or "")
+            vector_role = {"over": "OVERLINE", "under": "UNDERLINE"}.get(position)
+            if vector_role is None:
+                continue
+            vector, score = _best_vector_role_match(
+                vector_nodes,
+                lambda candidate: _annotation_vector_role_score(candidate, base, position=position),
+            )
+            if score >= 0.45:
+                labels.append(
+                    _target_vector_role_label(
+                        vector,
+                        vector_role,
+                        target_node_id=target_node_id,
+                        related_structure_role=role,
+                        confidence=score * confidence,
+                    )
+                )
+        elif role == "TARGET_ENCLOSURE_EVIDENCE":
+            body = _bbox_for_pdf_ids(item.get("body_pdf_node_ids", []), bbox_by_id)
+            vector, score = _best_vector_role_match(
+                vector_nodes,
+                lambda candidate: _enclosure_vector_role_score(candidate, body),
+            )
+            if score >= 0.35:
+                labels.append(
+                    _target_vector_role_label(
+                        vector,
+                        "ENCLOSURE_RULE",
+                        target_node_id=target_node_id,
+                        related_structure_role=role,
+                        confidence=score * confidence,
+                    )
+                )
+        elif role == "TARGET_FENCE_EVIDENCE":
+            body = _bbox_for_pdf_ids(item.get("body_pdf_node_ids", []), bbox_by_id)
+            vector, score = _best_vector_role_match(
+                vector_nodes,
+                lambda candidate: _fence_vector_role_score(candidate, body),
+            )
+            if score >= 0.45:
+                labels.append(
+                    _target_vector_role_label(
+                        vector,
+                        "FENCE_DELIMITER",
+                        target_node_id=target_node_id,
+                        related_structure_role=role,
+                        confidence=score * confidence,
+                    )
+                )
+        elif role == "TARGET_MATRIX_GRID_EVIDENCE":
+            matrix = _bbox_for_pdf_ids(item.get("matrix_pdf_node_ids", []), bbox_by_id)
+            vector, score = _best_vector_role_match(
+                vector_nodes,
+                lambda candidate: _matrix_border_vector_role_score(candidate, matrix),
+            )
+            if score >= 0.45:
+                labels.append(
+                    _target_vector_role_label(
+                        vector,
+                        "MATRIX_BORDER",
+                        target_node_id=target_node_id,
+                        related_structure_role=role,
+                        confidence=score * confidence,
+                    )
+                )
+    return _dedupe_vector_role_labels(labels)
+
+
+def _target_vector_role_label(
+    vector_node: dict[str, Any],
+    vector_role: str,
+    *,
+    target_node_id: str,
+    related_structure_role: str,
+    confidence: float,
+) -> dict[str, Any]:
+    return {
+        "target_node_id": target_node_id,
+        "role": "TARGET_VECTOR_ROLE_EVIDENCE",
+        "vector_pdf_node_id": str(vector_node.get("node_id", "") or ""),
+        "vector_role": vector_role,
+        "related_structure_role": related_structure_role,
+        "vector_type": str(vector_node.get("vector_type", "") or ""),
+        "bbox": list(vector_node.get("bbox", [0.0, 0.0, 0.0, 0.0])),
+        "confidence": round(max(0.0, min(1.0, float(confidence))), 6),
+        "supervision": "target_pdf_evidence",
+    }
+
+
+def _dedupe_vector_role_labels(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    best: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for item in labels:
+        key = (
+            str(item.get("target_node_id", "") or ""),
+            str(item.get("vector_pdf_node_id", "") or ""),
+            str(item.get("vector_role", "") or ""),
+            str(item.get("related_structure_role", "") or ""),
+        )
+        current = best.get(key)
+        if current is None or float(item.get("confidence", 0.0) or 0.0) > float(current.get("confidence", 0.0) or 0.0):
+            best[key] = item
+    return sorted(
+        best.values(),
+        key=lambda item: (
+            str(item.get("vector_pdf_node_id", "") or ""),
+            str(item.get("target_node_id", "") or ""),
+            str(item.get("vector_role", "") or ""),
+            str(item.get("related_structure_role", "") or ""),
+        ),
+    )
+
+
+def _bbox_for_pdf_ids(ids: Any, bbox_by_id: dict[str, list[float]]) -> list[float] | None:
+    boxes = [
+        bbox_by_id[str(item)]
+        for item in ids
+        if str(item) in bbox_by_id and len(bbox_by_id[str(item)]) == 4
+    ] if isinstance(ids, (list, tuple, set)) else []
+    if not boxes:
+        return None
+    return [
+        min(float(box[0]) for box in boxes),
+        min(float(box[1]) for box in boxes),
+        max(float(box[2]) for box in boxes),
+        max(float(box[3]) for box in boxes),
+    ]
+
+
+def _best_vector_role_match(
+    vector_nodes: list[dict[str, Any]],
+    score_fn: Any,
+) -> tuple[dict[str, Any], float]:
+    best_node: dict[str, Any] = {}
+    best_score = 0.0
+    for node in vector_nodes:
+        score = float(score_fn(node) or 0.0)
+        if score > best_score:
+            best_node = node
+            best_score = score
+    return best_node, round(max(0.0, min(1.0, best_score)), 6)
+
+
+def _fraction_vector_role_score(
+    vector: dict[str, Any],
+    above: list[float] | None,
+    below: list[float] | None,
+) -> float:
+    if above is None or below is None or not _is_horizontal_vector_bbox(vector):
+        return 0.0
+    vector_box = _bbox(vector)
+    union_x0 = min(float(above[0]), float(below[0]))
+    union_x1 = max(float(above[2]), float(below[2]))
+    union_width = max(1e-6, union_x1 - union_x0)
+    x_overlap = _overlap(vector_box[0], vector_box[2], union_x0, union_x1) / union_width
+    above_bottom = float(above[3])
+    below_top = float(below[1])
+    center_y = (vector_box[1] + vector_box[3]) / 2.0
+    midpoint = (above_bottom + below_top) / 2.0
+    gap = max(1.0, abs(below_top - above_bottom), _bbox_height(above), _bbox_height(below))
+    between = 1.0 if min(above_bottom, below_top) - gap <= center_y <= max(above_bottom, below_top) + gap else 0.0
+    midpoint_score = max(0.0, 1.0 - (abs(center_y - midpoint) / gap))
+    return (0.45 * _horizontal_shape_score(vector_box)) + (0.35 * x_overlap) + (0.20 * max(between, midpoint_score))
+
+
+def _radical_vector_role_score(vector: dict[str, Any], body: list[float] | None) -> float:
+    if body is None or not _is_horizontal_vector_bbox(vector):
+        return 0.0
+    vector_box = _bbox(vector)
+    x_overlap = _overlap(vector_box[0], vector_box[2], float(body[0]), float(body[2])) / max(1e-6, _bbox_width(body))
+    center_y = (vector_box[1] + vector_box[3]) / 2.0
+    top_distance = abs(center_y - float(body[1])) / max(1.0, _bbox_height(body))
+    y_score = max(0.0, 1.0 - top_distance)
+    return (0.45 * _horizontal_shape_score(vector_box)) + (0.35 * x_overlap) + (0.20 * y_score)
+
+
+def _annotation_vector_role_score(
+    vector: dict[str, Any],
+    body: list[float] | None,
+    *,
+    position: str,
+) -> float:
+    if body is None or not _is_horizontal_vector_bbox(vector):
+        return 0.0
+    vector_box = _bbox(vector)
+    x_overlap = _overlap(vector_box[0], vector_box[2], float(body[0]), float(body[2])) / max(1e-6, _bbox_width(body))
+    center_y = (vector_box[1] + vector_box[3]) / 2.0
+    reference_y = float(body[1]) if position == "over" else float(body[3])
+    y_score = max(0.0, 1.0 - (abs(center_y - reference_y) / max(1.0, _bbox_height(body))))
+    return (0.45 * _horizontal_shape_score(vector_box)) + (0.35 * x_overlap) + (0.20 * y_score)
+
+
+def _enclosure_vector_role_score(vector: dict[str, Any], body: list[float] | None) -> float:
+    if body is None:
+        return 0.0
+    vector_box = _bbox(vector)
+    horizontal = _horizontal_shape_score(vector_box)
+    vertical = _vertical_shape_score(vector_box)
+    if max(horizontal, vertical) <= 0.0:
+        return 0.0
+    body_width = max(1.0, _bbox_width(body))
+    body_height = max(1.0, _bbox_height(body))
+    if horizontal >= vertical:
+        span = _overlap(vector_box[0], vector_box[2], float(body[0]), float(body[2])) / body_width
+        edge_distance = min(abs(vector_box[1] - float(body[1])), abs(vector_box[1] - float(body[3]))) / body_height
+    else:
+        span = _overlap(vector_box[1], vector_box[3], float(body[1]), float(body[3])) / body_height
+        edge_distance = min(abs(vector_box[0] - float(body[0])), abs(vector_box[0] - float(body[2]))) / body_width
+    proximity = max(0.0, 1.0 - edge_distance)
+    return (0.40 * max(horizontal, vertical)) + (0.35 * span) + (0.25 * proximity)
+
+
+def _fence_vector_role_score(vector: dict[str, Any], body: list[float] | None) -> float:
+    if body is None or not _is_vertical_vector_bbox(vector):
+        return 0.0
+    vector_box = _bbox(vector)
+    y_overlap = _overlap(vector_box[1], vector_box[3], float(body[1]), float(body[3])) / max(1e-6, _bbox_height(body))
+    center_x = (vector_box[0] + vector_box[2]) / 2.0
+    x_distance = min(abs(center_x - float(body[0])), abs(center_x - float(body[2]))) / max(1.0, _bbox_width(body))
+    proximity = max(0.0, 1.0 - x_distance)
+    return (0.45 * _vertical_shape_score(vector_box)) + (0.35 * y_overlap) + (0.20 * proximity)
+
+
+def _matrix_border_vector_role_score(vector: dict[str, Any], matrix: list[float] | None) -> float:
+    if matrix is None:
+        return 0.0
+    vector_box = _bbox(vector)
+    horizontal = _horizontal_shape_score(vector_box)
+    vertical = _vertical_shape_score(vector_box)
+    if max(horizontal, vertical) <= 0.0:
+        return 0.0
+    if horizontal >= vertical:
+        span = _overlap(vector_box[0], vector_box[2], float(matrix[0]), float(matrix[2])) / max(1e-6, _bbox_width(matrix))
+        edge_distance = min(abs(vector_box[1] - float(matrix[1])), abs(vector_box[1] - float(matrix[3]))) / max(1.0, _bbox_height(matrix))
+        orientation = horizontal
+    else:
+        span = _overlap(vector_box[1], vector_box[3], float(matrix[1]), float(matrix[3])) / max(1e-6, _bbox_height(matrix))
+        edge_distance = min(abs(vector_box[0] - float(matrix[0])), abs(vector_box[0] - float(matrix[2]))) / max(1.0, _bbox_width(matrix))
+        orientation = vertical
+    proximity = max(0.0, 1.0 - edge_distance)
+    return (0.40 * orientation) + (0.35 * span) + (0.25 * proximity)
+
+
+def _bbox(vector: dict[str, Any]) -> list[float]:
+    bbox = vector.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return [0.0, 0.0, 0.0, 0.0]
+    return [float(value or 0.0) for value in bbox]
+
+
+def _bbox_width(bbox: list[float]) -> float:
+    return max(0.0, float(bbox[2]) - float(bbox[0]))
+
+
+def _bbox_height(bbox: list[float]) -> float:
+    return max(0.0, float(bbox[3]) - float(bbox[1]))
+
+
+def _is_horizontal_vector_bbox(vector: dict[str, Any]) -> bool:
+    return _horizontal_shape_score(_bbox(vector)) > 0.0
+
+
+def _is_vertical_vector_bbox(vector: dict[str, Any]) -> bool:
+    return _vertical_shape_score(_bbox(vector)) > 0.0
+
+
+def _horizontal_shape_score(bbox: list[float]) -> float:
+    width = _bbox_width(bbox)
+    height = _bbox_height(bbox)
+    if width <= 0.0:
+        return 0.0
+    aspect = width / max(height, 1e-6)
+    return max(0.0, min(1.0, aspect / 6.0))
+
+
+def _vertical_shape_score(bbox: list[float]) -> float:
+    width = _bbox_width(bbox)
+    height = _bbox_height(bbox)
+    if height <= 0.0:
+        return 0.0
+    aspect = height / max(width, 1e-6)
+    return max(0.0, min(1.0, aspect / 6.0))
+
+
+def _overlap(first0: float, first1: float, second0: float, second1: float) -> float:
+    return max(0.0, min(float(first1), float(second1)) - max(float(first0), float(second0)))
+
+
+def _identity_structure_labels(node_alignments: list[TinyBDNodeAlignment]) -> list[dict[str, Any]]:
+    labels: list[dict[str, Any]] = []
+    for item in node_alignments:
+        evidence = item.identity_evidence if isinstance(item.identity_evidence, dict) else {}
+        if not evidence.get("evidence_sources"):
+            continue
+        labels.append(
+            {
+                "target_node_id": item.target_node_id,
+                "role": "TARGET_IDENTITY_REPAIR_EVIDENCE",
+                "pdf_node_id": item.pdf_node_id,
+                "target_node_type": item.target_node_type,
+                "target_value": item.target_value,
+                "target_latex": item.target_latex,
+                "pdf_text": item.pdf_text,
+                "pdf_latex": item.pdf_latex,
+                "evidence_sources": list(evidence.get("evidence_sources", [])),
+                "requires_repair": bool(evidence.get("requires_repair", False)),
+                "target_aliases": list(evidence.get("target_aliases", [])),
+                "confidence": item.confidence,
+                "supervision": item.label,
+            }
+        )
+    return labels
+
+
+def _group_boundary_structure_labels(
+    tree: CSLTTree,
+    leaves_by_subtree: dict[str, list[TinyBDNodeAlignment]],
+) -> list[dict[str, Any]]:
+    labels: list[dict[str, Any]] = []
+    for node in tree.nodes:
+        if node.node_type == "group":
+            group_role = str(node.attrs.get("role", "") or "")
+            members = [
+                item
+                for item in leaves_by_subtree.get(node.node_id, [])
+                if item.target_node_type != "artifact"
+            ]
+            if members and group_role != "root":
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_GROUP_BOUNDARY_EVIDENCE",
+                        "group_kind": group_role or "group",
+                        "member_pdf_node_ids": _ordered_pdf_ids(members),
+                        "first_pdf_node_id": _ordered_pdf_ids(members)[0],
+                        "last_pdf_node_id": _ordered_pdf_ids(members)[-1],
+                        "confidence": _structure_confidence(members),
+                        "supervision": _structure_supervision(members),
+                    }
+                )
+        elif node.node_type == "script":
+            labels.extend(_script_group_boundary_labels(tree, node.node_id, leaves_by_subtree))
+        elif node.node_type == "fraction":
+            numerator = _structure_child_leaves(tree, node.node_id, "numerator", leaves_by_subtree)
+            denominator = _structure_child_leaves(tree, node.node_id, "denominator", leaves_by_subtree)
+            observed = numerator + denominator
+            if numerator or denominator:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_FRACTION_GROUP_BOUNDARY_EVIDENCE",
+                        "numerator_pdf_node_ids": _ordered_pdf_ids(numerator),
+                        "denominator_pdf_node_ids": _ordered_pdf_ids(denominator),
+                        "confidence": _structure_confidence(observed),
+                        "supervision": _structure_supervision(observed),
+                    }
+                )
+        elif node.node_type == "radical":
+            body = _structure_child_leaves(tree, node.node_id, "radical_body", leaves_by_subtree)
+            index = _structure_child_leaves(tree, node.node_id, "radical_index", leaves_by_subtree)
+            radical_marks = [
+                item
+                for item in leaves_by_subtree.get(node.node_id, [])
+                if item.target_node_id == node.node_id
+            ]
+            observed = body + index + radical_marks
+            if body or index:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_RADICAL_GROUP_BOUNDARY_EVIDENCE",
+                        "body_pdf_node_ids": _ordered_pdf_ids(body),
+                        "index_pdf_node_ids": _ordered_pdf_ids(index),
+                        "mark_pdf_node_ids": _ordered_pdf_ids(radical_marks),
+                        "confidence": _structure_confidence(observed),
+                        "supervision": _structure_supervision(observed),
+                    }
+                )
+        elif node.node_type == "fence":
+            body = _structure_child_leaves(tree, node.node_id, "fence_body", leaves_by_subtree)
+            open_delimiter = _structure_child_leaves(tree, node.node_id, "fence_open", leaves_by_subtree)
+            close_delimiter = _structure_child_leaves(tree, node.node_id, "fence_close", leaves_by_subtree)
+            observed = body + open_delimiter + close_delimiter
+            if body:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_FENCE_GROUP_BOUNDARY_EVIDENCE",
+                        "body_pdf_node_ids": _ordered_pdf_ids(body),
+                        "open_pdf_node_ids": _ordered_pdf_ids(open_delimiter),
+                        "close_pdf_node_ids": _ordered_pdf_ids(close_delimiter),
+                        "confidence": _structure_confidence(observed),
+                        "supervision": _structure_supervision(observed),
+                    }
+                )
+        elif node.node_type == "matrix":
+            members = leaves_by_subtree.get(node.node_id, [])
+            if members:
+                labels.append(
+                    {
+                        "target_node_id": node.node_id,
+                        "role": "TARGET_MATRIX_GROUP_BOUNDARY_EVIDENCE",
+                        "matrix_pdf_node_ids": _ordered_pdf_ids(members),
+                        "confidence": _structure_confidence(members),
+                        "supervision": _structure_supervision(members),
+                    }
+                )
+            rows = _child_edges(tree, node.node_id, "matrix_row")
+            for row_index, row_edge in enumerate(rows):
+                row_members = leaves_by_subtree.get(row_edge.target, [])
+                if row_members:
+                    labels.append(
+                        {
+                            "target_node_id": row_edge.target,
+                            "role": "TARGET_MATRIX_ROW_GROUP_BOUNDARY_EVIDENCE",
+                            "row_index": row_index,
+                            "row_pdf_node_ids": _ordered_pdf_ids(row_members),
+                            "confidence": _structure_confidence(row_members),
+                            "supervision": _structure_supervision(row_members),
+                        }
+                    )
+                cells = _child_edges(tree, row_edge.target, "matrix_cell")
+                for column_index, cell_edge in enumerate(cells):
+                    cell_members = leaves_by_subtree.get(cell_edge.target, [])
+                    if cell_members:
+                        labels.append(
+                            {
+                                "target_node_id": cell_edge.target,
+                                "role": "TARGET_MATRIX_CELL_GROUP_BOUNDARY_EVIDENCE",
+                                "row_index": row_index,
+                                "column_index": column_index,
+                                "cell_pdf_node_ids": _ordered_pdf_ids(cell_members),
+                                "confidence": _structure_confidence(cell_members),
+                                "supervision": _structure_supervision(cell_members),
+                            }
+                        )
+    return labels
+
+
+def _script_group_boundary_labels(
+    tree: CSLTTree,
+    script_id: str,
+    leaves_by_subtree: dict[str, list[TinyBDNodeAlignment]],
+) -> list[dict[str, Any]]:
+    base = _structure_child_leaves(tree, script_id, "base", leaves_by_subtree)
+    sub = _structure_child_leaves(tree, script_id, "sub", leaves_by_subtree)
+    sup = _structure_child_leaves(tree, script_id, "sup", leaves_by_subtree)
+    pre_sub = _structure_child_leaves(tree, script_id, "pre_sub", leaves_by_subtree)
+    pre_sup = _structure_child_leaves(tree, script_id, "pre_sup", leaves_by_subtree)
+    observed = base + sub + sup + pre_sub + pre_sup
+    if not observed:
+        return []
+    return [
+        {
+            "target_node_id": script_id,
+            "role": "TARGET_SCRIPT_GROUP_BOUNDARY_EVIDENCE",
+            "base_pdf_node_ids": _ordered_pdf_ids(base),
+            "sub_pdf_node_ids": _ordered_pdf_ids(sub),
+            "sup_pdf_node_ids": _ordered_pdf_ids(sup),
+            "pre_sub_pdf_node_ids": _ordered_pdf_ids(pre_sub),
+            "pre_sup_pdf_node_ids": _ordered_pdf_ids(pre_sup),
+            "confidence": _structure_confidence(observed),
+            "supervision": _structure_supervision(observed),
+        }
+    ]
+
+
 def _child_edges(tree: CSLTTree, source: str, relation: str) -> list[CSLTEdge]:
     return sorted(
         [edge for edge in tree.edges if edge.source == source and edge.relation == relation],
@@ -620,6 +1245,18 @@ def _structure_child_leaves(
 
 def _pdf_ids(items: list[TinyBDNodeAlignment]) -> list[str]:
     return sorted({item.pdf_node_id for item in items})
+
+
+def _ordered_pdf_ids(items: list[TinyBDNodeAlignment]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        node_id = item.pdf_node_id
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        output.append(node_id)
+    return output
 
 
 def _structure_confidence(items: list[TinyBDNodeAlignment]) -> float:
@@ -759,6 +1396,54 @@ def _match_score(target: str, pdf_text: str, pdf_latex: str, target_aliases: tup
     return 0.0
 
 
+def _alignment_identity_evidence(
+    target_text: str,
+    pdf_text: str,
+    pdf_latex: str,
+    target_aliases: tuple[str, ...],
+) -> dict[str, Any]:
+    target_norm = _normalize_symbol_text(target_text)
+    pdf_norm = _normalize_symbol_text(pdf_text)
+    pdf_latex_norm = _normalize_symbol_text(pdf_latex)
+    aliases = tuple(str(item) for item in target_aliases if str(item or ""))
+    sources: list[str] = []
+    if aliases:
+        sources.append("target_identity_aliases")
+    if pdf_latex_norm and pdf_latex_norm != pdf_norm:
+        sources.append("pdf_latex_identity")
+    if target_norm and pdf_norm and target_norm != pdf_norm:
+        sources.append("target_pdf_text_mismatch")
+    if target_norm and pdf_latex_norm and target_norm != pdf_latex_norm:
+        sources.append("target_pdf_latex_mismatch")
+    if not sources:
+        return {}
+    return {
+        "evidence_sources": sorted(set(sources)),
+        "requires_repair": bool(target_norm and target_norm not in {pdf_norm, pdf_latex_norm}),
+        "target_aliases": list(aliases),
+    }
+
+
+def _generic_vector_role(node: dict[str, Any]) -> tuple[str, float]:
+    bbox = node.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return "VECTOR_RULE", 0.25
+    x0, y0, x1, y1 = [float(value or 0.0) for value in bbox]
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0.0 and height <= 0.0:
+        return "VECTOR_RULE", 0.25
+    if bool(node.get("is_horizontal_rule_candidate")):
+        return "HORIZONTAL_RULE", 1.0
+    if bool(node.get("is_vertical_rule_candidate")):
+        return "VERTICAL_RULE", 1.0
+    if width / max(height, 1e-6) >= 6.0 and height <= max(width * 0.08, 2.0):
+        return "HORIZONTAL_RULE", 1.0
+    if height / max(width, 1e-6) >= 6.0 and width <= max(height * 0.08, 2.0):
+        return "VERTICAL_RULE", 1.0
+    return ("HORIZONTAL_RULE", 0.75) if width >= height else ("VERTICAL_RULE", 0.75)
+
+
 def _normalize_symbol_text(text: str) -> str:
     return str(text or "").strip()
 
@@ -799,6 +1484,12 @@ def _stats(
     target_count = len(target_leaves)
     pdf_count = len(pdf_nodes)
     relation_counter = Counter(item.relation for item in relation_labels)
+    structure_counter = Counter(str(item.get("role", "") or "") for item in structure_labels if isinstance(item, dict))
+    vector_role_counter = Counter(
+        str(item.get("vector_role", "") or "")
+        for item in structure_labels
+        if isinstance(item, dict) and str(item.get("role", "") or "") == "TARGET_VECTOR_ROLE_EVIDENCE"
+    )
     return {
         "pdf_nodes": pdf_count,
         "target_leaves": target_count,
@@ -812,6 +1503,8 @@ def _stats(
         "relation_labels": len(relation_labels),
         "structure_labels": len(structure_labels),
         "relation_counts": dict(sorted(relation_counter.items())),
+        "structure_counts": dict(sorted(structure_counter.items())),
+        "vector_role_counts": dict(sorted(vector_role_counter.items())),
     }
 
 

@@ -44,6 +44,9 @@ def test_alignment_tracks_radical_index() -> None:
 
 def test_alignment_records_fraction_structure_labels() -> None:
     graph_row = _graph_row("r5", ["x", "y"])
+    graph_row["glyph_nodes"][0]["bbox"] = [0.0, 0.0, 5.0, 8.0]
+    graph_row["glyph_nodes"][1]["bbox"] = [0.0, 20.0, 5.0, 28.0]
+    graph_row["vector_nodes"] = [{"node_id": "v0000", "bbox": [-2.0, 13.0, 12.0, 13.3]}]
     target = TinyBDTargetTreeBuilder().build_from_latex(r"\frac{x}{y}", row_id="r5").to_json()
 
     result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
@@ -52,7 +55,9 @@ def test_alignment_records_fraction_structure_labels() -> None:
     assert labels
     assert labels[0]["above_pdf_node_ids"] == ["g0000"]
     assert labels[0]["below_pdf_node_ids"] == ["g0001"]
-    assert result["stats"]["structure_labels"] == 1
+    assert any(item["role"] == "TARGET_FRACTION_GROUP_BOUNDARY_EVIDENCE" for item in result["structure_labels"])
+    vector_roles = [item for item in result["structure_labels"] if item["role"] == "TARGET_VECTOR_ROLE_EVIDENCE"]
+    assert any(item["vector_role"] == "FRACTION_BAR" for item in vector_roles)
 
 
 def test_alignment_uses_parser_identity_for_tex_command_symbols() -> None:
@@ -94,6 +99,22 @@ def test_alignment_records_operator_text_run_structure_evidence() -> None:
     assert operator_runs[0]["text_pdf_node_ids"] == ["g0000", "g0001", "g0002"]
 
 
+def test_alignment_turns_named_operator_into_operator_text_run_supervision() -> None:
+    graph_row = _graph_row("named-operator", ["l", "i", "m", "x"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\lim_x", row_id="named-operator", display_mode=True).to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    operator_runs = [
+        item
+        for item in result["structure_labels"]
+        if item["role"] == "TARGET_OPERATOR_TEXT_RUN_EVIDENCE"
+    ]
+    assert operator_runs
+    assert operator_runs[0]["text_pdf_node_ids"] == ["g0000", "g0001", "g0002"]
+    assert result["stats"]["hard_alignment_rate"] == 1.0
+
+
 def test_alignment_labels_large_operator_under_over_relations() -> None:
     graph_row = _graph_row("limits", [r"\sum", "i", "=", "1", "n", "x", "i"])
     target = TinyBDTargetTreeBuilder().build_from_latex(r"\sum_{i=1}^{n} x_i", row_id="limits", display_mode=True).to_json()
@@ -118,6 +139,22 @@ def test_alignment_labels_left_attachment_relations() -> None:
     assert any(item["role"] == "TARGET_LEFT_ATTACHMENT_EVIDENCE" for item in result["structure_labels"])
 
 
+def test_alignment_records_m0_group_boundary_and_identity_vector_evidence() -> None:
+    graph_row = _graph_row("m0", ["h", "t", "-", "1", "⊆"])
+    graph_row["vector_nodes"] = [{"node_id": "v0000", "bbox": [0.0, 10.0, 30.0, 10.4]}]
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"h_{t-1}\subseteq", row_id="m0").to_json()
+
+    result = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+    roles = {item["role"] for item in result["structure_labels"]}
+
+    assert "TARGET_SCRIPT_GROUP_BOUNDARY_EVIDENCE" in roles
+    assert "TARGET_GROUP_BOUNDARY_EVIDENCE" in roles
+    assert "TARGET_IDENTITY_REPAIR_EVIDENCE" in roles
+    assert "TARGET_VECTOR_ROLE_EVIDENCE" in roles
+    vector_roles = [item for item in result["structure_labels"] if item["role"] == "TARGET_VECTOR_ROLE_EVIDENCE"]
+    assert vector_roles[0]["vector_role"] == "HORIZONTAL_RULE"
+
+
 def test_alignment_records_standard_structure_evidence_labels() -> None:
     cases = [
         (r"\overline{x}", ["x"], "TARGET_ACCENT_ANNOTATION_EVIDENCE"),
@@ -133,6 +170,23 @@ def test_alignment_records_standard_structure_evidence_labels() -> None:
         roles = {item["role"] for item in result["structure_labels"]}
 
         assert expected_role in roles
+
+
+def test_alignment_records_matrix_row_and_cell_group_boundaries() -> None:
+    target = TinyBDTargetTreeBuilder().build_from_latex(
+        r"\begin{matrix}xy&z\\u&vw\end{matrix}",
+        row_id="matrix-boundaries",
+        display_mode=True,
+    ).to_json()
+    result = TinyBDAlignmentBuilder().align_row(
+        _graph_row("matrix-boundaries", ["x", "y", "z", "u", "v", "w"]),
+        target,
+    ).to_json()
+    roles = {item["role"] for item in result["structure_labels"]}
+
+    assert "TARGET_MATRIX_GROUP_BOUNDARY_EVIDENCE" in roles
+    assert "TARGET_MATRIX_ROW_GROUP_BOUNDARY_EVIDENCE" in roles
+    assert "TARGET_MATRIX_CELL_GROUP_BOUNDARY_EVIDENCE" in roles
 
 
 def test_alignment_rows_manifest_counts_missing_targets() -> None:

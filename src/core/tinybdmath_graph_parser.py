@@ -16,8 +16,8 @@ from typing import Any
 import unicodedata
 
 
-GRAPH_PARSER_ARTIFACT_VERSION = "tinybdmath_graph_parser_m1_json_v1"
-GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v4"
+GRAPH_PARSER_ARTIFACT_VERSION = "tinybdmath_graph_parser_m4_json_v1"
+GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v8"
 
 GRAPH_PARSER_RELATIONS = (
     "NONE",
@@ -137,6 +137,16 @@ GRAPH_PARSER_NODE_FEATURES = (
     "font_size",
     "font_size_ratio",
     "order_index",
+    "prev_same_font",
+    "next_same_font",
+    "prev_baseline_alignment",
+    "next_baseline_alignment",
+    "prev_horizontal_gap",
+    "next_horizontal_gap",
+    "letter_run_left",
+    "letter_run_right",
+    "letter_run_length",
+    "same_font_letter_run_length",
 )
 
 
@@ -175,6 +185,9 @@ class TinyBDGraphParserArtifact:
     node_output_weights: tuple[tuple[float, ...], ...] = ()
     node_output_bias: tuple[float, ...] = ()
     node_filter_threshold: float = GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
+    keep_output_weights: tuple[float, ...] = ()
+    keep_output_bias: float = 0.0
+    keep_threshold: float = 0.5
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -219,6 +232,9 @@ class TinyBDGraphParserArtifact:
                 payload.get("node_filter_threshold", GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD)
                 or GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
             ),
+            keep_output_weights=tuple(float(value) for value in payload.get("keep_output_weights", [])),
+            keep_output_bias=float(payload.get("keep_output_bias", 0.0) or 0.0),
+            keep_threshold=float(payload.get("keep_threshold", 0.5) or 0.5),
         )
 
     @classmethod
@@ -252,35 +268,45 @@ class TinyBDGraphParser:
             GRAPH_PARSER_ALTERNATIVE_CONFIDENCE_FLOOR,
             cutoff * GRAPH_PARSER_ALTERNATIVE_THRESHOLD_FACTOR,
         )
+        keep_cutoff = float(self.artifact.keep_threshold or 0.5)
+        selected_confidences: list[float] = []
         for source, target in pairs:
-            features = graph_parser_features(source, target, nodes)
-            probabilities = self._predict_probabilities(features)
+            probabilities, keep_probability = self._predict_relation_outputs(source, target, nodes)
             if not probabilities:
                 continue
-            best_index = max(range(len(probabilities)), key=lambda index: probabilities[index])
-            relation = self.artifact.relation_labels[best_index]
-            confidence = float(probabilities[best_index])
+            relation, type_confidence, combined_confidence = _select_relation_prediction(
+                probabilities,
+                self.artifact.relation_labels,
+                keep_probability=keep_probability,
+            )
             alternatives = _top_relation_alternatives(
                 probabilities,
                 self.artifact.relation_labels,
+                keep_probability=keep_probability,
             )
-            selected = relation != "NONE" and confidence >= cutoff
+            selected = (
+                relation != "NONE"
+                and type_confidence >= cutoff
+                and (keep_probability is None or keep_probability >= keep_cutoff)
+            )
             if alternatives and (selected or float(alternatives[0].get("confidence", 0.0) or 0.0) >= alternative_cutoff):
                 relation_alternatives.append(
                     {
                         "source": str(source["node_id"]),
                         "target": str(target["node_id"]),
+                        "keep_confidence": round(float(keep_probability), 6) if keep_probability is not None else None,
                         "alternatives": alternatives,
                     }
                 )
             if not selected:
                 continue
+            selected_confidences.append(combined_confidence)
             predictions.append(
                 TinyBDGraphParserPrediction(
                     source=str(source["node_id"]),
                     target=str(target["node_id"]),
                     relation=relation,
-                    confidence=round(confidence, 6),
+                    confidence=round(combined_confidence, 6),
                 )
             )
         node_predictions = self._predict_node_labels(all_nodes)
@@ -293,6 +319,8 @@ class TinyBDGraphParser:
             "candidate_pairs": len(pairs),
             "node_predictions": node_predictions,
             "node_filter_threshold": float(self.artifact.node_filter_threshold),
+            "keep_threshold": float(self.artifact.keep_threshold),
+            "graph_confidence": round(sum(selected_confidences) / len(selected_confidences), 6) if selected_confidences else 0.0,
             "predictions": [item.to_json() for item in sorted(predictions, key=lambda item: (item.source, item.target, item.relation))],
             "relation_alternatives": sorted(
                 relation_alternatives,
@@ -311,6 +339,22 @@ class TinyBDGraphParser:
             hidden_biases=self.artifact.hidden_biases,
             output_weights=self.artifact.output_weights,
             output_bias=self.artifact.output_bias,
+        )
+
+    def _predict_relation_outputs(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        nodes: list[dict[str, Any]],
+    ) -> tuple[list[float], float | None]:
+        features = graph_parser_features(source, target, nodes)
+        if not _artifact_uses_context_relation(self.artifact):
+            return self._predict_probabilities(features), None
+        return _context_relation_outputs(
+            features,
+            graph_parser_node_features(source, nodes),
+            graph_parser_node_features(target, nodes),
+            artifact=self.artifact,
         )
 
     def _predict_node_probabilities(self, features: dict[str, float]) -> list[float]:
@@ -375,28 +419,211 @@ def _feed_forward_probabilities(
 ) -> list[float]:
     if not output_weights:
         return []
+    values = _normalized_feature_values(features, feature_names=feature_names, means=means, scales=scales)
+    activations = _hidden_layer_activations(values, hidden_weights=hidden_weights, hidden_biases=hidden_biases)
+    logits = _linear_logits(activations, weights=output_weights, bias=output_bias)
+    return _normalized_exponential_weights(logits)
+
+
+def _artifact_uses_context_relation(artifact: TinyBDGraphParserArtifact) -> bool:
+    mode = str((artifact.train_config or {}).get("mode", "") or "")
+    model_version = str(artifact.model_version or "")
+    return (
+        mode in {"graph_parser_m2", "graph_parser_m3", "graph_parser_m4"}
+        or model_version.endswith("_m2")
+        or model_version.endswith("_m3")
+        or model_version.endswith("_m4")
+    )
+
+
+def _context_relation_outputs(
+    edge_features: dict[str, float],
+    source_node_features: dict[str, float],
+    target_node_features: dict[str, float],
+    *,
+    artifact: TinyBDGraphParserArtifact,
+) -> tuple[list[float], float | None]:
+    if not artifact.output_weights:
+        return [], None
+    edge_values = _normalized_feature_values(
+        edge_features,
+        feature_names=artifact.feature_names,
+        means=artifact.means,
+        scales=artifact.scales,
+    )
+    edge_context = _hidden_layer_activations(
+        edge_values,
+        hidden_weights=artifact.hidden_weights,
+        hidden_biases=artifact.hidden_biases,
+    )
+    source_node_values = _normalized_feature_values(
+        source_node_features,
+        feature_names=artifact.node_feature_names,
+        means=artifact.node_means,
+        scales=artifact.node_scales,
+    )
+    target_node_values = _normalized_feature_values(
+        target_node_features,
+        feature_names=artifact.node_feature_names,
+        means=artifact.node_means,
+        scales=artifact.node_scales,
+    )
+    source_context = _hidden_layer_activations(
+        source_node_values,
+        hidden_weights=artifact.node_hidden_weights,
+        hidden_biases=artifact.node_hidden_biases,
+    )
+    target_context = _hidden_layer_activations(
+        target_node_values,
+        hidden_weights=artifact.node_hidden_weights,
+        hidden_biases=artifact.node_hidden_biases,
+    )
+    source_logits = _linear_logits(source_context, weights=artifact.node_output_weights, bias=artifact.node_output_bias)
+    target_logits = _linear_logits(target_context, weights=artifact.node_output_weights, bias=artifact.node_output_bias)
+    fused = _relation_fusion_activations(
+        edge_context=edge_context,
+        source_context=source_context,
+        target_context=target_context,
+        source_logits=source_logits,
+        target_logits=target_logits,
+        artifact=artifact,
+    )
+    logits = _linear_logits(fused, weights=artifact.output_weights, bias=artifact.output_bias)
+    keep_probability = _keep_probability(fused, artifact=artifact)
+    return _normalized_exponential_weights(logits), keep_probability
+
+
+def _relation_fusion_activations(
+    *,
+    edge_context: list[float],
+    source_context: list[float],
+    target_context: list[float],
+    source_logits: list[float],
+    target_logits: list[float],
+    artifact: TinyBDGraphParserArtifact,
+) -> list[float]:
+    if _artifact_uses_interaction_relation(artifact):
+        return (
+            edge_context
+            + source_context
+            + target_context
+            + _abs_difference(source_context, target_context)
+            + _elementwise_product(source_context, target_context)
+            + source_logits
+            + target_logits
+            + _abs_difference(source_logits, target_logits)
+            + _elementwise_product(source_logits, target_logits)
+        )
+    return edge_context + source_context + target_context + source_logits + target_logits
+
+
+def _artifact_uses_interaction_relation(artifact: TinyBDGraphParserArtifact) -> bool:
+    mode = str((artifact.train_config or {}).get("mode", "") or "")
+    model_version = str(artifact.model_version or "")
+    return mode in {"graph_parser_m3", "graph_parser_m4"} or model_version.endswith("_m3") or model_version.endswith("_m4")
+
+
+def _artifact_uses_keep_relation(artifact: TinyBDGraphParserArtifact) -> bool:
+    mode = str((artifact.train_config or {}).get("mode", "") or "")
+    model_version = str(artifact.model_version or "")
+    return mode == "graph_parser_m4" or model_version.endswith("_m4")
+
+
+def _abs_difference(left: list[float], right: list[float]) -> list[float]:
+    return [abs(float(a) - float(b)) for a, b in zip(left, right)]
+
+
+def _elementwise_product(left: list[float], right: list[float]) -> list[float]:
+    return [float(a) * float(b) for a, b in zip(left, right)]
+
+
+def _keep_probability(fused: list[float], *, artifact: TinyBDGraphParserArtifact) -> float | None:
+    if not _artifact_uses_keep_relation(artifact) or not artifact.keep_output_weights:
+        return None
+    logit = float(artifact.keep_output_bias) + sum(float(weight) * item for weight, item in zip(artifact.keep_output_weights, fused))
+    return round(_sigmoid(logit), 6)
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        exp = math.exp(-value)
+        return 1.0 / (1.0 + exp)
+    exp = math.exp(value)
+    return exp / (1.0 + exp)
+
+
+def _select_relation_prediction(
+    probabilities: list[float],
+    labels: tuple[str, ...],
+    *,
+    keep_probability: float | None,
+) -> tuple[str, float, float]:
+    if keep_probability is None:
+        best_index = max(range(len(probabilities)), key=lambda index: probabilities[index])
+        relation = labels[best_index]
+        confidence = float(probabilities[best_index])
+        return relation, confidence, confidence
+    positive = [
+        (index, float(probability))
+        for index, probability in enumerate(probabilities[: len(labels)])
+        if str(labels[index]) != "NONE"
+    ]
+    if not positive:
+        return "NONE", 0.0, 0.0
+    positive_mass = sum(probability for _index, probability in positive)
+    if positive_mass <= 1e-12:
+        return "NONE", 0.0, 0.0
+    best_index, best_raw_probability = max(positive, key=lambda item: item[1])
+    type_confidence = best_raw_probability / positive_mass
+    combined_confidence = float(keep_probability) * float(type_confidence)
+    return str(labels[best_index]), float(type_confidence), float(combined_confidence)
+
+
+def _normalized_feature_values(
+    features: dict[str, float],
+    *,
+    feature_names: tuple[str, ...],
+    means: tuple[float, ...],
+    scales: tuple[float, ...],
+) -> list[float]:
     padded_means = means or tuple(0.0 for _ in feature_names)
     padded_scales = scales or tuple(1.0 for _ in feature_names)
     if len(padded_means) < len(feature_names):
         padded_means = tuple(padded_means) + tuple(0.0 for _ in range(len(feature_names) - len(padded_means)))
     if len(padded_scales) < len(feature_names):
         padded_scales = tuple(padded_scales) + tuple(1.0 for _ in range(len(feature_names) - len(padded_scales)))
-    values = [
-        (float(features.get(name, 0.0)) - mean) / (scale if abs(scale) > 1e-12 else 1.0)
+    return [
+        (float(features.get(name, 0.0) or 0.0) - mean) / (scale if abs(scale) > 1e-12 else 1.0)
         for name, mean, scale in zip(feature_names, padded_means, padded_scales)
     ]
-    activations = values
+
+
+def _hidden_layer_activations(
+    values: list[float],
+    *,
+    hidden_weights: tuple[tuple[tuple[float, ...], ...], ...],
+    hidden_biases: tuple[tuple[float, ...], ...],
+) -> list[float]:
+    activations = list(values)
     for weights, biases in zip(hidden_weights, hidden_biases):
         next_values: list[float] = []
         for row, bias in zip(weights, biases):
             value = float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
             next_values.append(max(0.0, value))
         activations = next_values
-    logits = [
-        float(bias) + sum(float(weight) * item for weight, item in zip(row, activations))
-        for row, bias in zip(output_weights, output_bias)
+    return activations
+
+
+def _linear_logits(
+    activations: list[float],
+    *,
+    weights: tuple[tuple[float, ...], ...],
+    bias: tuple[float, ...],
+) -> list[float]:
+    return [
+        float(item_bias) + sum(float(weight) * item for weight, item in zip(row, activations))
+        for row, item_bias in zip(weights, bias)
     ]
-    return _normalized_exponential_weights(logits)
 
 
 def graph_nodes(row: dict[str, Any], *, include_blank: bool = False) -> list[dict[str, Any]]:
@@ -490,6 +717,7 @@ def graph_parser_node_features(node: dict[str, Any], nodes: list[dict[str, Any]]
     sizes = [float(item.get("size", 0.0) or 0.0) for item in nodes if float(item.get("size", 0.0) or 0.0) > 0]
     mean_size = sum(sizes) / len(sizes) if sizes else 0.0
     order_index = float(node.get("order_index", 0))
+    local_run = _local_text_run_features(node, nodes)
     return {
         "bias": 1.0,
         "width": width,
@@ -520,6 +748,7 @@ def graph_parser_node_features(node: dict[str, Any], nodes: list[dict[str, Any]]
         "font_size": font_size,
         "font_size_ratio": font_size / max(mean_size, 1e-6) if font_size > 0 and mean_size > 0 else 0.0,
         "order_index": order_index / max(1.0, len(nodes) - 1),
+        **local_run,
     }
 
 
@@ -553,7 +782,7 @@ def training_samples_from_rows(
                 continue
             confidence = float(label.get("confidence", 0.0) or 0.0)
             current = positive.get((source, target))
-            if current is None or confidence > current[1]:
+            if _prefer_training_relation((relation, confidence), current):
                 positive[(source, target)] = (relation, confidence)
         nodes = graph_nodes(row)
         for label in _structure_relation_labels_from_structure(nodes, alignment):
@@ -564,10 +793,14 @@ def training_samples_from_rows(
             target = str(label.get("target", "") or "")
             confidence = float(label.get("confidence", 0.0) or 0.0)
             current = positive.get((source, target))
-            if current is None or confidence >= current[1]:
+            if _prefer_training_relation((relation, confidence), current):
                 positive[(source, target)] = (relation, confidence)
         pairs = candidate_pairs(nodes)
         node_by_id = {str(node.get("node_id", "") or ""): node for node in nodes}
+        node_features_by_id = {
+            str(node.get("node_id", "") or ""): graph_parser_node_features(node, nodes)
+            for node in nodes
+        }
         pair_keys = {(str(source["node_id"]), str(target["node_id"])) for source, target in pairs}
         for source_id, target_id in positive:
             if (source_id, target_id) in pair_keys:
@@ -587,9 +820,23 @@ def training_samples_from_rows(
                     "relation": relation,
                     "confidence": confidence,
                     "features": graph_parser_features(source, target, nodes),
+                    "source_node_features": node_features_by_id.get(key[0], {}),
+                    "target_node_features": node_features_by_id.get(key[1], {}),
                 }
             )
     return samples
+
+
+def _prefer_training_relation(candidate: tuple[str, float], current: tuple[str, float] | None) -> bool:
+    if current is None:
+        return True
+    return _training_relation_rank(candidate) > _training_relation_rank(current)
+
+
+def _training_relation_rank(item: tuple[str, float]) -> tuple[int, float]:
+    relation, confidence = item
+    priority = 0 if relation == "NEXT" else 1
+    return (priority, float(confidence))
 
 
 def node_training_samples_from_rows(
@@ -620,6 +867,7 @@ def node_training_samples_from_rows(
                 node_id = str(item.get("pdf_node_id", "") or "")
                 if node_id:
                     ignored[node_id] = str(item.get("reason", "") or "")
+        role_overrides = _node_label_overrides_from_structure(alignment)
         nodes = graph_nodes(row, include_blank=True)
         for node in nodes:
             node_id = str(node.get("node_id", "") or "")
@@ -630,6 +878,10 @@ def node_training_samples_from_rows(
             elif node_id in aligned:
                 label = _node_label_from_alignment(aligned[node_id])
                 confidence = float(aligned[node_id].get("confidence", 0.0) or 0.0)
+                if node_id in role_overrides:
+                    override_label, override_confidence = role_overrides[node_id]
+                    label = override_label
+                    confidence = min(confidence or override_confidence, override_confidence)
             elif ignored.get(node_id) == "spacing_or_blank":
                 label = "SPACING"
                 confidence = 1.0
@@ -663,6 +915,34 @@ def _node_label_from_alignment(alignment: dict[str, Any]) -> str:
     ):
         return "OPERATOR"
     return "SYMBOL"
+
+
+def _node_label_overrides_from_structure(alignment: dict[str, Any]) -> dict[str, tuple[str, float]]:
+    output: dict[str, tuple[str, float]] = {}
+    for item in alignment.get("structure_labels", []) or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "") or "")
+        if role == "TARGET_OPERATOR_TEXT_RUN_EVIDENCE":
+            label = "OPERATOR"
+            node_ids = item.get("text_pdf_node_ids", [])
+        elif role == "TARGET_TEXT_RUN_EVIDENCE":
+            label = "TEXT"
+            node_ids = item.get("text_pdf_node_ids", [])
+        elif role == "TARGET_EQUATION_TAG_EVIDENCE":
+            label = "EQUATION_TAG"
+            node_ids = item.get("tag_pdf_node_ids", [])
+        else:
+            continue
+        confidence = float(item.get("confidence", 1.0) or 1.0)
+        for node_id in node_ids if isinstance(node_ids, (list, tuple, set)) else []:
+            key = str(node_id or "")
+            if not key:
+                continue
+            current = output.get(key)
+            if current is None or confidence >= current[1]:
+                output[key] = (label, confidence)
+    return output
 
 
 def _generic_rule_node_label(node: dict[str, Any]) -> tuple[str, float]:
@@ -724,6 +1004,59 @@ def _structure_relation_labels_from_structure(
                         confidence,
                     )
                 )
+        elif role == "TARGET_GROUP_BOUNDARY_EVIDENCE":
+            member_nodes = _nodes_for_ids(node_by_id, item.get("member_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            output.extend(_sequence_training_relations(member_nodes, confidence))
+        elif role == "TARGET_FRACTION_GROUP_BOUNDARY_EVIDENCE":
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            output.extend(_sequence_training_relations(_nodes_for_ids(node_by_id, item.get("numerator_pdf_node_ids", [])), confidence))
+            output.extend(_sequence_training_relations(_nodes_for_ids(node_by_id, item.get("denominator_pdf_node_ids", [])), confidence))
+        elif role == "TARGET_SCRIPT_GROUP_BOUNDARY_EVIDENCE":
+            base_nodes = _nodes_for_ids(node_by_id, item.get("base_pdf_node_ids", []))
+            if not base_nodes:
+                continue
+            base_id = str(base_nodes[0].get("node_id", "") or "")
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for field, relation in (
+                ("sub_pdf_node_ids", "SUB"),
+                ("sup_pdf_node_ids", "SUP"),
+                ("pre_sub_pdf_node_ids", "PRE_SUB"),
+                ("pre_sup_pdf_node_ids", "PRE_SUP"),
+            ):
+                for member in _nodes_for_ids(node_by_id, item.get(field, [])):
+                    output.append(
+                        _training_relation(
+                            base_id,
+                            str(member.get("node_id", "") or ""),
+                            relation,
+                            confidence,
+                        )
+                    )
+        elif role == "TARGET_RADICAL_GROUP_BOUNDARY_EVIDENCE":
+            mark_nodes = _nodes_for_ids(node_by_id, item.get("mark_pdf_node_ids", []))
+            if not mark_nodes:
+                continue
+            mark_id = str(mark_nodes[0].get("node_id", "") or "")
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            for body in _nodes_for_ids(node_by_id, item.get("body_pdf_node_ids", [])):
+                output.append(
+                    _training_relation(mark_id, str(body.get("node_id", "") or ""), "RADICAL_BODY", confidence)
+                )
+            for index in _nodes_for_ids(node_by_id, item.get("index_pdf_node_ids", [])):
+                output.append(
+                    _training_relation(mark_id, str(index.get("node_id", "") or ""), "RADICAL_INDEX", confidence)
+                )
+        elif role == "TARGET_FENCE_GROUP_BOUNDARY_EVIDENCE":
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            output.extend(_sequence_training_relations(_nodes_for_ids(node_by_id, item.get("body_pdf_node_ids", [])), confidence))
+        elif role == "TARGET_MATRIX_ROW_GROUP_BOUNDARY_EVIDENCE":
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            output.extend(_sequence_training_relations(_nodes_for_ids(node_by_id, item.get("row_pdf_node_ids", [])), confidence))
+        elif role == "TARGET_MATRIX_CELL_GROUP_BOUNDARY_EVIDENCE":
+            cell_nodes = _nodes_for_ids(node_by_id, item.get("cell_pdf_node_ids", []))
+            confidence = float(item.get("confidence", 1.0) or 1.0)
+            output.extend(_cell_content_training_relations(cell_nodes, confidence))
         elif role == "TARGET_RADICAL_MARK_EVIDENCE":
             mark_nodes = _nodes_for_ids(node_by_id, item.get("mark_pdf_node_ids", []))
             body_nodes = _nodes_for_ids(node_by_id, item.get("body_pdf_node_ids", []))
@@ -1030,6 +1363,30 @@ def _training_relation(source: str, target: str, relation: str, confidence: floa
     }
 
 
+def _sequence_training_relations(nodes: list[dict[str, Any]], confidence: float) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for previous, current in zip(nodes, nodes[1:]):
+        output.append(
+            _training_relation(
+                str(previous.get("node_id", "") or ""),
+                str(current.get("node_id", "") or ""),
+                "NEXT",
+                confidence,
+            )
+        )
+    return output
+
+
+def _cell_content_training_relations(nodes: list[dict[str, Any]], confidence: float) -> list[dict[str, Any]]:
+    if not nodes:
+        return []
+    anchor_id = str(nodes[0].get("node_id", "") or "")
+    return [
+        _training_relation(anchor_id, str(member.get("node_id", "") or ""), "CELL_CONTENT", confidence)
+        for member in nodes[1:]
+    ]
+
+
 def _nodes_for_ids(node_by_id: dict[str, dict[str, Any]], node_ids: Any) -> list[dict[str, Any]]:
     if not isinstance(node_ids, (list, tuple, set)):
         return []
@@ -1130,6 +1487,115 @@ def _enclosure_rule_evidence_score(
     return round(max(0.0, min(1.0, (0.45 * shape) + (0.35 * span) + (0.20 * proximity))), 6)
 
 
+def _local_text_run_features(node: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    defaults = {
+        "prev_same_font": 0.0,
+        "next_same_font": 0.0,
+        "prev_baseline_alignment": 0.0,
+        "next_baseline_alignment": 0.0,
+        "prev_horizontal_gap": 10.0,
+        "next_horizontal_gap": 10.0,
+        "letter_run_left": 0.0,
+        "letter_run_right": 0.0,
+        "letter_run_length": 0.0,
+        "same_font_letter_run_length": 0.0,
+    }
+    if node.get("node_type") != "glyph":
+        return defaults
+    ordered = [
+        item
+        for item in sorted(nodes, key=_node_sort_key)
+        if item.get("node_type") == "glyph" and str(item.get("text", "") or "").strip()
+    ]
+    node_id = str(node.get("node_id", "") or "")
+    index_by_id = {str(item.get("node_id", "") or ""): index for index, item in enumerate(ordered)}
+    index = index_by_id.get(node_id)
+    if index is None:
+        return defaults
+    previous = ordered[index - 1] if index > 0 else None
+    following = ordered[index + 1] if index + 1 < len(ordered) else None
+    if previous is not None:
+        defaults["prev_same_font"] = 1.0 if _same_font(node, previous) else 0.0
+        defaults["prev_baseline_alignment"] = _baseline_alignment(node, previous)
+        defaults["prev_horizontal_gap"] = _horizontal_gap(previous, node)
+    if following is not None:
+        defaults["next_same_font"] = 1.0 if _same_font(node, following) else 0.0
+        defaults["next_baseline_alignment"] = _baseline_alignment(node, following)
+        defaults["next_horizontal_gap"] = _horizontal_gap(node, following)
+    left, right, same_font_run = _letter_run_lengths(ordered, index)
+    defaults["letter_run_left"] = float(left)
+    defaults["letter_run_right"] = float(right)
+    defaults["letter_run_length"] = float(left + 1 + right) if _is_letter_glyph(node) else 0.0
+    defaults["same_font_letter_run_length"] = float(same_font_run)
+    return defaults
+
+
+def _letter_run_lengths(nodes: list[dict[str, Any]], index: int) -> tuple[int, int, int]:
+    node = nodes[index]
+    if not _is_letter_glyph(node):
+        return 0, 0, 0
+    left = 0
+    cursor = index - 1
+    while cursor >= 0 and _is_text_run_neighbor(nodes[cursor], nodes[cursor + 1]):
+        left += 1
+        cursor -= 1
+    right = 0
+    cursor = index + 1
+    while cursor < len(nodes) and _is_text_run_neighbor(nodes[cursor - 1], nodes[cursor]):
+        right += 1
+        cursor += 1
+    same_font = 1
+    cursor = index - 1
+    while cursor >= 0 and _is_text_run_neighbor(nodes[cursor], nodes[cursor + 1]) and _same_font(nodes[cursor], node):
+        same_font += 1
+        cursor -= 1
+    cursor = index + 1
+    while cursor < len(nodes) and _is_text_run_neighbor(nodes[cursor - 1], nodes[cursor]) and _same_font(nodes[cursor], node):
+        same_font += 1
+        cursor += 1
+    return left, right, same_font
+
+
+def _is_text_run_neighbor(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if not (_is_letter_glyph(left) and _is_letter_glyph(right)):
+        return False
+    if _baseline_alignment(left, right) < 0.72:
+        return False
+    return _horizontal_gap(left, right) <= 1.25
+
+
+def _is_letter_glyph(node: dict[str, Any]) -> bool:
+    text = str(node.get("text", "") or "")
+    return bool(text) and any(unicodedata.category(char).startswith("L") for char in text)
+
+
+def _same_font(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    return str(first.get("font", "") or "") == str(second.get("font", "") or "")
+
+
+def _baseline_alignment(first: dict[str, Any], second: dict[str, Any]) -> float:
+    first_box = first.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    second_box = second.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    if not isinstance(first_box, (list, tuple)) or not isinstance(second_box, (list, tuple)):
+        return 0.0
+    first_height = max(1e-6, float(first_box[3]) - float(first_box[1]))
+    second_height = max(1e-6, float(second_box[3]) - float(second_box[1]))
+    first_center = (float(first_box[1]) + float(first_box[3])) / 2.0
+    second_center = (float(second_box[1]) + float(second_box[3])) / 2.0
+    return round(max(0.0, 1.0 - (abs(first_center - second_center) / max(first_height, second_height, 1e-6))), 6)
+
+
+def _horizontal_gap(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_box = left.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    right_box = right.get("bbox", [0.0, 0.0, 0.0, 0.0])
+    if not isinstance(left_box, (list, tuple)) or not isinstance(right_box, (list, tuple)):
+        return 10.0
+    left_height = max(1e-6, float(left_box[3]) - float(left_box[1]))
+    right_height = max(1e-6, float(right_box[3]) - float(right_box[1]))
+    gap = float(right_box[0]) - float(left_box[2])
+    return round(max(0.0, gap) / max(left_height, right_height, 1e-6), 6)
+
+
 def _unicode_category_flags(text: str) -> dict[str, float]:
     categories = [unicodedata.category(char) for char in str(text or "")]
     return {
@@ -1186,7 +1652,7 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
                 "relation": relation,
                 "confidence": float(item.get("confidence", 0.0) or 0.0),
                 "hint": "graph_parser",
-                "reason": "graph_parser_m1_prediction",
+                "reason": "graph_parser_prediction",
             }
         )
     selected = _dedupe_selected_relations(selected)
@@ -1207,6 +1673,8 @@ def graph_parser_predictions_to_structural_candidate(predictions: dict[str, Any]
             predictions.get("node_filter_threshold", GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD)
             or GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD
         ),
+        "keep_threshold": float(predictions.get("keep_threshold", 0.5) or 0.5),
+        "graph_confidence": float(predictions.get("graph_confidence", 0.0) or 0.0),
         "verifier_warnings": sorted(set(warnings)),
         "model_version": str(predictions.get("model_version", "") or ""),
     }
@@ -1216,11 +1684,30 @@ def _top_relation_alternatives(
     probabilities: list[float],
     labels: tuple[str, ...],
     *,
+    keep_probability: float | None = None,
     limit: int = 3,
 ) -> list[dict[str, Any]]:
     alternatives: list[dict[str, Any]] = []
+    scored: list[tuple[int, float]] = []
+    if keep_probability is None:
+        scored = [
+            (index, float(probability))
+            for index, probability in enumerate(probabilities[: len(labels)])
+        ]
+    else:
+        positive = [
+            (index, float(probability))
+            for index, probability in enumerate(probabilities[: len(labels)])
+            if str(labels[index]) != "NONE"
+        ]
+        positive_mass = sum(probability for _index, probability in positive)
+        if positive_mass > 1e-12:
+            scored = [
+                (index, float(keep_probability) * (probability / positive_mass))
+                for index, probability in positive
+            ]
     for index, probability in sorted(
-        enumerate(probabilities[: len(labels)]),
+        scored,
         key=lambda item: float(item[1]),
         reverse=True,
     ):
@@ -1277,6 +1764,9 @@ def _normalize_node(item: dict[str, Any], *, index: int, node_type: str) -> dict
         "latex": str(item.get("latex", "") or item.get("text", "") or ""),
         "font": str(item.get("font", "") or item.get("normalized_font", "") or ""),
         "size": float(item.get("size", 0.0) or 0.0),
+        "vector_type": str(item.get("vector_type", "") or item.get("type", "") or item.get("kind", "") or ""),
+        "is_horizontal_rule_candidate": bool(item.get("is_horizontal_rule_candidate", False)),
+        "is_vertical_rule_candidate": bool(item.get("is_vertical_rule_candidate", False)),
         "bbox": bbox_values,
         "center": [
             (bbox_values[0] + bbox_values[2]) / 2.0,

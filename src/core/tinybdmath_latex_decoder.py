@@ -763,6 +763,7 @@ def _latex_candidates_from_cslt(
             "rank": 1,
             "latex": str(selected_latex),
             "confidence": float(selected_confidence),
+            "graph_confidence": float(structural_candidate.get("graph_confidence", 0.0) or 0.0),
             "layout_status": layout_status,
             "layout_confidence": float(layout_confidence),
             "layout_warnings": list(layout_warnings),
@@ -843,6 +844,7 @@ def _latex_candidate_from_cslt_candidate(
         "confidence": min(decoded.confidence, verification.confidence)
         if decoded.confidence > 0
         else verification.confidence,
+        "graph_confidence": float(structural_candidate.get("graph_confidence", 0.0) or 0.0),
         "warnings": sorted(set(decoded.warnings) | set(verification.warnings)),
         "layout_status": verification.status,
         "layout_confidence": verification.confidence,
@@ -874,6 +876,7 @@ def _alternative_structure_evidence(candidate: dict[str, Any]) -> dict[str, Any]
         "cslt_candidate_id": cslt_candidate_id,
         "latex": str(candidate.get("latex", "") or ""),
         "confidence": float(candidate.get("confidence", 0.0) or 0.0),
+        "graph_confidence": float(candidate.get("graph_confidence", 0.0) or 0.0),
         "layout_status": str(candidate.get("layout_status", "") or ""),
         "layout_confidence": float(candidate.get("layout_confidence", 0.0) or 0.0),
         "layout_verification": candidate.get("layout_verification", {})
@@ -930,6 +933,7 @@ def _verifier_ranking_entry(candidate: dict[str, Any]) -> dict[str, Any]:
         "rank": int(candidate.get("rank", 999) or 999),
         "latex": str(candidate.get("latex", "") or ""),
         "confidence": float(candidate.get("confidence", 0.0) or 0.0),
+        "graph_confidence": float(candidate.get("graph_confidence", 0.0) or 0.0),
         "layout_status": str(candidate.get("layout_status", "") or ""),
         "layout_confidence": float(candidate.get("layout_confidence", 0.0) or 0.0),
         "verifier_score": features["verifier_score"],
@@ -954,6 +958,7 @@ def _candidate_ranking_features(candidate: dict[str, Any]) -> dict[str, float]:
     status_score = {"pass": 1.0, "review": 0.55, "abstain": 0.0}.get(layout_status, 0.0)
     layout_confidence = _float(candidate.get("layout_confidence", 0.0))
     confidence = _float(candidate.get("confidence", 0.0))
+    graph_confidence = _float(candidate.get("graph_confidence", 0.0))
     coverage = _float(
         verification.get(
             "relation_node_coverage",
@@ -976,10 +981,11 @@ def _candidate_ranking_features(candidate: dict[str, Any]) -> dict[str, float]:
     warning_penalty = min(0.35, 0.035 * len(warnings))
     score = (
         0.38 * status_score
-        + 0.24 * layout_confidence
-        + 0.18 * coverage
-        + 0.10 * relation_density
-        + 0.10 * confidence
+        + 0.22 * layout_confidence
+        + 0.16 * coverage
+        + 0.08 * relation_density
+        + 0.08 * confidence
+        + 0.08 * graph_confidence
         - rank_penalty
         - blocking_penalty
         - warning_penalty
@@ -988,6 +994,7 @@ def _candidate_ranking_features(candidate: dict[str, Any]) -> dict[str, float]:
         "verifier_score": round(max(0.0, min(1.0, score)), 6),
         "status_score": round(status_score, 6),
         "layout_confidence": round(layout_confidence, 6),
+        "graph_confidence": round(graph_confidence, 6),
         "relation_node_coverage": round(coverage, 6),
         "relation_density": round(relation_density, 6),
         "rank_penalty": round(rank_penalty, 6),
@@ -1069,6 +1076,7 @@ def _manual_review_recommendation(candidates: tuple[dict[str, Any], ...]) -> dic
         "recommended_rank": rank,
         "latex": str(best.get("latex", "") or ""),
         "confidence": float(best.get("confidence", 0.0) or 0.0),
+        "graph_confidence": float(best.get("graph_confidence", 0.0) or 0.0),
         "layout_status": str(best.get("layout_status", "") or ""),
         "layout_confidence": float(best.get("layout_confidence", 0.0) or 0.0),
         "selection_blockers": sorted(blockers),
@@ -1104,6 +1112,7 @@ def _preferred_candidate_recommendation(candidates: tuple[dict[str, Any], ...]) 
         "recommended_rank": rank,
         "latex": str(best.get("latex", "") or ""),
         "confidence": float(best.get("confidence", 0.0) or 0.0),
+        "graph_confidence": float(best.get("graph_confidence", 0.0) or 0.0),
         "layout_status": layout_status,
         "layout_confidence": float(best.get("layout_confidence", 0.0) or 0.0),
         "verifier_score": float(best.get("verifier_score", 0.0) or 0.0),

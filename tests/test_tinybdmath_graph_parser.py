@@ -7,6 +7,8 @@ from src.core.tinybdmath_graph_parser import (
     GRAPH_PARSER_RELATIONS,
     TinyBDGraphParser,
     TinyBDGraphParserArtifact,
+    graph_nodes,
+    graph_parser_node_features,
     graph_parser_predictions_to_structural_candidate,
     node_training_samples_from_rows,
     training_samples_from_rows,
@@ -69,6 +71,33 @@ def test_graph_parser_node_samples_label_operator_text_run_nodes() -> None:
     assert labels["g0002"] == "OPERATOR"
 
 
+def test_graph_parser_node_samples_label_named_operator_text_run_nodes() -> None:
+    graph_row = _graph_row("named-operator", ["l", "i", "m", "x"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\lim_x", row_id="named-operator", display_mode=True).to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = node_training_samples_from_rows([graph_row], [alignment])
+    labels = {sample["node_id"]: sample["label"] for sample in samples}
+
+    assert labels["g0000"] == "OPERATOR"
+    assert labels["g0001"] == "OPERATOR"
+    assert labels["g0002"] == "OPERATOR"
+    assert labels["g0003"] == "SYMBOL"
+
+
+def test_graph_parser_node_features_include_local_text_run_evidence() -> None:
+    graph_row = _graph_row("run", ["l", "i", "m", "x"])
+    nodes = graph_nodes(graph_row, include_blank=True)
+
+    features = graph_parser_node_features(nodes[1], nodes)
+
+    assert features["letter_run_left"] == 1.0
+    assert features["letter_run_right"] == 2.0
+    assert features["letter_run_length"] == 4.0
+    assert features["same_font_letter_run_length"] == 4.0
+    assert features["prev_baseline_alignment"] == 1.0
+
+
 def test_graph_parser_training_samples_include_text_run_group_edges() -> None:
     graph_row = _graph_row("text", ["d", "m", "o", "d", "e", "l"])
     target = TinyBDTargetTreeBuilder().build_from_latex(r"d_{\text{model}}", row_id="text").to_json()
@@ -79,6 +108,44 @@ def test_graph_parser_training_samples_include_text_run_group_edges() -> None:
 
     assert ("g0001", "g0002", "TEXT_RUN_NEXT") in relations
     assert ("g0004", "g0005", "TEXT_RUN_NEXT") in relations
+
+
+def test_graph_parser_relation_samples_carry_source_target_node_context() -> None:
+    graph_row = _graph_row("context", ["l", "i", "m", "x"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\lim_x", row_id="context", display_mode=True).to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    text_run_sample = next(sample for sample in samples if sample["relation"] == "TEXT_RUN_NEXT")
+
+    assert set(GRAPH_PARSER_NODE_FEATURES).issubset(text_run_sample["source_node_features"])
+    assert set(GRAPH_PARSER_NODE_FEATURES).issubset(text_run_sample["target_node_features"])
+    assert text_run_sample["source_node_features"]["letter_run_length"] >= 3.0
+
+
+def test_graph_parser_training_samples_expand_script_group_members() -> None:
+    graph_row = _graph_row("script-group", ["h", "t", "-", "1"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"h_{t-1}", row_id="script-group").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0000", "g0001", "SUB") in relations
+    assert ("g0000", "g0002", "SUB") in relations
+    assert ("g0000", "g0003", "SUB") in relations
+
+
+def test_graph_parser_training_samples_consume_fraction_group_boundaries() -> None:
+    graph_row = _graph_row("fraction-group", ["x", "y", "z", "w"])
+    target = TinyBDTargetTreeBuilder().build_from_latex(r"\frac{xy}{zw}", row_id="fraction-group").to_json()
+    alignment = TinyBDAlignmentBuilder().align_row(graph_row, target).to_json()
+
+    samples = training_samples_from_rows([graph_row], [alignment])
+    relations = {(sample["source"], sample["target"], sample["relation"]) for sample in samples}
+
+    assert ("g0000", "g0001", "NEXT") in relations
+    assert ("g0002", "g0003", "NEXT") in relations
 
 
 def test_graph_parser_training_samples_include_radical_index_edges() -> None:
@@ -271,6 +338,47 @@ def test_graph_parser_artifact_round_trips_and_predicts_candidate(tmp_path: Path
     assert structural["candidate_only"] is True
 
 
+def test_graph_parser_m2_artifact_uses_node_context_relation_head(tmp_path: Path) -> None:
+    artifact = _toy_m2_artifact()
+    path = tmp_path / "m2-model.json"
+    artifact.save(path)
+    parser = TinyBDGraphParser.load(path)
+
+    payload = parser.predict_row(_graph_row("m2", ["l", "i", "m"]), threshold=0.01)
+    relations = {item["relation"] for item in payload["predictions"]}
+
+    assert payload["model_version"] == "tinybdmath_graph_parser_m2"
+    assert "TEXT_RUN_NEXT" in relations
+
+
+def test_graph_parser_m3_artifact_uses_interaction_relation_head(tmp_path: Path) -> None:
+    artifact = _toy_m3_artifact()
+    path = tmp_path / "m3-model.json"
+    artifact.save(path)
+    parser = TinyBDGraphParser.load(path)
+
+    payload = parser.predict_row(_graph_row("m3", ["l", "i", "m"]), threshold=0.01)
+    relations = {item["relation"] for item in payload["predictions"]}
+
+    assert payload["model_version"] == "tinybdmath_graph_parser_m3"
+    assert "TEXT_RUN_NEXT" in relations
+
+
+def test_graph_parser_m4_artifact_uses_keep_and_type_heads(tmp_path: Path) -> None:
+    artifact = _toy_m4_artifact()
+    path = tmp_path / "m4-model.json"
+    artifact.save(path)
+    parser = TinyBDGraphParser.load(path)
+
+    payload = parser.predict_row(_graph_row("m4", ["l", "i", "m"]), threshold=0.8)
+    relations = {item["relation"] for item in payload["predictions"]}
+
+    assert payload["model_version"] == "tinybdmath_graph_parser_m4"
+    assert payload["keep_threshold"] == 0.5
+    assert payload["graph_confidence"] > 0.0
+    assert "TEXT_RUN_NEXT" in relations
+
+
 def test_graph_parser_structural_candidate_accepts_model_structure_relations() -> None:
     payload = {
         "model_version": "toy",
@@ -359,6 +467,135 @@ def _toy_node_weights() -> tuple[tuple[float, ...], ...]:
             row[GRAPH_PARSER_NODE_FEATURES.index("is_rule")] = 8.0
         rows.append(tuple(row))
     return tuple(rows)
+
+
+def _toy_m2_artifact() -> TinyBDGraphParserArtifact:
+    relation_count = len(GRAPH_PARSER_RELATIONS)
+    feature_count = len(GRAPH_PARSER_FEATURES)
+    node_feature_count = len(GRAPH_PARSER_NODE_FEATURES)
+    node_label_count = len(GRAPH_PARSER_NODE_LABELS)
+    context_width = feature_count + (2 * node_feature_count) + (2 * node_label_count)
+    weights = []
+    source_node_offset = feature_count
+    letter_run_index = source_node_offset + GRAPH_PARSER_NODE_FEATURES.index("letter_run_length")
+    for relation in GRAPH_PARSER_RELATIONS:
+        row = [0.0 for _ in range(context_width)]
+        if relation == "TEXT_RUN_NEXT":
+            row[letter_run_index] = 4.0
+        weights.append(tuple(row))
+    return TinyBDGraphParserArtifact(
+        version="tinybdmath_graph_parser_m2_json_v1",
+        model_version="tinybdmath_graph_parser_m2",
+        feature_version="tinybdmath_graph_parser_features_v6",
+        feature_names=GRAPH_PARSER_FEATURES,
+        relation_labels=GRAPH_PARSER_RELATIONS,
+        means=tuple(0.0 for _ in range(feature_count)),
+        scales=tuple(1.0 for _ in range(feature_count)),
+        hidden_weights=(),
+        hidden_biases=(),
+        output_weights=tuple(weights),
+        output_bias=tuple(0.0 for _ in range(relation_count)),
+        threshold=0.01,
+        train_config={"mode": "graph_parser_m2"},
+        node_feature_names=GRAPH_PARSER_NODE_FEATURES,
+        node_label_names=GRAPH_PARSER_NODE_LABELS,
+        node_means=tuple(0.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_scales=tuple(1.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_hidden_weights=(),
+        node_hidden_biases=(),
+        node_output_weights=_toy_node_weights(),
+        node_output_bias=tuple(0.0 for _ in GRAPH_PARSER_NODE_LABELS),
+    )
+
+
+def _toy_m3_artifact() -> TinyBDGraphParserArtifact:
+    relation_count = len(GRAPH_PARSER_RELATIONS)
+    node_label_count = len(GRAPH_PARSER_NODE_LABELS)
+    edge_width = len(GRAPH_PARSER_FEATURES)
+    node_width = len(GRAPH_PARSER_NODE_FEATURES)
+    fusion_width = edge_width + (4 * node_width) + (4 * node_label_count)
+    source_offset = edge_width
+    target_offset = edge_width + node_width
+    abs_delta_offset = edge_width + (2 * node_width)
+    weights = []
+    for relation in GRAPH_PARSER_RELATIONS:
+        row = [0.0 for _ in range(fusion_width)]
+        if relation == "TEXT_RUN_NEXT":
+            row[source_offset + GRAPH_PARSER_NODE_FEATURES.index("letter_run_length")] = 2.0
+            row[target_offset + GRAPH_PARSER_NODE_FEATURES.index("letter_run_length")] = 2.0
+            row[abs_delta_offset + GRAPH_PARSER_NODE_FEATURES.index("prev_baseline_alignment")] = -1.0
+        weights.append(tuple(row))
+    return TinyBDGraphParserArtifact(
+        version="tinybdmath_graph_parser_m3_json_v1",
+        model_version="tinybdmath_graph_parser_m3",
+        feature_version="tinybdmath_graph_parser_features_v7",
+        feature_names=GRAPH_PARSER_FEATURES,
+        relation_labels=GRAPH_PARSER_RELATIONS,
+        means=tuple(0.0 for _ in range(len(GRAPH_PARSER_FEATURES))),
+        scales=tuple(1.0 for _ in range(len(GRAPH_PARSER_FEATURES))),
+        hidden_weights=(),
+        hidden_biases=(),
+        output_weights=tuple(weights),
+        output_bias=tuple(0.0 for _ in range(relation_count)),
+        threshold=0.01,
+        train_config={"mode": "graph_parser_m3"},
+        node_feature_names=GRAPH_PARSER_NODE_FEATURES,
+        node_label_names=GRAPH_PARSER_NODE_LABELS,
+        node_means=tuple(0.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_scales=tuple(1.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_hidden_weights=(),
+        node_hidden_biases=(),
+        node_output_weights=_toy_node_weights(),
+        node_output_bias=tuple(0.0 for _ in GRAPH_PARSER_NODE_LABELS),
+    )
+
+
+def _toy_m4_artifact() -> TinyBDGraphParserArtifact:
+    relation_count = len(GRAPH_PARSER_RELATIONS)
+    node_label_count = len(GRAPH_PARSER_NODE_LABELS)
+    edge_width = len(GRAPH_PARSER_FEATURES)
+    node_width = len(GRAPH_PARSER_NODE_FEATURES)
+    fusion_width = edge_width + (4 * node_width) + (4 * node_label_count)
+    none_index = GRAPH_PARSER_RELATIONS.index("NONE")
+    text_run_index = GRAPH_PARSER_RELATIONS.index("TEXT_RUN_NEXT")
+    output_weights = [[0.0 for _ in range(fusion_width)] for _ in range(relation_count)]
+    output_bias = [0.0 for _ in range(relation_count)]
+    output_bias[none_index] = 5.0
+    output_bias[text_run_index] = 4.0
+    for index in range(relation_count):
+        if index not in {none_index, text_run_index}:
+            output_bias[index] = -4.0
+    keep_weights = [0.0 for _ in range(fusion_width)]
+    source_offset = edge_width
+    target_offset = edge_width + node_width
+    keep_weights[source_offset + GRAPH_PARSER_NODE_FEATURES.index("letter_run_length")] = 2.5
+    keep_weights[target_offset + GRAPH_PARSER_NODE_FEATURES.index("letter_run_length")] = 2.5
+    return TinyBDGraphParserArtifact(
+        version="tinybdmath_graph_parser_m4_json_v1",
+        model_version="tinybdmath_graph_parser_m4",
+        feature_version="tinybdmath_graph_parser_features_v8",
+        feature_names=GRAPH_PARSER_FEATURES,
+        relation_labels=GRAPH_PARSER_RELATIONS,
+        means=tuple(0.0 for _ in range(len(GRAPH_PARSER_FEATURES))),
+        scales=tuple(1.0 for _ in range(len(GRAPH_PARSER_FEATURES))),
+        hidden_weights=(),
+        hidden_biases=(),
+        output_weights=tuple(tuple(row) for row in output_weights),
+        output_bias=tuple(output_bias),
+        threshold=0.8,
+        train_config={"mode": "graph_parser_m4"},
+        node_feature_names=GRAPH_PARSER_NODE_FEATURES,
+        node_label_names=GRAPH_PARSER_NODE_LABELS,
+        node_means=tuple(0.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_scales=tuple(1.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_hidden_weights=(),
+        node_hidden_biases=(),
+        node_output_weights=_toy_node_weights(),
+        node_output_bias=tuple(0.0 for _ in GRAPH_PARSER_NODE_LABELS),
+        keep_output_weights=tuple(keep_weights),
+        keep_output_bias=0.0,
+        keep_threshold=0.5,
+    )
 
 
 def _graph_row(
