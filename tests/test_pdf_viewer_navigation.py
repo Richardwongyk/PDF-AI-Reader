@@ -522,6 +522,134 @@ def test_pdf_viewer_restores_scroll_anchor_when_split_above_changes_height() -> 
     assert viewer.verticalScrollBar().value() == int(viewer._vlayout.page_y(3))
 
 
+def test_pdf_viewer_counts_collapsed_split_as_zero_virtual_height() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    split = QWidget()
+    split._saved_height = 240
+    split._collapsed = False
+    split.hide()
+
+    assert viewer._split_virtual_height(split) == 240.0
+
+    split._collapsed = True
+
+    assert viewer._split_virtual_height(split) == 0.0
+
+
+def test_pdf_viewer_clear_last_split_restores_full_page_without_cached_pixmap() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph",
+        bbox=(20.0, 120.0, 180.0, 160.0),
+    )
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[block]))
+
+    top = QWidget()
+    split = QWidget()
+    bottom = QWidget()
+    for widget in (top, split, bottom):
+        widget.setFixedSize(400, 80)
+        widget.show()
+        viewer._remember_widget_page(widget, 0)
+    viewer._layout.insertWidget(1, top)
+    viewer._layout.insertWidget(2, split)
+    viewer._layout.insertWidget(3, bottom)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 120, "blocks": [block], "widget": top},
+        {"split_id": block.id},
+        {"y0": 120, "y1": 240, "blocks": [], "widget": bottom},
+    ]
+    split._saved_height = 80
+    split._collapsed = False
+    split._prev_split_h = 80
+    viewer._splits[block.id] = split  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+    assert viewer._vlayout is not None
+    viewer._vlayout.register_split(0, 80.0)
+
+    viewer._on_clear_close(block.id)
+
+    assert 0 not in viewer._split_pages
+    assert len(viewer._page_segments[0]) == 1
+    assert viewer._layout.indexOf(top) < 0
+    assert viewer._layout.indexOf(bottom) < 0
+    assert viewer._page_segments[0][0]["widget"] is not None
+    assert 0 in engine.rendered_pages
+
+
+def test_pdf_viewer_clear_one_of_multiple_splits_keeps_neighbor_segments_without_pixmap() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    block_a = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph a",
+        bbox=(20.0, 80.0, 180.0, 120.0),
+    )
+    block_b = DocumentBlock(
+        id="p0_b1",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph b",
+        bbox=(20.0, 180.0, 180.0, 220.0),
+    )
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[block_a, block_b]))
+
+    top = QWidget()
+    split_a = QWidget()
+    middle = QWidget()
+    split_b = QWidget()
+    bottom = QWidget()
+    for widget in (top, split_a, middle, split_b, bottom):
+        widget.setFixedSize(400, 60)
+        widget.show()
+        viewer._remember_widget_page(widget, 0)
+    for idx, widget in enumerate((top, split_a, middle, split_b, bottom), start=1):
+        viewer._layout.insertWidget(idx, widget)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 80, "blocks": [block_a], "widget": top},
+        {"split_id": block_a.id},
+        {"y0": 80, "y1": 160, "blocks": [], "widget": middle},
+        {"split_id": block_b.id},
+        {"y0": 160, "y1": 240, "blocks": [block_b], "widget": bottom},
+    ]
+    for split in (split_a, split_b):
+        split._saved_height = 80
+        split._collapsed = False
+        split._prev_split_h = 80
+    viewer._splits[block_a.id] = split_a  # type: ignore[assignment]
+    viewer._splits[block_b.id] = split_b  # type: ignore[assignment]
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+    assert viewer._vlayout is not None
+    viewer._vlayout.register_split(0, 160.0)
+
+    viewer._on_clear_close(block_a.id)
+
+    assert 0 in viewer._split_pages
+    assert block_a.id not in viewer._splits
+    assert block_b.id in viewer._splits
+    assert [seg.get("split_id") for seg in viewer._page_segments[0] if "split_id" in seg] == [block_b.id]
+    assert viewer._layout.indexOf(top) >= 0
+    assert viewer._layout.indexOf(middle) >= 0
+    assert viewer._layout.indexOf(split_b) >= 0
+    assert viewer._layout.indexOf(split_a) < 0
+    assert 0 in viewer._pending_split_rerenders
+    assert 0 in engine.rendered_pages
+
+
 def test_virtual_page_layout_uses_binary_search_semantics() -> None:
     layout = _VirtualPageLayout({0: 100.0, 1: 200.0, 2: 150.0})
 

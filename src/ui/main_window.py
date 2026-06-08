@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QSizePolicy,
+    QScrollArea,
     QStatusBar,
     QStyle,
     QToolBar,
@@ -49,6 +50,7 @@ from src.core.pdf_engine import DocumentEngine
 from src.core.ai_engine import AIEngine
 from src.core.knowledge_engine import KnowledgeEngine
 from src.core.glossary_manager import GlossaryManager
+from src.core.model_providers import display_model_name, normalize_litellm_model
 from src.core.navigator import Navigator
 from src.core.service_container import ServiceContainer
 from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
@@ -156,6 +158,8 @@ class MainWindow(QMainWindow):
         self._last_user_translation_at: float = 0.0
         self._pymupdf4llm_pending_result: object | None = None
         self._dock_answer_text: str = ""
+        self._dock_answer_render_text: str = ""
+        self._dock_answer_render_finished: bool = False
         self._dock_answer_split_id: str = "__dock_qa__"
         self._dock_last_question: str = ""
         self._dock_followup_questions: list[str] = []
@@ -177,9 +181,12 @@ class MainWindow(QMainWindow):
         self._left_dock_float_button: QToolButton | None = None
         self._right_panel_body: QWidget | None = None
         self._right_panel_toggle_button: QToolButton | None = None
+        self._right_dock_float_button: QToolButton | None = None
         self._right_panel_collapsed: bool = False
         self._right_panel_expanded_width: int = 360
         self._right_panel_min_width: int = 300
+        self._ai_followup_widget: QScrollArea | None = None
+        self._ai_followup_container: QWidget | None = None
         self._pending_kb_upserts: dict[str, DocumentBlock] = {}
         self._last_formula_viewport_pages: set[int] = set()
         self._formula_import_thread: _FormulaImportPlanThread | None = None
@@ -630,9 +637,26 @@ class MainWindow(QMainWindow):
         self._ai_followup_label.setStyleSheet("font-weight: 600;")
         self._ai_followup_label.setVisible(False)
         body_layout.addWidget(self._ai_followup_label)
-        self._ai_followup_layout = QVBoxLayout()
+        self._ai_followup_widget = QScrollArea()
+        self._ai_followup_widget.setObjectName("ai_followup_scroll")
+        self._ai_followup_widget.setFrameShape(QFrame.Shape.NoFrame)
+        self._ai_followup_widget.setWidgetResizable(True)
+        self._ai_followup_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._ai_followup_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._ai_followup_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Maximum,
+        )
+        self._ai_followup_widget.setMaximumHeight(128)
+        self._ai_followup_widget.setVisible(False)
+        self._ai_followup_container = QWidget()
+        self._ai_followup_container.setObjectName("ai_followup_container")
+        self._ai_followup_layout = QVBoxLayout(self._ai_followup_container)
+        self._ai_followup_layout.setContentsMargins(0, 0, 0, 0)
         self._ai_followup_layout.setSpacing(4)
-        body_layout.addLayout(self._ai_followup_layout)
+        self._ai_followup_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._ai_followup_widget.setWidget(self._ai_followup_container)
+        body_layout.addWidget(self._ai_followup_widget)
         right_layout.addWidget(self._right_panel_body, 1)
 
         right_widget.setMinimumWidth(self._right_panel_min_width)
@@ -818,10 +842,34 @@ class MainWindow(QMainWindow):
             if current_width >= self._right_panel_min_width:
                 self._right_panel_expanded_width = max(self._right_panel_min_width, current_width)
             self._right_dock.setFloating(True)
+            self._apply_right_dock_floating_geometry()
+            QTimer.singleShot(0, self._apply_right_dock_floating_geometry)
         self._update_right_dock_float_button()
+
+    def _apply_right_dock_floating_geometry(self) -> None:
+        """Give the right dock a readable centered default when popped out."""
+        screen = self.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else self.frameGeometry()
+        margin = 32
+        max_width = max(self._right_panel_min_width, available.width() - margin * 2)
+        max_height = max(480, available.height() - margin * 2)
+        target_width = min(max(760, int(self.width() * 0.55)), max_width)
+        target_height = min(max(680, int(self.height() * 0.78)), max_height)
+
+        center = self.frameGeometry().center()
+        if not available.contains(center):
+            center = available.center()
+        left_bound = available.left() + margin
+        top_bound = available.top() + margin
+        right_bound = available.right() - target_width + 1 - margin
+        bottom_bound = available.bottom() - target_height + 1 - margin
+        x = min(max(center.x() - target_width // 2, left_bound), max(left_bound, right_bound))
+        y = min(max(center.y() - target_height // 2, top_bound), max(top_bound, bottom_bound))
+        self._right_dock.setGeometry(x, y, target_width, target_height)
 
     def _on_right_dock_top_level_changed(self, _floating: bool) -> None:
         self._update_right_dock_float_button()
+        self._schedule_dock_answer_refresh()
 
     def _update_right_dock_float_button(self) -> None:
         button = getattr(self, "_right_dock_float_button", None)
@@ -972,6 +1020,8 @@ class MainWindow(QMainWindow):
 
     def _render_dock_answer(self, text: str, finished: bool = False) -> None:
         """把右侧全文问答内容交给现有 Markdown/KaTeX 模板渲染。"""
+        self._dock_answer_render_text = text
+        self._dock_answer_render_finished = finished
         safe_text = json.dumps(text)
         js_bool = "true" if finished else "false"
         js_code = f"updateContent({safe_text}, {js_bool});"
@@ -984,6 +1034,21 @@ class MainWindow(QMainWindow):
         """更新右侧问答文本缓存并渲染。"""
         self._dock_answer_text = text
         self._render_dock_answer(text, finished=finished)
+
+    def _schedule_dock_answer_refresh(self) -> None:
+        """Repaint cached dock answer text after dock floating/reparenting."""
+        QTimer.singleShot(0, self._refresh_dock_answer_view)
+        QTimer.singleShot(160, self._refresh_dock_answer_view)
+
+    def _refresh_dock_answer_view(self) -> None:
+        if not hasattr(self, "_ai_answer_view") or self._ai_answer_view is None:
+            return
+        self._set_dock_answer_theme(self._config.ui.theme)
+        self._render_dock_answer(
+            self._dock_answer_render_text,
+            finished=self._dock_answer_render_finished,
+        )
+        self._ai_answer_view.update()
 
     # =========================================================================
     # 信号连接
@@ -1016,6 +1081,7 @@ class MainWindow(QMainWindow):
         # PdfViewer → 内部处理
         self._pdf_viewer.block_double_clicked.connect(self._on_block_double_clicked)
         self._pdf_viewer.block_translate_requested.connect(self._on_block_translate)
+        self._pdf_viewer.block_retranslate_requested.connect(self._on_block_retranslate)
         self._pdf_viewer.block_question_requested.connect(self._on_block_question)
         self._pdf_viewer.block_explain_requested.connect(self._on_block_explain)
         self._pdf_viewer.viewport_changed.connect(self._on_viewport_changed)
@@ -1280,7 +1346,7 @@ class MainWindow(QMainWindow):
             if ov:
                 ov.update()
         self._status_model_label.setText(
-            f"📚 知识库就绪 | ✅ 公式精扫完成 | 🖥️ {'QtPdf' if self._doc_engine.using_qtpdf else 'PyMuPDF'}"
+            f"知识库就绪 | 公式精扫完成 | {'QtPdf' if self._doc_engine.using_qtpdf else 'PyMuPDF'}"
         )
         if changed_blocks:
             self._queue_knowledge_upsert(changed_blocks)
@@ -1695,7 +1761,7 @@ class MainWindow(QMainWindow):
         """知识库构建完成。"""
         self._status_progress.setVisible(False)
         render_engine = "QtPdf" if self._doc_engine.using_qtpdf else "PyMuPDF"
-        self._status_model_label.setText(f"📚 知识库就绪 | {self._model_status_text()} | 🖥️ {render_engine}")
+        self._status_model_label.setText(f"知识库就绪 | {self._model_status_text()} | {render_engine}")
         try:
             status = self._knowledge_engine.get_status(doc_hash)
             count = status.embedded_blocks or status.total_blocks
@@ -1707,7 +1773,7 @@ class MainWindow(QMainWindow):
     def _on_kb_error(self, message: str) -> None:
         """知识库构建失败。"""
         self._status_progress.setVisible(False)
-        self._status_model_label.setText("⚠️ 知识库构建失败")
+        self._status_model_label.setText("知识库构建失败")
         self._ai_doc_status.setText("知识库构建失败")
         self.logger.warning("知识库构建失败: %s", message)
 
@@ -1744,7 +1810,7 @@ class MainWindow(QMainWindow):
         if not self._current_blocks:
             QMessageBox.information(self, "提示", "请先打开一个 PDF 文件。")
             return
-        self._status_model_label.setText("🔨 正在检查知识库...")
+        self._status_model_label.setText("检查知识库...")
         self._knowledge_engine.build_knowledge_base(
             self._current_blocks, self._current_doc_hash, force_rebuild=False
         )
@@ -1765,7 +1831,7 @@ class MainWindow(QMainWindow):
         else:
             self._on_block_translate(block_id)
 
-    def _on_block_translate(self, block_id: str) -> None:
+    def _on_block_translate(self, block_id: str, force_refresh: bool = False) -> None:
         """右键 → 翻译段落（委托 TranslationFlow 协调器）。"""
         self.logger.info("翻译请求: %s", block_id)
         self._last_user_translation_at = time.monotonic()
@@ -1777,14 +1843,22 @@ class MainWindow(QMainWindow):
         if split.collapsed:
             split.expand()
             return
-        if split._current_answer:
+        if split._current_answer and not force_refresh:
             return
 
         # 委托 TranslationFlow（内部处理 AICache 检查 + AIEngine 调用）
-        hit = self._translate_flow.request_translation(block, self._current_doc_hash)
+        hit = self._translate_flow.request_translation(
+            block,
+            self._current_doc_hash,
+            force_refresh=force_refresh,
+        )
         if not hit:
             self._active_translation_blocks.add(block_id)
             split.set_busy(True)
+
+    def _on_block_retranslate(self, block_id: str) -> None:
+        """重新翻译：绕过旧缓存，请求模型并覆盖缓存。"""
+        self._on_block_translate(block_id, force_refresh=True)
 
     def _on_block_question(self, block_id: str) -> None:
         """右键 → 提问。"""
@@ -1856,12 +1930,12 @@ class MainWindow(QMainWindow):
             section = str(item.get("section") or "")
             tree_item = QTreeWidgetItem(self._ai_evidence_tree)
             tree_item.setText(0, f"[{source_id}] 第{page}页")
-            tree_item.setText(1, f"{relevance:.2f}")
+            tree_item.setText(1, f"{relevance:.3f}")
             tree_item.setText(2, content[:180])
             detail = (
                 f"{source_id} · 第{page}页 · {block_type}"
                 f"{' · ' + section if section else ''}\n"
-                f"相关度 {relevance:.2f} · 词面 {lexical:.2f} · 向量 {vector:.2f}\n\n"
+                f"相关度 {relevance:.3f} · 词面 {lexical:.3f} · 检索 {vector:.3f}\n\n"
                 f"{content}"
             )
             tree_item.setToolTip(0, detail)
@@ -1889,6 +1963,43 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
         self._dock_followup_questions = []
         self._ai_followup_label.setVisible(False)
+        followup_widget = getattr(self, "_ai_followup_widget", None)
+        if followup_widget is not None:
+            followup_widget.setVisible(False)
+            followup_widget.horizontalScrollBar().setValue(0)
+            followup_widget.verticalScrollBar().setValue(0)
+        followup_container = getattr(self, "_ai_followup_container", None)
+        if followup_container is not None:
+            followup_container.setMinimumSize(0, 0)
+
+    def _sync_dock_followup_area(self) -> None:
+        """Size the dock follow-up viewport so narrow panels can scroll from the left."""
+        followup_widget = getattr(self, "_ai_followup_widget", None)
+        followup_container = getattr(self, "_ai_followup_container", None)
+        if followup_widget is None or followup_container is None:
+            return
+        count = self._ai_followup_layout.count()
+        if count <= 0:
+            followup_widget.setVisible(False)
+            followup_container.setMinimumSize(0, 0)
+            return
+
+        max_button_width = 0
+        content_height = 0
+        for index in range(count):
+            widget = self._ai_followup_layout.itemAt(index).widget()
+            if widget is None:
+                continue
+            max_button_width = max(max_button_width, widget.minimumWidth(), widget.sizeHint().width())
+            content_height += max(widget.minimumHeight(), widget.sizeHint().height())
+        content_height += max(0, count - 1) * self._ai_followup_layout.spacing()
+
+        viewport_width = max(followup_widget.viewport().width(), self._right_panel_min_width - 24, 1)
+        content_width = max(max_button_width, viewport_width)
+        followup_container.setMinimumSize(content_width, content_height)
+        followup_widget.setMaximumHeight(max(48, min(content_height + 4, 160)))
+        followup_widget.horizontalScrollBar().setValue(0)
+        followup_widget.verticalScrollBar().setValue(0)
 
     def _on_dock_followup_clicked(self, question: str) -> None:
         """右侧追问按钮点击后继续基于全文提问。"""
@@ -1937,13 +2048,23 @@ class MainWindow(QMainWindow):
             self._clear_dock_followups()
             self._dock_followup_questions = clean_questions[:3]
             for question in self._dock_followup_questions:
-                btn = QPushButton(question[:56] + ("..." if len(question) > 56 else ""))
+                btn = QPushButton(question)
                 btn.setObjectName("ai_followup_button")
                 btn.setToolTip(question)
                 btn.setProperty("followup_question", question)
+                btn.setMinimumHeight(32)
+                btn.setMinimumWidth(btn.fontMetrics().horizontalAdvance(question) + 32)
+                btn.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+                btn.setStyleSheet("text-align: left; padding: 6px 10px;")
                 btn.clicked.connect(lambda checked=False, text=question: self._on_dock_followup_clicked(text))
                 self._ai_followup_layout.addWidget(btn)
-            self._ai_followup_label.setVisible(bool(self._dock_followup_questions))
+            has_followups = bool(self._dock_followup_questions)
+            self._ai_followup_label.setVisible(has_followups)
+            if self._ai_followup_widget is not None:
+                self._ai_followup_widget.setVisible(has_followups)
+            if has_followups:
+                self._sync_dock_followup_area()
+                QTimer.singleShot(0, self._sync_dock_followup_area)
             if self._dock_followup_questions:
                 self._ai_doc_status.setText("全文问答完成，可继续追问")
             self.logger.info("追问建议 split=%s count=%d", split_id, len(self._dock_followup_questions))
@@ -2025,26 +2146,43 @@ class MainWindow(QMainWindow):
         """打开设置对话框 — 配置云端 API。"""
         from PySide6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QComboBox
 
+        cm = self._services.get("config_manager")
         dlg = QDialog(self)
         dlg.setWindowTitle("设置 — 云端 API 配置")
         layout = QFormLayout(dlg)
 
         provider_box = QComboBox()
-        providers = ["deepseek/deepseek-chat", "deepseek/deepseek-v4-pro", "openai/gpt-4o", "qwen/qwen-plus",
-                      "glm-4", "moonshot-v1-8k"]
-        provider_box.addItems(providers)
+        providers = [
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-4o",
+            "qwen/qwen-plus",
+            "glm-4",
+            "moonshot-v1-8k",
+        ]
+        for provider in providers:
+            provider_box.addItem(display_model_name(provider), provider)
         # 选中当前配置
-        current_cloud = self._config.model.cloud_translation or self._config.model.cloud
-        if current_cloud in providers:
-            provider_box.setCurrentText(current_cloud)
+        current_cloud = normalize_litellm_model(self._config.model.cloud_translation or self._config.model.cloud)
+        if current_cloud not in providers:
+            provider_box.addItem(display_model_name(current_cloud), current_cloud)
+        current_index = provider_box.findData(current_cloud)
+        if current_index >= 0:
+            provider_box.setCurrentIndex(current_index)
         layout.addRow("模型:", provider_box)
 
         key_edit = QLineEdit()
         key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         key_edit.setPlaceholderText("输入 API Key...")
-        existing = self._services.get("config_manager").get_api_key(current_cloud) or ""
+        existing = cm.get_api_key(current_cloud) or ""
         key_edit.setText(existing)
         layout.addRow("API Key:", key_edit)
+
+        def _load_provider_key(_index: int) -> None:
+            provider = str(provider_box.currentData() or provider_box.currentText())
+            key_edit.setText(cm.get_api_key(provider) or "")
+
+        provider_box.currentIndexChanged.connect(_load_provider_key)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -2053,13 +2191,20 @@ class MainWindow(QMainWindow):
         layout.addRow(buttons)
 
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            provider = provider_box.currentText()
+            provider = str(provider_box.currentData() or provider_box.currentText())
             api_key = key_edit.text().strip()
             if api_key:
-                # 保存到配置
-                cm = self._services.get("config_manager")
-                current_cfg = cm.get()
-                current_cfg.api_keys[provider] = api_key
+                old_cfg = self._config
+                old_provider = normalize_litellm_model(old_cfg.model.cloud_translation or old_cfg.model.cloud)
+                old_api_key = cm.get_api_key(provider) or ""
+                if provider == old_provider and api_key == old_api_key:
+                    self._status_model_label.setText(self._model_status_text())
+                    QMessageBox.information(
+                        self,
+                        "已生效",
+                        f"云端模型 {display_model_name(provider)} 当前已在使用，配置未变化。",
+                    )
+                    return
                 cm.update({
                     "model": {
                         "cloud": provider,
@@ -2067,11 +2212,59 @@ class MainWindow(QMainWindow):
                     },
                     "api_keys": {provider: api_key},
                 })
-                self._status_model_label.setText(f"✅ 云端: {provider}")
-                QMessageBox.information(self, "已保存",
-                    f"云端模型 {provider} 已配置。\n请重启应用以初始化云端客户端。")
+                new_config = cm.get()
+                self._apply_cloud_runtime_config(new_config)
+                self._status_model_label.setText(self._model_status_text())
+                QMessageBox.information(
+                    self,
+                    "已生效",
+                    f"云端模型 {display_model_name(provider)} 已保存并立即生效。",
+                )
             else:
                 QMessageBox.warning(self, "未保存", "API Key 不能为空。")
+
+    def _apply_cloud_runtime_config(self, config: AppConfig) -> None:
+        """Apply cloud model/client changes without restarting the app."""
+        from src.core.ai_engine import LiteLLMClient
+
+        cm = self._services.get("config_manager")
+        cloud_raw = config.model.cloud_translation or config.model.cloud
+        cloud_model = normalize_litellm_model(cloud_raw)
+        cloud_key = (
+            cm.get_api_key(cloud_model)
+            or cm.get_api_key(cloud_raw)
+            or cm.get_api_key(config.model.cloud)
+            or ""
+        )
+        cloud_client = LiteLLMClient(model=cloud_model, api_key=cloud_key) if cloud_key else None
+
+        reasoning_raw = config.model.cloud_reasoning or cloud_raw
+        reasoning_model = normalize_litellm_model(reasoning_raw)
+        reasoning_key = (
+            cm.get_api_key(reasoning_model)
+            or cm.get_api_key(reasoning_raw)
+            or cloud_key
+            or ""
+        )
+        if reasoning_model == cloud_model and reasoning_key == cloud_key:
+            reasoning_client = cloud_client
+        else:
+            reasoning_client = (
+                LiteLLMClient(model=reasoning_model, api_key=reasoning_key)
+                if reasoning_key
+                else None
+            )
+
+        self._ai_engine.apply_runtime_config(
+            config,
+            cloud_client=cloud_client,
+            reasoning_client=reasoning_client,
+        )
+        self.logger.info(
+            "云端模型运行时配置已更新: translation=%s reasoning=%s",
+            cloud_model,
+            reasoning_model,
+        )
 
     def _on_open_glossary_editor(self) -> None:
         """打开术语表管理器。"""
@@ -2085,15 +2278,19 @@ class MainWindow(QMainWindow):
     def _model_status_text(self) -> str:
         """状态栏模型说明，明确云端/本地/测试模式边界。"""
         strategy = self._config.routing.translation
-        cloud = self._config.model.cloud_translation or self._config.model.cloud
-        reasoning = self._config.model.cloud_reasoning
+        cloud = normalize_litellm_model(self._config.model.cloud_translation or self._config.model.cloud)
+        reasoning = normalize_litellm_model(self._config.model.cloud_reasoning)
         key = self._services.get("config_manager").get_api_key(cloud)
         has_key = bool(key and key.strip() and "在此填入" not in key)
         if strategy == "cloud_only":
-            return f"翻译: {cloud} · 全文: {reasoning}" if has_key else "测试模式: 未配置云端 API"
+            if not has_key:
+                return "AI: 测试模式"
+            cloud_name = display_model_name(cloud)
+            reasoning_name = display_model_name(reasoning)
+            return f"AI: {cloud_name}" if cloud == reasoning else f"AI: {cloud_name} / {reasoning_name}"
         if strategy == "local_only":
-            return f"本地生成: {self._config.model.local}"
-        return f"混合路由: 本地优先→{cloud if has_key else 'Mock'}"
+            return f"AI: 本地 {self._config.model.local}"
+        return f"AI: 本地优先 / {display_model_name(cloud) if has_key else 'Mock'}"
 
     def _on_about(self) -> None:
         """关于对话框。"""
@@ -2169,20 +2366,18 @@ class MainWindow(QMainWindow):
             and self._config.routing.qa == "local_only"
         )
         if not local_only:
-            cloud = self._config.model.cloud_translation or self._config.model.cloud
+            cloud = normalize_litellm_model(self._config.model.cloud_translation or self._config.model.cloud)
             key = self._services.get("config_manager").get_api_key(cloud)
             if key and key.strip() and "在此填入" not in key:
-                self._status_model_label.setText(
-                    f"✅ 翻译: {cloud} · 全文: {self._config.model.cloud_reasoning}"
-                )
+                self._status_model_label.setText(self._model_status_text())
                 return
-            self._status_model_label.setText("⚠️ 未配置云端 API，当前为测试模式")
+            self._status_model_label.setText("AI: 测试模式")
             return
 
         model_status = self._ai_engine.check_local_model_status()
 
         if not model_status["ollama_available"]:
-            self._status_model_label.setText("⚠️ Ollama 服务未连接")
+            self._status_model_label.setText("Ollama 服务未连接")
 
             reply = QMessageBox.question(
                 self, "首次启动",
@@ -2196,7 +2391,7 @@ class MainWindow(QMainWindow):
                 import webbrowser
                 webbrowser.open("https://ollama.com/download")
         elif not model_status["qwen_available"]:
-            self._status_model_label.setText("⚠️ 模型未下载")
+            self._status_model_label.setText("模型未下载")
 
             reply = QMessageBox.question(
                 self, "首次启动",
@@ -2207,7 +2402,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Ok,
             )
         else:
-            self._status_model_label.setText("✅ 本地模型就绪")
+            self._status_model_label.setText("本地模型就绪")
 
     # =========================================================================
     # 工具方法

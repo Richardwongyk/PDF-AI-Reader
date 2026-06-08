@@ -216,7 +216,7 @@ class LiteLLMClient(BaseLLMClient):
         """初始化云端客户端。
 
         Args:
-            model: LiteLLM 模型标识符（如 "deepseek-chat"、"gpt-4o"）。
+            model: LiteLLM 模型标识符（如 "deepseek-v4-flash"、"gpt-4o"）。
             api_key: API 密钥。
             api_base: 可选的自定义 API 端点。
         """
@@ -442,6 +442,19 @@ class HybridModelRouter:
     def fallback_client(self) -> BaseLLMClient | None:
         """最终降级客户端。"""
         return self._fallback
+
+    def update_runtime_config(self, config: AppConfig) -> None:
+        """Replace routing config without rebuilding unchanged clients."""
+        self._config = config
+
+    def update_cloud_clients(
+        self,
+        cloud_client: BaseLLMClient | None,
+        reasoning_client: BaseLLMClient | None = None,
+    ) -> None:
+        """Replace cloud clients used by subsequent routes."""
+        self._cloud = cloud_client
+        self._reasoning = reasoning_client
 
 
 # =============================================================================
@@ -971,6 +984,18 @@ class AIEngine(BaseService):
     def qa_service(self) -> QAService:
         """获取问答服务。"""
         return self._qa
+
+    def apply_runtime_config(
+        self,
+        config: AppConfig,
+        *,
+        cloud_client: BaseLLMClient | None = None,
+        reasoning_client: BaseLLMClient | None = None,
+    ) -> None:
+        """Apply changed model routing for future requests without restarting."""
+        self._config = config
+        self._router.update_runtime_config(config)
+        self._router.update_cloud_clients(cloud_client, reasoning_client)
 
     def request_translation(self, block: DocumentBlock, domain: str = "math") -> None:
         """请求翻译 — 使用 QThread 信号槽，无轮询。"""

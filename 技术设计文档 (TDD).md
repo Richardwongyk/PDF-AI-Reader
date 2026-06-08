@@ -382,7 +382,7 @@ class GlossaryEntry(BaseModel):
 ```python
 class ModelConfig(BaseModel):
     local: str = "qwen3.5:4b"
-    cloud: str = "deepseek/deepseek-chat"
+    cloud: str = "deepseek/deepseek-v4-flash"
     embed_local: str = "bge-m3"
     ollama_host: str = "http://localhost:11434"
 
@@ -1267,7 +1267,7 @@ ConfigManager.config_changed(config)
 ```yaml
 model:
   local: qwen3.5:4b
-  cloud: deepseek/deepseek-chat
+  cloud: deepseek/deepseek-v4-flash
   embed_local: bge-m3
   ollama_host: http://localhost:11434
 

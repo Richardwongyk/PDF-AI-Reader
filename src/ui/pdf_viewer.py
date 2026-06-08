@@ -417,6 +417,7 @@ class _LazyPageWidget(QWidget):
 class PdfViewer(QScrollArea):
     block_double_clicked = Signal(str)
     block_translate_requested = Signal(str)
+    block_retranslate_requested = Signal(str)
     block_question_requested = Signal(str)
     block_explain_requested = Signal(str)
     viewport_changed = Signal(int, int)
@@ -1509,6 +1510,7 @@ class PdfViewer(QScrollArea):
         self._align_split_content_to_block(split, block, page_num)
         split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
         split.translation_requested.connect(self.block_translate_requested.emit)
+        split.translation_refresh_requested.connect(self.block_retranslate_requested.emit)
         split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))
 
         # Layout 操作：移除老 widget，插入段+裂缝+段
@@ -2050,6 +2052,15 @@ class PdfViewer(QScrollArea):
 
     # ── 内部槽 ──
 
+    def _split_virtual_height(self, split: QWidget) -> float:
+        """Height contributed by a split to the virtual document layout."""
+        collapsed = getattr(split, "collapsed", None)
+        if collapsed is None:
+            collapsed = getattr(split, "_collapsed", False)
+        if bool(collapsed):
+            return 0.0
+        return float(getattr(split, "_saved_height", split.height()))
+
     def _on_split_q(self, question: str, block_id: str) -> None:
         pass
 
@@ -2069,7 +2080,7 @@ class PdfViewer(QScrollArea):
         scroll_anchor = self._capture_scroll_anchor()
         if self._vlayout:
             total_split_h = sum(
-                float(s.height() if s.isVisible() else getattr(s, "_saved_height", 0))
+                self._split_virtual_height(s)
                 for bid, s in self._splits.items()
                 if self._block_to_page.get(bid) == page_num
             )
@@ -2088,25 +2099,29 @@ class PdfViewer(QScrollArea):
         if s is None:
             return
         self._forget_widget_page(s)
+        if self._layout.indexOf(s) >= 0:
+            self._layout.removeWidget(s)
         try:
             s.height_changed.disconnect(self._on_split_height_changed)
         except Exception:
             pass
         page_num = self._block_to_page.get(block_id)
         if page_num is not None:
-            self._merge_segments(page_num, block_id)
             has_other_splits = any(
                 self._block_to_page.get(bid) == page_num
                 for bid in self._splits
             )
-            if not has_other_splits:
+            if has_other_splits:
+                self._merge_segments(page_num, block_id)
+            else:
                 self._split_pages.discard(page_num)
+                self._restore_page_after_last_split(page_num)
         s.close()
         s.deleteLater()
         # 更新虚拟布局（layout 自动处理 widget 位移）
         if self._vlayout and page_num is not None:
             total_split_h = sum(
-                float(other.height() if other.isVisible() else getattr(other, "_saved_height", 0))
+                self._split_virtual_height(other)
                 for bid, other in self._splits.items()
                 if self._block_to_page.get(bid) == page_num
             )
@@ -2114,6 +2129,51 @@ class PdfViewer(QScrollArea):
         self._adjust_spacers(self._active_pages)
         self._restore_scroll_anchor(scroll_anchor)
         self.split_close_requested.emit(block_id)
+
+    def _restore_page_after_last_split(self, page_num: int) -> None:
+        """Restore a split page to the normal full-page rendering path."""
+        meta = self._page_metas.get(page_num)
+        if meta is None:
+            return
+        merged_blocks: list[DocumentBlock] = []
+        seen_blocks: set[str] = set()
+        for seg in self._page_segments.get(page_num, []):
+            if "split_id" in seg:
+                continue
+            for block in seg.get("blocks", []):
+                if block.id not in seen_blocks:
+                    merged_blocks.append(block)
+                    seen_blocks.add(block.id)
+            widget = seg.get("widget")
+            if widget is None:
+                continue
+            for child in widget.findChildren(BlockOverlay):
+                self._overlays.pop(child.block_id, None)
+                if _isValid(child):
+                    child.deleteLater()
+            self._forget_widget_page(widget)
+            if self._layout.indexOf(widget) >= 0:
+                self._layout.removeWidget(widget)
+            widget.hide()
+            widget.deleteLater()
+
+        blocks = list(meta.get("blocks") or merged_blocks)
+        full_h = int(meta.get("height", 0) or 0)
+        self._page_segments[page_num] = [{
+            "y0": 0,
+            "y1": full_h,
+            "y0_pt": 0.0,
+            "y1_pt": full_h / self._scale if self._scale else 0.0,
+            "blocks": blocks,
+            "widget": None,
+        }]
+        self._page_containers.pop(page_num, None)
+        self._rendered_pages.discard(page_num)
+        self._precise_render_pending.discard(page_num)
+        if page_num in self._active_pages:
+            container = self._ensure_page_widget(page_num)
+            if container is not None:
+                self._render_page(page_num)
 
     def _merge_segments(self, page_num: int, split_id: str) -> None:
         segs = self._page_segments.get(page_num, [])
@@ -2123,6 +2183,12 @@ class PdfViewer(QScrollArea):
                     prev_seg = segs[i - 1]
                     next_seg = segs[i + 1]
                     pixmap = self._doc_engine.get_page_pixmap(page_num, dpi=self._dpi)
+                    if pixmap is None or pixmap.isNull():
+                        self._page_segments[page_num] = segs[:i] + segs[i + 1:]
+                        self._pending_split_rerenders.add(page_num)
+                        if self._is_split_page_in_layout(page_num):
+                            self._request_split_rerenders({page_num})
+                        break
                     if pixmap:
                         merged_blocks = prev_seg["blocks"] + next_seg["blocks"]
                         merged_w = self._build_segment_widget(
@@ -2138,9 +2204,18 @@ class PdfViewer(QScrollArea):
                         idx_p = self._layout.indexOf(pw)
                         self._forget_widget_page(pw)
                         self._forget_widget_page(nw)
-                        pw.hide(); self._layout.removeWidget(pw); pw.deleteLater()
-                        nw.hide(); self._layout.removeWidget(nw); nw.deleteLater()
-                        self._insert_page_content_widget(idx_p, merged_w)
+                        pw.hide()
+                        if self._layout.indexOf(pw) >= 0:
+                            self._layout.removeWidget(pw)
+                        pw.deleteLater()
+                        nw.hide()
+                        if self._layout.indexOf(nw) >= 0:
+                            self._layout.removeWidget(nw)
+                        nw.deleteLater()
+                        if idx_p >= 0:
+                            self._insert_page_content_widget(idx_p, merged_w)
+                        else:
+                            merged_w.hide()
                         new_segs = segs[:i - 1] + [{
                             "y0": prev_seg["y0"], "y1": next_seg["y1"],
                             "y0_pt": prev_seg["y0"] / self._scale if self._scale else 0.0,

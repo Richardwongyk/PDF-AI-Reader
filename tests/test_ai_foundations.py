@@ -9,7 +9,7 @@ from src.core.ai_engine import (
     _user_facing_error,
 )
 from src.core.knowledge_engine import KnowledgeEngine
-from src.core.model_providers import normalize_litellm_model
+from src.core.model_providers import display_model_name, normalize_litellm_model
 from src.core.models import AppConfig, DocumentBlock, BlockType, TaskType
 from src.data.config_manager import ConfigManager
 
@@ -90,7 +90,7 @@ def test_knowledge_retrieval_candidate_pool_expands_for_full_document_qa() -> No
 def test_app_config_exposes_rag_and_reasoning_models() -> None:
     cfg = AppConfig()
 
-    assert cfg.model.cloud_translation == "deepseek/deepseek-chat"
+    assert cfg.model.cloud_translation == "deepseek/deepseek-v4-flash"
     assert cfg.model.cloud_reasoning == "deepseek/deepseek-v4-pro"
     assert cfg.model.formula_ocr_backend == "pix2text-mfr"
     assert cfg.model.formula_ocr_model == "PP-FormulaNet_plus-S"
@@ -102,8 +102,10 @@ def test_app_config_exposes_rag_and_reasoning_models() -> None:
 
 
 def test_deepseek_reasoning_model_name_is_litellm_compatible() -> None:
+    assert normalize_litellm_model("deepseek-chat") == "deepseek/deepseek-v4-flash"
     assert normalize_litellm_model("deepseek-v4-pro") == "deepseek/deepseek-v4-pro"
     assert normalize_litellm_model("deepseek/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
+    assert display_model_name("deepseek/deepseek-v4-flash") == "DeepSeek v4 Flash"
 
 
 def test_config_api_key_reuses_same_deepseek_provider_family(tmp_path) -> None:

@@ -1,7 +1,7 @@
 model:
   local: qwen3.5:4b
-  cloud: deepseek/deepseek-chat
-  cloud_translation: deepseek/deepseek-chat
+  cloud: deepseek/deepseek-v4-flash
+  cloud_translation: deepseek/deepseek-v4-flash
   cloud_reasoning: deepseek/deepseek-v4-pro
   embed_local: bge-m3
   # pix2text-mfr is the default. Install PaddleOCR and set paddle_formula for
@@ -32,5 +32,5 @@ ui:
   line_spacing: 1.5
   show_word_translation: false
 api_keys:
-  deepseek/deepseek-chat: "在此填入你的 API Key"
+  deepseek/deepseek-v4-flash: "在此填入你的 API Key"
   deepseek/deepseek-v4-pro: "可选；未填写时会复用同一 DeepSeek provider 的 key"

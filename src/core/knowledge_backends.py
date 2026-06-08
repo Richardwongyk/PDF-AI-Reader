@@ -530,7 +530,7 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
         for row in rows:
             if row["id"] in exclude:
                 continue
-            entries.append(self._row_to_entry(row, distance=0.0))
+            entries.append(self._row_to_entry(row, distance=self._fts_rank_distance(row["rank"], len(entries))))
             if len(entries) >= top_k:
                 break
         if not entries and self._should_use_recent_fallback(query):
@@ -730,6 +730,15 @@ class SQLiteFtsBackend(KnowledgeIndexBackend):
         has_cjk = re.search(r"[\u4e00-\u9fff]", text) is not None
         has_ascii_word = re.search(r"[A-Za-z0-9_]+", text) is not None
         return has_cjk and not has_ascii_word
+
+    @staticmethod
+    def _fts_rank_distance(rank: Any, index: int) -> float:
+        """Convert SQLite FTS BM25 order into a small distance-like value."""
+        try:
+            rank_value = abs(float(rank))
+        except (TypeError, ValueError):
+            rank_value = 0.0
+        return min(4.0, rank_value + max(index, 0) * 0.08)
 
     def _has_complete_index_metadata(self, block_count: int, metadata: dict[str, Any]) -> bool:
         if block_count <= 0:

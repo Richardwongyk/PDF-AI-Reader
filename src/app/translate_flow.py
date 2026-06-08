@@ -54,7 +54,13 @@ class TranslationFlow(QObject):
     # Public API
     # ------------------------------------------------------------------
 
-    def request_translation(self, block: object, doc_hash: str = "") -> bool:
+    def request_translation(
+        self,
+        block: object,
+        doc_hash: str = "",
+        *,
+        force_refresh: bool = False,
+    ) -> bool:
         """请求翻译指定段落。
 
         Returns:
@@ -70,7 +76,7 @@ class TranslationFlow(QObject):
         content_hash = self._ai_cache.hash_text(content)
 
         # 1. 查 AICache（借鉴 Mad Professor 的 RAG 缓存模式）
-        if doc_hash:
+        if doc_hash and not force_refresh:
             cached = self._ai_cache.get(
                 block_id, doc_hash, "translation", content_hash
             )
@@ -79,6 +85,8 @@ class TranslationFlow(QObject):
                              block_id, len(cached))
                 self.translation_ready.emit(cached, block_id)
                 return True
+        elif force_refresh:
+            _logger.info("TranslationFlow: force-refresh %s → 跳过 AICache 读取", block_id)
 
         # 2. 防止重复请求（借鉴 Mad Professor 去重检查）
         if block_id in self._pending:

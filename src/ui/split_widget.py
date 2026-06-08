@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -193,6 +194,7 @@ class SplitWidget(QFrame):
 
     question_submitted = Signal(str, str)
     translation_requested = Signal(str)
+    translation_refresh_requested = Signal(str)
     close_requested = Signal(str)
     height_changed = Signal(int)  # 当 setFixedHeight 改变高度时发射
 
@@ -299,28 +301,49 @@ class SplitWidget(QFrame):
 
     def _animate_expand(self) -> None:
         """动画展开：从 0 到 _saved_height。"""
+        target = max(self._MIN_HEIGHT, int(self._saved_height))
+        self._saved_height = target
         self.setVisible(True)
+        self.setMinimumHeight(0)
         self.setMaximumHeight(0)
-        target = self._saved_height
         anim = QPropertyAnimation(self, b"maximumHeight")
         anim.setDuration(250)
         anim.setStartValue(0)
         anim.setEndValue(target)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda h=target: self._finish_expand(h))
         anim.start()
         self._expand_anim = anim
+        self.height_changed.emit(target)
 
     def _animate_collapse(self) -> None:
         """动画折叠：从当前高度到 0，完成后隐藏。"""
-        current = self.height()
+        current = max(self.height(), int(self._saved_height), self._MIN_HEIGHT)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(current)
         anim = QPropertyAnimation(self, b"maximumHeight")
         anim.setDuration(200)
         anim.setStartValue(current)
         anim.setEndValue(0)
         anim.setEasingCurve(QEasingCurve.Type.InCubic)
-        anim.finished.connect(lambda: self.setVisible(False))
+        anim.finished.connect(self._finish_collapse)
         anim.start()
         self._collapse_anim = anim
+
+    def _finish_expand(self, target_height: int) -> None:
+        """Pin the expanded height after animation so layouts cannot stretch it."""
+        if self._collapsed:
+            return
+        target = max(self._MIN_HEIGHT, int(target_height))
+        self._saved_height = target
+        self.setFixedHeight(target)
+
+    def _finish_collapse(self) -> None:
+        """Hide the collapsed split and report zero virtual height."""
+        self.setVisible(False)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(0)
+        self.height_changed.emit(0)
 
     def display_answer_stream(self, token: str) -> None:
         self._current_answer += token
@@ -343,14 +366,27 @@ class SplitWidget(QFrame):
             item = self._followup_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        max_button_w = 0
         for q in questions[:3]:
-            btn = QPushButton(q[:50] + ("..." if len(q) > 50 else ""))
+            btn = QPushButton(q)
             btn.setObjectName("action_button")
             btn.setToolTip(q)
             btn.setProperty("followup_question", q)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            btn.setMinimumHeight(32)
+            btn.setStyleSheet("text-align: left; padding-left: 10px; padding-right: 10px;")
+            max_button_w = max(max_button_w, btn.fontMetrics().horizontalAdvance(q) + 32)
             btn.clicked.connect(lambda checked, text=q: self._on_followup_click(text))
             self._followup_layout.addWidget(btn)
-        self._followup_widget.setVisible(len(questions) > 0)
+        visible_count = min(len(questions), 3)
+        if visible_count:
+            content_h = visible_count * 32 + max(0, visible_count - 1) * self._followup_layout.spacing()
+            viewport_w = max(self._followup_widget.viewport().width(), self.width(), 1)
+            self._followup_container.setMinimumSize(max(max_button_w, viewport_w), content_h)
+            self._followup_container.resize(max(max_button_w, viewport_w), content_h)
+            self._followup_widget.horizontalScrollBar().setValue(0)
+            self._followup_widget.verticalScrollBar().setValue(0)
+        self._followup_widget.setVisible(visible_count > 0)
 
     def show_error(self, message: str) -> None:
         self._current_answer = f"**❌ 发生错误**\n\n```text\n{message}\n```"
@@ -449,10 +485,17 @@ class SplitWidget(QFrame):
         body_layout.addWidget(self._frozen_label)
 
         # 追问
-        self._followup_widget = QWidget()
-        self._followup_layout = QHBoxLayout(self._followup_widget)
+        self._followup_widget = QScrollArea()
+        self._followup_widget.setFrameShape(QFrame.Shape.NoFrame)
+        self._followup_widget.setWidgetResizable(False)
+        self._followup_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._followup_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._followup_widget.setMaximumHeight(128)
+        self._followup_container = QWidget()
+        self._followup_layout = QVBoxLayout(self._followup_container)
         self._followup_layout.setContentsMargins(0, 0, 0, 0)
         self._followup_layout.setSpacing(4)
+        self._followup_widget.setWidget(self._followup_container)
         self._followup_widget.setVisible(False)
         body_layout.addWidget(self._followup_widget)
 
@@ -540,7 +583,7 @@ class SplitWidget(QFrame):
             self._context_label.setVisible(True)
             self._input_widget.setVisible(True)
             self._action_widget.setVisible(True)
-            self._followup_widget.setVisible(True)
+            self._followup_widget.setVisible(self._followup_layout.count() > 0)
             self._input_area.setPlaceholderText("在此输入问题...(Ctrl+Enter 发送)")
 
     def set_busy(self, busy: bool) -> None:
@@ -549,9 +592,8 @@ class SplitWidget(QFrame):
 
     def apply_theme(self, theme: str) -> None:
         """将主题应用到 SplitWidget QSS 和 WebView HTML 内容。"""
-        from src.ui.theme import get_split_style
         self._current_theme = theme
-        self.setStyleSheet(get_split_style(theme))
+        self._update_mode_ui()
         if self._page_ready and self._result_view is not None:
             self._result_view.page().runJavaScript(f"setTheme('{theme}');")
         else:
@@ -585,10 +627,15 @@ class SplitWidget(QFrame):
             return
         view = WebViewPool.acquire()
         self._result_view = view
+        view.setMinimumHeight(60)
+        view.setMaximumHeight(16777215)
+        view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         # 插入布局（在 frozen_label 之前）
         idx = self._body_layout.indexOf(self._frozen_label)
         if idx >= 0:
-            self._body_layout.insertWidget(idx, view)
+            self._body_layout.insertWidget(idx, view, 1)
 
         # 切换 bridge 到当前 SplitWidget（永久 channel 不重新绑定）
         WebViewPool.swap_bridge(view, self._height_bridge)
@@ -683,11 +730,14 @@ class SplitWidget(QFrame):
         if content_height and content_height > 0:
             if hasattr(self, '_expand_anim') and self._expand_anim:
                 self._expand_anim.stop()
-            self.setMaximumHeight(16777215)
             chrome = self._compute_chrome_height()
             needed = content_height + chrome + 4
-            if needed > self.height():
-                new_h = min(needed, 800)
+            new_h = max(self._MIN_HEIGHT, min(int(needed), 800))
+            if (
+                abs(new_h - int(self._saved_height)) > 2
+                or self.minimumHeight() != int(self._saved_height)
+                or self.maximumHeight() != int(self._saved_height)
+            ):
                 self._saved_height = new_h
                 self.setFixedHeight(new_h)
                 self.height_changed.emit(new_h)
@@ -764,7 +814,7 @@ class SplitWidget(QFrame):
         self._update_webview(is_finished=True)
         self.set_busy(True)
         if self._mode == SplitMode.TRANSLATION:
-            self.translation_requested.emit(self._block.id)
+            self.translation_refresh_requested.emit(self._block.id)
         elif self._chat_history:
             if self._chat_history[-1]["role"] == "assistant":
                 self._chat_history.pop()

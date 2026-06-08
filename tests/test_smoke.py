@@ -264,7 +264,7 @@ def test_main_window_smoke() -> None:
         from PySide6.QtCore import Qt, QTimer, QPoint
         from PySide6.QtGui import QAction
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QApplication, QDockWidget, QToolBar, QToolButton, QWidget
+        from PySide6.QtWidgets import QApplication, QDockWidget, QPushButton, QScrollArea, QToolBar, QToolButton, QWidget
         from PySide6.QtWebEngineCore import QWebEngineProfile
 
         from src.main import setup_logging, build_services
@@ -428,14 +428,58 @@ def test_main_window_smoke() -> None:
         assert float_button is not None
         assert float_button.isVisible()
         assert not window._right_dock.isFloating()
+        long_followup = "这是一个很长的追问问题，用来验证右侧面板默认显示最左侧开头文字，并且可以横向滚动查看后半段内容？"
+        window._on_followup_ready([long_followup, "第二个补充问题？", "第三个补充问题？"], window._dock_answer_split_id)
+        app.processEvents()
+        QTest.qWait(50)
+        app.processEvents()
+        assert isinstance(window._ai_followup_widget, QScrollArea)
+        assert window._ai_followup_widget.isVisible()
+        assert window._ai_followup_widget.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        assert window._ai_followup_widget.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        followup_buttons = [
+            button for button in window.findChildren(QPushButton)
+            if button.property("followup_question")
+        ]
+        assert [button.property("followup_question") for button in followup_buttons] == [
+            long_followup, "第二个补充问题？", "第三个补充问题？"
+        ]
+        assert followup_buttons[0].text() == long_followup
+        assert "text-align: left" in followup_buttons[0].styleSheet()
+        assert window._ai_followup_container.minimumWidth() >= followup_buttons[0].fontMetrics().horizontalAdvance(long_followup)
+        assert window._ai_followup_widget.horizontalScrollBar().value() == 0
+        assert window._ai_followup_widget.verticalScrollBar().value() == 0
+        docked_right_width = window._right_dock.width()
+        screen = window.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        expected_float_width = min(
+            max(760, int(window.width() * 0.55)),
+            max(window._right_panel_min_width, available.width() - 64),
+        )
+        expected_float_height = min(
+            max(680, int(window.height() * 0.78)),
+            max(480, available.height() - 64),
+        )
+        window._dock_answer_render_text = "cached dock answer"
+        window._dock_answer_render_finished = True
+        refresh_calls = []
+        window._refresh_dock_answer_view = lambda: refresh_calls.append(window._dock_answer_render_text)
         float_button.click()
+        app.processEvents()
+        QTest.qWait(200)
         app.processEvents()
         assert window._right_dock.isFloating()
         assert float_button.isVisible()
+        assert "cached dock answer" in refresh_calls
+        float_geom = window._right_dock.geometry()
+        assert float_geom.width() >= min(720, expected_float_width)
+        assert float_geom.height() >= min(640, expected_float_height)
+        assert float_geom.width() > docked_right_width
         float_button.click()
         app.processEvents()
         assert not window._right_dock.isFloating()
         assert window.dockWidgetArea(window._right_dock) == Qt.DockWidgetArea.RightDockWidgetArea
+        assert abs(window._right_dock.width() - docked_right_width) <= 24
         assert window.findChild(QAction, "high_precision_formula_action") is not None
         assert window.findChild(QAction, "high_precision_formula_toolbar_action") is not None
         assert window._formula_idle_timer.interval() == 5000
@@ -455,10 +499,11 @@ def test_split_widget_followup_buttons() -> None:
     result = _run_python(
         """
         import sys
-        from PySide6.QtWidgets import QApplication, QPushButton
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QVBoxLayout
 
         from src.core.models import BlockType, DocumentBlock, SplitMode
-        from src.ui.split_widget import SplitWidget
+        from src.ui.split_widget import SplitWidget, WebViewPool
 
         app = QApplication(sys.argv)
         block = DocumentBlock(
@@ -469,16 +514,63 @@ def test_split_widget_followup_buttons() -> None:
             bbox=(0, 0, 100, 20),
         )
         widget = SplitWidget(block, mode=SplitMode.QUESTION)
-        widget.show_followup_questions(["问题一？", "问题二？", "问题三？"])
+        idx = widget._body_layout.indexOf(widget._result_view)
+        assert idx >= 0
+        assert widget._body_layout.stretch(idx) == 1
+        view = widget._result_view
+        try:
+            view.loadFinished.disconnect(widget._on_page_loaded)
+        except Exception:
+            pass
+        widget._body_layout.removeWidget(view)
+        view.setParent(None)
+        WebViewPool.release(view)
+        widget._result_view = None
+        widget._page_ready = False
+        widget._thaw_webview()
+        idx = widget._body_layout.indexOf(widget._result_view)
+        assert idx >= 0
+        assert widget._body_layout.stretch(idx) == 1
+        long_question = "这是一个很长的追问问题，用来验证左侧文字优先可见，并且需要横向滚动条查看完整内容？"
+        widget.show_followup_questions([long_question, "问题二？", "问题三？"])
+        assert isinstance(widget._followup_widget, QScrollArea)
+        assert isinstance(widget._followup_layout, QVBoxLayout)
+        assert widget._followup_widget.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        assert widget._followup_widget.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
         buttons = widget.findChildren(QPushButton)
         followups = [button.property("followup_question") for button in buttons if button.property("followup_question")]
-        assert followups == ["问题一？", "问题二？", "问题三？"]
+        assert followups == [long_question, "问题二？", "问题三？"]
+        followup_buttons = [button for button in buttons if button.property("followup_question")]
+        assert followup_buttons[0].text() == long_question
+        assert "text-align: left" in followup_buttons[0].styleSheet()
+        assert widget._followup_container.minimumWidth() >= followup_buttons[0].fontMetrics().horizontalAdvance(long_question)
+        assert all(button.minimumHeight() >= 32 for button in followup_buttons)
         widget.set_content_padding(12, -4)
         assert widget._content_padding == (12, 0)
         widget._pending_padding_js = None
         widget._queue_content_padding()
         assert "paddingLeft='12px'" in widget._pending_padding_js
         assert "paddingRight='0px'" in widget._pending_padding_js
+        emitted_heights = []
+        widget.height_changed.connect(emitted_heights.append)
+        widget._compute_chrome_height = lambda: 40
+        widget._saved_height = 220
+        widget.setFixedHeight(220)
+        widget.setMaximumHeight(16777215)
+        widget._adjust_height(180)
+        assert widget._saved_height == 224
+        assert widget.minimumHeight() == 224
+        assert widget.maximumHeight() == 224
+        assert emitted_heights[-1] == 224
+        widget.setMaximumHeight(16777215)
+        widget._adjust_height(180)
+        assert widget.minimumHeight() == 224
+        assert widget.maximumHeight() == 224
+        widget._mode = SplitMode.TRANSLATION
+        widget._update_mode_ui()
+        widget.apply_theme("light")
+        assert "#f0f5ff" in widget.styleSheet()
+        assert "qlineargradient" not in widget.styleSheet()
         widget.close()
         app.quit()
         print("split followup smoke ok")

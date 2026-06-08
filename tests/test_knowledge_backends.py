@@ -313,6 +313,27 @@ def test_sqlite_fts_backend_builds_and_retrieves(tmp_path) -> None:
     assert results[0]["metadata"]["page"] == 0
 
 
+def test_sqlite_fts_backend_preserves_rank_as_distance(tmp_path) -> None:
+    backend = SQLiteFtsBackend(tmp_path)
+    blocks = [
+        _block("p0_b0"),
+        DocumentBlock(
+            id="p0_b1",
+            page_num=0,
+            block_type=BlockType.PARAGRAPH,
+            content="Attention is mentioned here without key-value details.",
+            bbox=(0, 0, 1, 1),
+            section_title="Attention",
+        ),
+    ]
+
+    backend.build(blocks, "doc-fts", True, lambda _c, _t: None)
+    results = backend.retrieve("attention keys", [], "doc-fts", top_k=2)
+
+    assert [result["id"] for result in results] == ["p0_b0", "p0_b1"]
+    assert results[0]["distance"] < results[1]["distance"]
+
+
 def test_sqlite_fts_backend_skips_matching_rebuild(tmp_path) -> None:
     backend = SQLiteFtsBackend(tmp_path)
     blocks = [_block("p0_b0"), _block("p0_b1")]
