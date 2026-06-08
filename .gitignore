@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .cache/
+.tensor_cache/
 .tool_models/
 dist/
 build/
@@ -45,6 +46,8 @@ config.yaml
 *.gif
 *.bmp
 *.svg
+*.mp4
+测试资料/
 
 # ========== AI 缓存数据库 ==========
 data/ai_cache.db
@@ -63,6 +66,15 @@ data/graph_index_jobs.db-wal
 # ========== 打包工具 / 开源借鉴 ==========
 pack_code.py
 开源借鉴/
+
+# ========== 本地协作 / 交接 / 报告 ==========
+AGENTS.md
+TODO.md
+2026-05-21_工作记录与问题复盘.md
+极简设计报告.md
+docs/current_goal_and_next_steps.md
+docs/next_session_handoff.md
+docs/workspace_inventory.md
 
 # ========== 其他 ==========
 PDF_AI_Reader/
