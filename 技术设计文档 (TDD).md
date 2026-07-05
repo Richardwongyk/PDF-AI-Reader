@@ -442,7 +442,7 @@ class RoutingConfig(BaseModel):
 
 class UIConfig(BaseModel):
     language: str = "zh_CN"
-    theme: str = "light"                    # light / dark / sepia
+    theme: str = "dark"                     # light / dark / sepia
     split_position: str = "below"
     font_size: int = 12
     line_spacing: float = 1.5
