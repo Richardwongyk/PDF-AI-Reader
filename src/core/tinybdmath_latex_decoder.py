@@ -77,6 +77,7 @@ def decode_latex_candidate(
     *,
     vectors: list[dict[str, Any]] | None = None,
     fallback_text: str = "",
+    verify_layout: bool = True,
 ) -> TinyBDDecodedLatex:
     filtered_node_ids = _model_filtered_node_ids(structural_candidate)
     glyph_by_id = {_node_id(glyph): glyph for glyph in glyphs if _node_id(glyph) and _node_id(glyph) not in filtered_node_ids}
@@ -103,6 +104,7 @@ def decode_latex_candidate(
             glyphs=glyphs,
             structural_candidate=structural_candidate,
             vectors=vectors,
+            verify_layout=verify_layout,
         )
     if not relations:
         text = _decode_linear_glyphs(list(glyph_by_id.values()))
@@ -116,6 +118,7 @@ def decode_latex_candidate(
             glyphs=glyphs,
             structural_candidate=structural_candidate,
             vectors=vectors,
+            verify_layout=verify_layout,
         )
 
     supported_relations: list[dict[str, Any]] = []
@@ -152,6 +155,7 @@ def decode_latex_candidate(
             glyphs=glyphs,
             structural_candidate=structural_candidate,
             vectors=vectors,
+            verify_layout=verify_layout,
         )
 
     consumed_by_rule = _rule_consumed_nodes(by_source, node_by_id)
@@ -177,6 +181,7 @@ def decode_latex_candidate(
             glyphs=glyphs,
             structural_candidate=structural_candidate,
             vectors=vectors,
+            verify_layout=verify_layout,
         )
     confidence = _decode_confidence(supported_relations, warnings)
     return _finalize_decoded(
@@ -189,6 +194,7 @@ def decode_latex_candidate(
         glyphs=glyphs,
         structural_candidate=structural_candidate,
         vectors=vectors,
+        verify_layout=verify_layout,
     )
 
 
@@ -690,7 +696,10 @@ def _finalize_decoded(
     glyphs: list[dict[str, Any]],
     structural_candidate: dict[str, Any],
     vectors: list[dict[str, Any]] | None,
+    verify_layout: bool = True,
 ) -> TinyBDDecodedLatex:
+    if not verify_layout:
+        return _finalize_decoded_without_verifier(decoded)
     verification = verify_layout_candidate(
         glyphs,
         structural_candidate,
@@ -740,6 +749,46 @@ def _finalize_decoded(
         verifier_ranked_candidates=verifier_ranked_candidates,
         preferred_candidate=preferred_candidate,
         manual_review_recommendation=_manual_review_recommendation(latex_candidates),
+    )
+
+
+def _finalize_decoded_without_verifier(decoded: TinyBDDecodedLatex) -> TinyBDDecodedLatex:
+    confidence = round(max(0.0, min(1.0, float(decoded.confidence or 0.0))), 6)
+    latex_candidate = {
+        "rank": 1,
+        "latex": decoded.latex,
+        "confidence": confidence,
+        "source": "rank1_fast_decode",
+        "layout_status": "not_run",
+        "layout_confidence": confidence,
+        "layout_warnings": [],
+        "layout_verification": {},
+        "verifier_score": confidence,
+    }
+    return TinyBDDecodedLatex(
+        decoder_version=decoded.decoder_version,
+        latex=decoded.latex,
+        confidence=confidence,
+        warnings=decoded.warnings,
+        candidate_only=True,
+        accepted=False,
+        abstain=False,
+        layout_status="not_run",
+        layout_confidence=confidence,
+        layout_warnings=(),
+        layout_verification={},
+        latex_candidates=(latex_candidate,),
+        verifier_ranked_candidates=(latex_candidate,),
+        preferred_candidate=latex_candidate,
+        manual_review_recommendation={
+            "accepted": False,
+            "latex": decoded.latex,
+            "confidence": confidence,
+            "layout_status": "not_run",
+            "layout_confidence": confidence,
+            "reason": "fast_rank1_eval_without_layout_verifier",
+            "blockers": ["layout_verifier_not_run"],
+        },
     )
 
 

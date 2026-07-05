@@ -86,6 +86,29 @@ def test_generated_toc_prefers_structural_titles_over_formula_heading_noise() ->
     assert [item["page"] for item in toc] == [0, 0, 5, 5]
 
 
+def test_generated_toc_splits_multiple_structural_titles_from_one_block_and_deduplicates() -> None:
+    navigator = Navigator()
+
+    toc = navigator.generate_toc_from_blocks([
+        _block(
+            0,
+            "一、函数概念 1、定义域 1、定义域 二、函数性质 2、单调性",
+            BlockType.PARAGRAPH,
+            page_num=3,
+        ),
+        _block(1, "二、函数性质", BlockType.PARAGRAPH, page_num=4),
+    ])
+
+    assert [item["title"] for item in toc] == [
+        "一、函数概念",
+        "1、定义域",
+        "二、函数性质",
+        "2、单调性",
+    ]
+    assert [item["level"] for item in toc] == [2, 3, 2, 3]
+    assert [item["page"] for item in toc] == [3, 3, 3, 3]
+
+
 def test_generated_toc_rejects_formula_like_heading_fragments() -> None:
     navigator = Navigator()
 

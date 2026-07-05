@@ -133,6 +133,27 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 
 ## 本轮闭环结果
 
+2026-07-05 文档/单元验证补充：
+
+- 本轮没有重跑 Attention/Napkin 桌面 E2E，也没有关闭 Napkin 400x 极端滚动/缩放视觉门禁。
+- 当前工作树保留用户确认的 TinyBDMath Graph Parser M5 改动：whole-formula graph
+  context、结构化关系筛选、默认批量 torch eval 和 fast decode 可跳过 layout verifier。
+  E2E 或全软件验证中如果要报告公式质量，必须区分 fast decode 与 `--full-verifier`
+  结果；未跑 verifier 的 `layout_status=not_run` 不能作为 accepted gate 依据。
+- 新增批注 / TOC / 运行时检查：
+  `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_annotation_store.py tests/test_navigator_toc.py tests/test_smoke.py -q`
+  结果为 27 passed。
+- 合并回归 + M5 定向组合：
+  `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_pdf_viewer_navigation.py tests/test_formula_index_flow.py tests/test_tinybdmath_graph_parser.py tests/test_tinybdmath_eval_decoded_latex.py -q`
+  结果为 94 passed。
+- 轻量接手测试：
+  `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_external_formula_tools.py tests/test_formula_index_flow.py tests/test_born_digital_math.py tests/test_formula_semantic_review.py tests/test_smoke.py -q`
+  结果为 95 passed。
+- M5 定向测试：
+  `C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -m pytest tests/test_tinybdmath_graph_parser.py tests/test_tinybdmath_eval_decoded_latex.py -q`
+  结果为 32 passed。
+- TinyBDMath 主线测试组合结果为 159 passed。
+
 2026-06-05 UI 小步回归补充：
 
 - 最近一次只补跑了 UI/导航单元级回归，不是桌面 E2E：
@@ -202,5 +223,6 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 当前源 LaTeX 准确率复核显示：Attention 前 6 页 facts-only r0/parsed blocks 平均 best similarity 约 0.668、near match rate 0.429；inline 公式 `inline_weak_match_rate=0.026`、`inline_unmatched_count=75`，远未达标；显式 r2 单样本最佳平均 similarity 约 0.854，有提升但远未达到极高准确率或 exact-match 目标。
 - `formula_fusion` 当前能按 bbox/candidate_id 合并 parsed/r0/r2/r3 候选，输出 per-candidate 排名和定向 r2 队列；Attention 前 6 页 facts-only smoke 为 7 个区域、0 个 ready、7 个 `needs_more_evidence`。
 - 显式 r2 单样本首轮冷启动约 245s，复用 DB 后约 1.2s 跳过；后续必须优化批处理、常驻 worker、模型缓存和超时。
-- 旧的相关单元测试组合曾为 142 passed；2026-06-05 最近 UI/导航小步回归为 30 passed。
+- 旧的相关单元测试组合曾为 142 passed；2026-06-05 UI/导航小步回归为 30 passed；
+  2026-07-05 TinyBDMath 主线测试组合为 159 passed。
   正式交付前必须重跑 Attention/Napkin 闭环。

@@ -1,9 +1,9 @@
 # PDF AI 阅读器 · 技术设计文档 (TDD)
 
-**版本:** V5.1（2026-06-05 状态校准）
-**日期:** 2026-06-05
+**版本:** V5.2（2026-07-05 状态校准）
+**日期:** 2026-07-05
 **状态:** 架构基线 + 历史设计说明
-**依赖文档:** 产品需求文档 (PRD) V5.1
+**依赖文档:** 产品需求文档 (PRD) V5.2
 **开发语言:** Python 3.14.4
 **GUI 框架:** PySide6 ≥ 6.11.0
 **生成模型:** LiteLLM 云端 / Ollama 本地 / Mock 测试降级
@@ -56,6 +56,20 @@
 - 最新 UI/导航回归：`tests/test_pdf_viewer_navigation.py -q` 为 19 passed；
   `tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q` 为 30 passed。
   这不是 Attention/Napkin 桌面 E2E 或公式质量门禁。
+- 2026-07-05 当前 HEAD 已快进到 GitHub `origin/master` 的 `915d5f5`。
+  本地协作/交接文档已由 `.gitignore` 管理，不再作为可提交设计文档的一部分，
+  但仍必须先读。
+- 2026-07-05 当前工作树保留未提交 TinyBDMath Graph Parser M5 改动：
+  artifact/feature 版本升到 M5/v9，relation head 新增 whole-formula graph
+  context，训练默认 `graph_parser_m5`，评估默认批量 torch inference，并新增
+  `decode_latex_candidate(..., verify_layout=False)` 快速路径。该快速路径只用于
+  评估迭代，输出 `layout_status=not_run`，不能作为 accepted gate 依据。
+- 2026-07-05 当前可见 conda 环境为 `base`、`drawing`、`cs231n`、`lab3fast`、
+  `lottery_python`、`pdf_ai_reader_314`、`pku_elective`、`science`；旧文档中
+  `pdf_tool_*` 隔离工具环境本次未显示。
+- 2026-07-05 验证：新增批注/TOC/运行时检查 27 passed；
+  合并回归 + M5 定向组合 94 passed；轻量接手测试 95 passed；
+  TinyBDMath 主线测试 159 passed。
 
 本文档覆盖：
 - 主要模块结构与类定义（历史章节保留基线，当前状态以源码和交接文档为准）
@@ -1388,6 +1402,7 @@ ollama pull bge-m3
 | AI 工具集侧边栏 | ✅ 已实现基础入口 | 全文问答输入、证据树、回答 WebView、追问建议、证据跳转 |
 | 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5、审核 UI 已接线；最终质量未达标 |
 | 公式审核与写回 | 🟡 进行中 | manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回已接线；批量审核待补 |
+| TinyBDMath Graph Parser M5 | 🟡 工作树实验 | whole-formula graph context、结构化关系筛选和批量 torch eval 已在当前未提交工作树；仍 candidate-only，需 full verifier 评估后才能决定 r2a artifact |
 
 ---
 
@@ -1403,4 +1418,4 @@ ollama pull bge-m3
 
 ---
 
-*本文档已按 2026-06-05 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*
+*本文档已按 2026-07-05 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*

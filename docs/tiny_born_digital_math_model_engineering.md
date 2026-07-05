@@ -1,6 +1,6 @@
 # TinyBDMath 公式恢复方案
 
-最后更新：2026-06-02
+最后更新：2026-07-05
 
 本文只保留当前要执行的方案：AI/Math born-digital 公式的 CSLT 目标树、
 PDF/CSLT alignment、Graph Parser、constrained decoder 和 layout verifier。
@@ -76,6 +76,25 @@ PDF 里每个小字、小符号、小横线，模型要直接判断：
 - 符号等价证据交集：`src/core/tinybdmath_symbol_equivalence.py`
 - 图结构模型：`src/core/tinybdmath_graph_parser.py`
 - 相关工具和测试。
+
+2026-07-05 当前工作树状态：
+
+- 用户确认保留一组未提交 Graph Parser M5 改动；它们不是误改。
+- M5 将 artifact/feature 版本推进到
+  `tinybdmath_graph_parser_m5_json_v1` / `tinybdmath_graph_parser_features_v9`。
+- M5 在 relation head 中新增 whole-formula graph context：候选公式图的节点数、
+  glyph/vector 数、候选边密度、入/出度、距离排名和规则线邻居等特征。
+- 训练脚本默认 `graph_parser_m5`；主程序仍只加载导出的 JSON artifact，不要求
+  `pdf_ai_reader_314` 主环境安装 PyTorch。
+- eval 工具默认使用批量 torch inference；`--python-inference` 只用于 legacy/no-torch
+  smoke；`--full-verifier` 用于运行较慢 layout verifier 和 n-best 审计。
+- `decode_latex_candidate(..., verify_layout=False)` 是快速评估路径，输出
+  `layout_status=not_run`，仍然 candidate-only，不得进入 accepted gate。
+- M5 新增结构化关系筛选，约束链式关系和部分独占子关系的明显冲突。该约束只看
+  结构关系类型和置信度，不按具体公式内容、命令名或样本词表分支。
+- 当前验证：新增批注/TOC/运行时检查 27 passed；合并回归 + M5 定向组合
+  94 passed；轻量接手测试 95 passed；M5 定向测试 32 passed；TinyBDMath 主线测试
+  159 passed。
 
 本轮提交已在图结构模型里提交“节点保留/丢弃”学习：
 
@@ -300,6 +319,18 @@ decoder 里写补丁。
 
 目标：让模型直接输出公式结构。
 
+2026-07-05 M5 实验边界：
+
+- M5 的 whole-formula graph context 只能作为模型输入和 artifact 证据，不得在
+  decoder 中补公式模板。
+- 评估报告必须明确区分 fast decode 和 full verifier：
+  `verify_layout=false` / 未传 `--full-verifier` 的结果只能用于快速模型迭代；
+  能影响 r2a 默认 artifact 或 accepted gate 的质量结论必须跑 full verifier。
+- 结构化关系筛选可用于去掉明显冲突的低置信边，但不能替代模型学习 group、
+  vector role、text/operator boundary 或 verifier 校准。
+- 如果 M5 提升了 rank-1/fast exact，但增加 abstain、review 或 verifier blocker，
+  不能宣称质量改善。
+
 2026-06-03 当前状态：
 
 - 已完成 2000 行短训 smoke，临时目录
@@ -380,6 +411,8 @@ decoder 里写补丁。
 1. 继续校准 n-best 排序、TEXT precision、decoder warning 和 verifier 阈值。
 2. 扩大 verifier 对符号覆盖、bbox 覆盖、布局一致性和置信度的检查。
 3. 低置信时明确拒绝，accepted gate 仍保持关闭或极保守。
+4. 对 M5 同时输出 fast/full verifier 双报告，避免把未跑 verifier 的
+   `layout_status=not_run` 当成可审计候选质量。
 
 验收：
 

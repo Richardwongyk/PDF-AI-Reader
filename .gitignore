@@ -65,6 +65,15 @@ data/formula_index_jobs.db-wal
 data/graph_index_jobs.db
 data/graph_index_jobs.db-shm
 data/graph_index_jobs.db-wal
+src/data/ai_cache.db
+src/data/ai_cache.db-shm
+src/data/ai_cache.db-wal
+src/data/formula_index_jobs.db
+src/data/formula_index_jobs.db-shm
+src/data/formula_index_jobs.db-wal
+src/data/graph_index_jobs.db
+src/data/graph_index_jobs.db-shm
+src/data/graph_index_jobs.db-wal
 
 # ========== 打包工具 / 开源借鉴 ==========
 pack_code.py

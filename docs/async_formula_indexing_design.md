@@ -93,6 +93,19 @@ PDF 导入
 - 多轮报告已接入源 LaTeX 对照准确率复核：每个 stage/model 都输出 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 必须证明准确率逐轮递增，未达门槛的结果不能 accepted。
 - 多工具协同细设计见 `docs/formula_multitool_fusion_design.md`：候选级 fusion table、coverage-comparable 检查、accepted/rejected audit、manual revision 和 r5 增量写回基础闭环已经落地；下一步是批量审核、路径证据和大样本质量门禁。自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
 
+2026-07-05 r2a 状态补充：
+
+- 当前工作树保留用户确认的 TinyBDMath Graph Parser M5 改动。M5 新增
+  whole-formula graph context、结构化关系冲突筛选、默认批量 torch eval 和
+  fast decode 可跳过 layout verifier。
+- M5 仍属于 `r2a_tinybdmath_structural` 的 candidate-only 路线；不改变 r0/r1/r2/r3/r4/r5
+  异步落库、input hash 跳过和 accepted gate 边界。
+- 未跑 layout verifier 的 `layout_status=not_run` 只能用于快速评估，不得写 accepted，
+  不得污染正文、FTS、向量库或 GraphRAG。
+- 2026-07-05 当前验证：新增批注/TOC/运行时检查 27 passed；合并回归 + M5
+  定向组合 94 passed；轻量接手测试 95 passed；M5 定向测试 32 passed；
+  TinyBDMath 主线测试 159 passed。未重跑 Attention/Napkin 桌面 E2E。
+
 这一步已完成多轮调度、存储闭环和 r3 候选写回的第一版：
 
 - `FormulaSemanticReviewService` 消费 `r3_cloud_semantic_review` 队列，按批调用分析模型，对单个公式块生成 JSON 复核候选。

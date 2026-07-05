@@ -18,6 +18,7 @@ from src.core.tinybdmath_graph_parser import (
     GRAPH_PARSER_ARTIFACT_VERSION,
     GRAPH_PARSER_FEATURE_VERSION,
     GRAPH_PARSER_FEATURES,
+    GRAPH_PARSER_GRAPH_FEATURES,
     GRAPH_PARSER_DEFAULT_NODE_FILTER_THRESHOLD,
     GRAPH_PARSER_RUNTIME_RELATION_CONFIDENCE_FLOOR,
     GRAPH_PARSER_NODE_FEATURES,
@@ -70,7 +71,7 @@ GRAPH_PARSER_RELATION_TO_FAMILY = {
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Train TinyBDMath Graph Parser M4 with PyTorch.")
+    parser = argparse.ArgumentParser(description="Train TinyBDMath Graph Parser with PyTorch.")
     parser.add_argument("--graph-rows", type=Path, required=True)
     parser.add_argument("--alignment-rows", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -92,8 +93,8 @@ def main() -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--relation-architecture",
-        choices=("graph_parser_m2", "graph_parser_m3", "graph_parser_m4"),
-        default="graph_parser_m4",
+        choices=("graph_parser_m2", "graph_parser_m3", "graph_parser_m4", "graph_parser_m5"),
+        default="graph_parser_m5",
     )
     parser.add_argument("--keep-threshold", type=float, default=0.5)
     parser.add_argument("--keep-loss-weight", type=float, default=0.5)
@@ -129,6 +130,8 @@ def main() -> int:
     scales = tensors["scales"]
     node_means = tensors["node_means"]
     node_scales = tensors["node_scales"]
+    graph_means = tensors["graph_means"]
+    graph_scales = tensors["graph_scales"]
 
     node_model = _build_node_context_model(
         input_width=len(GRAPH_PARSER_NODE_FEATURES),
@@ -142,6 +145,7 @@ def main() -> int:
         output_width=len(GRAPH_PARSER_RELATIONS),
         node_model=node_model,
         node_output_width=len(GRAPH_PARSER_NODE_LABELS),
+        graph_input_width=len(GRAPH_PARSER_GRAPH_FEATURES),
         hidden_units=int(args.hidden_units),
         hidden_layers=int(args.hidden_layers),
         nn=nn,
@@ -159,6 +163,7 @@ def main() -> int:
             train_x,
             tensors["train_source_node_x"],
             tensors["train_target_node_x"],
+            tensors["train_graph_x"],
             train_y,
             train_weight,
         ),
@@ -195,14 +200,15 @@ def main() -> int:
             loss.backward()
             node_optimizer.step()
         model.train()
-        for batch_x, batch_source_node_x, batch_target_node_x, batch_y, batch_weight in loader:
+        for batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x, batch_y, batch_weight in loader:
             batch_x = batch_x.to(args.device)
             batch_source_node_x = batch_source_node_x.to(args.device)
             batch_target_node_x = batch_target_node_x.to(args.device)
+            batch_graph_x = batch_graph_x.to(args.device)
             batch_y = batch_y.to(args.device)
             batch_weight = batch_weight.to(args.device)
             optimizer.zero_grad(set_to_none=True)
-            relation_logits = model(batch_x, batch_source_node_x, batch_target_node_x)
+            relation_logits = model(batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x)
             relation_loss = _weighted_loss(
                 loss_fn(relation_logits, batch_y),
                 batch_weight,
@@ -210,7 +216,7 @@ def main() -> int:
             )
             loss = relation_loss
             if keep_loss_fn is not None:
-                keep_logits = model.keep_logits(batch_x, batch_source_node_x, batch_target_node_x)
+                keep_logits = model.keep_logits(batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x)
                 keep_targets = (batch_y != GRAPH_PARSER_RELATIONS.index("NONE")).float()
                 keep_loss = _weighted_loss(
                     keep_loss_fn(keep_logits, keep_targets),
@@ -219,7 +225,7 @@ def main() -> int:
                 )
                 loss = relation_loss + (float(args.keep_loss_weight) * keep_loss)
             if getattr(model, "family_output", None) is not None:
-                family_logits = model.family_logits(batch_x, batch_source_node_x, batch_target_node_x)
+                family_logits = model.family_logits(batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x)
                 family_targets = family_lookup[batch_y]
                 family_loss = _weighted_loss(
                     family_loss_fn(family_logits, family_targets),
@@ -230,7 +236,18 @@ def main() -> int:
             loss.backward()
             optimizer.step()
 
-    artifact = _export_artifact(model, node_model, means, scales, node_means, node_scales, args, torch=torch)
+    artifact = _export_artifact(
+        model,
+        node_model,
+        means,
+        scales,
+        node_means,
+        node_scales,
+        graph_means,
+        graph_scales,
+        args,
+        torch=torch,
+    )
     train_eval_x, train_eval_y = _limit_eval_tensors(
         train_x,
         train_y,
@@ -247,6 +264,7 @@ def main() -> int:
         train_eval_y,
         source_node_x=tensors["train_source_node_x"][: train_eval_x.shape[0]],
         target_node_x=tensors["train_target_node_x"][: train_eval_x.shape[0]],
+        graph_x=tensors["train_graph_x"][: train_eval_x.shape[0]],
         labels=GRAPH_PARSER_RELATIONS,
         positive_excluded_label="NONE",
         keep_threshold=float(args.keep_threshold),
@@ -260,6 +278,7 @@ def main() -> int:
         val_y,
         source_node_x=tensors["val_source_node_x"],
         target_node_x=tensors["val_target_node_x"],
+        graph_x=tensors["val_graph_x"],
         labels=GRAPH_PARSER_RELATIONS,
         positive_excluded_label="NONE",
         keep_threshold=float(args.keep_threshold),
@@ -309,6 +328,7 @@ def main() -> int:
             val_x,
             tensors["val_source_node_x"],
             tensors["val_target_node_x"],
+            tensors["val_graph_x"],
             val_y,
             keep_threshold=float(args.keep_threshold),
             batch_size=int(args.eval_batch_size),
@@ -320,6 +340,7 @@ def main() -> int:
             val_x,
             tensors["val_source_node_x"],
             tensors["val_target_node_x"],
+            tensors["val_graph_x"],
             val_y,
             batch_size=int(args.eval_batch_size),
             device=args.device,
@@ -333,7 +354,7 @@ def main() -> int:
         "notes": [
             "PyTorch is used only in the isolated training environment.",
             "Exported Graph Parser artifact is candidate-only until verifier/accepted gate passes.",
-            "Relation training is vectorized over batched edge/source-node/target-node tensors.",
+            "Relation training is vectorized over batched edge/source-node/target-node/whole-formula-graph tensors.",
             "Node labels train keep/drop behavior; decoder must not guess spacing or artifact handling.",
             "Node UNKNOWN labels are weak evidence, so node training uses confidence weights without class-balancing UNKNOWN upward.",
         ],
@@ -401,6 +422,7 @@ def _build_context_relation_model(
     output_width: int,
     node_model: Any,
     node_output_width: int,
+    graph_input_width: int,
     hidden_units: int,
     hidden_layers: int,
     nn: Any,
@@ -420,21 +442,36 @@ def _build_context_relation_model(
             )
             edge_width = _hidden_output_width(self.edge_hidden, fallback=input_width)
             node_width = _hidden_output_width(self.node_model.hidden, fallback=len(GRAPH_PARSER_NODE_FEATURES))
-            interaction_multiplier = 2 if self.architecture_mode in {"graph_parser_m3", "graph_parser_m4"} else 0
+            self.graph_hidden = (
+                _build_hidden_mlp(
+                    input_width=graph_input_width,
+                    hidden_units=max(8, hidden_units // 2),
+                    hidden_layers=max(1, hidden_layers),
+                    nn=nn,
+                )
+                if self.architecture_mode == "graph_parser_m5"
+                else None
+            )
+            graph_width = _hidden_output_width(self.graph_hidden, fallback=graph_input_width) if self.graph_hidden is not None else 0
+            interaction_multiplier = 2 if self.architecture_mode in {"graph_parser_m3", "graph_parser_m4", "graph_parser_m5"} else 0
             relation_width = edge_width + (2 * node_width) + (2 * int(node_output_width))
+            relation_width += graph_width
             relation_width += interaction_multiplier * (node_width + int(node_output_width))
             self.output = nn.Linear(relation_width, output_width)
             self.family_output = nn.Linear(relation_width, len(GRAPH_PARSER_RELATION_FAMILIES))
-            self.keep_output = nn.Linear(relation_width, 1) if self.architecture_mode == "graph_parser_m4" else None
+            self.keep_output = nn.Linear(relation_width, 1) if self.architecture_mode in {"graph_parser_m4", "graph_parser_m5"} else None
 
-        def fused_context(self, edge_x: Any, source_node_x: Any, target_node_x: Any) -> Any:
+        def fused_context(self, edge_x: Any, source_node_x: Any, target_node_x: Any, graph_x: Any | None = None) -> Any:
             edge_context = self.edge_hidden(edge_x)
             source_context = self.node_model.encode(source_node_x)
             target_context = self.node_model.encode(target_node_x)
             source_logits = self.node_model.output(source_context)
             target_logits = self.node_model.output(target_context)
-            pieces = [edge_context, source_context, target_context, source_logits, target_logits]
-            if self.architecture_mode in {"graph_parser_m3", "graph_parser_m4"}:
+            pieces = [edge_context, source_context, target_context]
+            if self.graph_hidden is not None and graph_x is not None:
+                pieces.append(self.graph_hidden(graph_x))
+            pieces.extend([source_logits, target_logits])
+            if self.architecture_mode in {"graph_parser_m3", "graph_parser_m4", "graph_parser_m5"}:
                 pieces.extend(
                     [
                         torch.abs(source_context - target_context),
@@ -445,16 +482,16 @@ def _build_context_relation_model(
                 )
             return torch.cat(pieces, dim=1)
 
-        def keep_logits(self, edge_x: Any, source_node_x: Any, target_node_x: Any) -> Any:
+        def keep_logits(self, edge_x: Any, source_node_x: Any, target_node_x: Any, graph_x: Any | None = None) -> Any:
             if self.keep_output is None:
                 raise RuntimeError("keep head unavailable")
-            return self.keep_output(self.fused_context(edge_x, source_node_x, target_node_x)).squeeze(1)
+            return self.keep_output(self.fused_context(edge_x, source_node_x, target_node_x, graph_x)).squeeze(1)
 
-        def family_logits(self, edge_x: Any, source_node_x: Any, target_node_x: Any) -> Any:
-            return self.family_output(self.fused_context(edge_x, source_node_x, target_node_x))
+        def family_logits(self, edge_x: Any, source_node_x: Any, target_node_x: Any, graph_x: Any | None = None) -> Any:
+            return self.family_output(self.fused_context(edge_x, source_node_x, target_node_x, graph_x))
 
-        def forward(self, edge_x: Any, source_node_x: Any, target_node_x: Any) -> Any:
-            return self.output(self.fused_context(edge_x, source_node_x, target_node_x))
+        def forward(self, edge_x: Any, source_node_x: Any, target_node_x: Any, graph_x: Any | None = None) -> Any:
+            return self.output(self.fused_context(edge_x, source_node_x, target_node_x, graph_x))
 
     return ContextRelationModel()
 
@@ -466,6 +503,8 @@ def _export_artifact(
     scales: list[float],
     node_means: list[float],
     node_scales: list[float],
+    graph_means: list[float],
+    graph_scales: list[float],
     args: argparse.Namespace,
     *,
     torch: Any,
@@ -475,15 +514,13 @@ def _export_artifact(
     hidden_layers = [layer for layer in model.edge_hidden if isinstance(layer, nn.Linear)]
     output = model.output
     keep_output = getattr(model, "keep_output", None)
+    graph_hidden = getattr(model, "graph_hidden", None)
+    graph_hidden_layers = [layer for layer in graph_hidden if isinstance(layer, nn.Linear)] if graph_hidden is not None else []
     node_hidden_layers = [layer for layer in node_model.hidden if isinstance(layer, nn.Linear)]
     node_output = node_model.output
     return TinyBDGraphParserArtifact(
         version=GRAPH_PARSER_ARTIFACT_VERSION,
-        model_version=(
-            "tinybdmath_graph_parser_m4"
-            if str(args.relation_architecture) == "graph_parser_m4"
-            else ("tinybdmath_graph_parser_m3" if str(args.relation_architecture) == "graph_parser_m3" else "tinybdmath_graph_parser_m2")
-        ),
+        model_version=f"tinybdmath_{str(args.relation_architecture)}",
         feature_version=GRAPH_PARSER_FEATURE_VERSION,
         feature_names=GRAPH_PARSER_FEATURES,
         relation_labels=GRAPH_PARSER_RELATIONS,
@@ -520,7 +557,9 @@ def _export_artifact(
             "torch_version": str(torch.__version__),
             "architecture": {
                 "relation_model": (
-                    "interaction_relation_keep_mlp"
+                    "whole_formula_graph_context_relation_mlp"
+                    if str(args.relation_architecture) == "graph_parser_m5"
+                    else "interaction_relation_keep_mlp"
                     if str(args.relation_architecture) == "graph_parser_m4"
                     else ("interaction_relation_mlp" if str(args.relation_architecture) == "graph_parser_m3" else "context_relation_mlp")
                 ),
@@ -529,6 +568,11 @@ def _export_artifact(
                         "edge_features",
                         "source_node_embedding",
                         "target_node_embedding",
+                        *(
+                            ["whole_formula_graph_context"]
+                            if str(args.relation_architecture) == "graph_parser_m5"
+                            else []
+                        ),
                         "source_node_logits",
                         "target_node_logits",
                         "abs_node_embedding_delta",
@@ -536,12 +580,15 @@ def _export_artifact(
                         "abs_node_logit_delta",
                         "node_logit_product",
                     ]
-                    if str(args.relation_architecture) in {"graph_parser_m3", "graph_parser_m4"}
+                    if str(args.relation_architecture) in {"graph_parser_m3", "graph_parser_m4", "graph_parser_m5"}
                     else ["edge_features", "source_node_embedding", "target_node_embedding", "source_node_logits", "target_node_logits"]
                 ),
-                "edge_presence_head": bool(str(args.relation_architecture) == "graph_parser_m4"),
+                "edge_presence_head": bool(str(args.relation_architecture) in {"graph_parser_m4", "graph_parser_m5"}),
                 "coarse_relation_family_head": True,
                 "node_model": "shared_node_context_mlp",
+                "graph_context_model": "whole_formula_candidate_graph_context_mlp"
+                if str(args.relation_architecture) == "graph_parser_m5"
+                else "",
                 "training_backend": "pytorch_vectorized_batches",
             },
         },
@@ -566,6 +613,17 @@ def _export_artifact(
         ),
         keep_output_bias=round(float(keep_output.bias.detach().cpu().view(-1)[0].item()), 8) if keep_output is not None else 0.0,
         keep_threshold=float(args.keep_threshold),
+        graph_feature_names=GRAPH_PARSER_GRAPH_FEATURES,
+        graph_means=tuple(round(float(value), 8) for value in graph_means),
+        graph_scales=tuple(round(float(value), 8) for value in graph_scales),
+        graph_hidden_weights=tuple(
+            tuple(tuple(round(float(value), 8) for value in row) for row in layer.weight.detach().cpu().tolist())
+            for layer in graph_hidden_layers
+        ),
+        graph_hidden_biases=tuple(
+            tuple(round(float(value), 8) for value in layer.bias.detach().cpu().tolist())
+            for layer in graph_hidden_layers
+        ),
     )
 
 
@@ -608,6 +666,7 @@ def _tensor_cache_key(args: argparse.Namespace) -> str:
         "feature_version": GRAPH_PARSER_FEATURE_VERSION,
         "feature_names": list(GRAPH_PARSER_FEATURES),
         "node_feature_names": list(GRAPH_PARSER_NODE_FEATURES),
+        "graph_feature_names": list(GRAPH_PARSER_GRAPH_FEATURES),
         "relation_labels": list(GRAPH_PARSER_RELATIONS),
         "node_label_names": list(GRAPH_PARSER_NODE_LABELS),
     }
@@ -630,10 +689,12 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
     train_weight_chunks: list[Any] = []
     train_source_node_chunks: list[Any] = []
     train_target_node_chunks: list[Any] = []
+    train_graph_chunks: list[Any] = []
     val_chunks: list[Any] = []
     val_y_chunks: list[Any] = []
     val_source_node_chunks: list[Any] = []
     val_target_node_chunks: list[Any] = []
+    val_graph_chunks: list[Any] = []
     node_train_chunks: list[Any] = []
     node_train_y_chunks: list[Any] = []
     node_train_weight_chunks: list[Any] = []
@@ -698,6 +759,7 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
             x_chunks=train_chunks,
             source_node_x_chunks=train_source_node_chunks,
             target_node_x_chunks=train_target_node_chunks,
+            graph_x_chunks=train_graph_chunks,
             y_chunks=train_y_chunks,
             weight_chunks=train_weight_chunks,
             torch=torch,
@@ -711,6 +773,7 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
             x_chunks=val_chunks,
             source_node_x_chunks=val_source_node_chunks,
             target_node_x_chunks=val_target_node_chunks,
+            graph_x_chunks=val_graph_chunks,
             y_chunks=val_y_chunks,
             weight_chunks=None,
             torch=torch,
@@ -752,8 +815,10 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
     val_raw = _cat_or_empty(val_chunks, width=len(GRAPH_PARSER_FEATURES), torch=torch)
     train_source_node_raw = _cat_or_empty(train_source_node_chunks, width=len(GRAPH_PARSER_NODE_FEATURES), torch=torch)
     train_target_node_raw = _cat_or_empty(train_target_node_chunks, width=len(GRAPH_PARSER_NODE_FEATURES), torch=torch)
+    train_graph_raw = _cat_or_empty(train_graph_chunks, width=len(GRAPH_PARSER_GRAPH_FEATURES), torch=torch)
     val_source_node_raw = _cat_or_empty(val_source_node_chunks, width=len(GRAPH_PARSER_NODE_FEATURES), torch=torch)
     val_target_node_raw = _cat_or_empty(val_target_node_chunks, width=len(GRAPH_PARSER_NODE_FEATURES), torch=torch)
+    val_graph_raw = _cat_or_empty(val_graph_chunks, width=len(GRAPH_PARSER_GRAPH_FEATURES), torch=torch)
     train_y = _cat_labels_or_empty(train_y_chunks, torch=torch)
     val_y = _cat_labels_or_empty(val_y_chunks, torch=torch)
     train_weight = _cat_weights_or_empty(train_weight_chunks, torch=torch)
@@ -765,6 +830,7 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
     train_x, means, scales = _normalize_raw_tensor(train_raw, torch=torch)
     val_x, _unused_means, _unused_scales = _normalize_raw_tensor(val_raw, means=means, scales=scales, torch=torch)
     train_node_x, node_means, node_scales = _normalize_raw_tensor(train_node_raw, torch=torch)
+    train_graph_x, graph_means, graph_scales = _normalize_raw_tensor(train_graph_raw, torch=torch)
     val_node_x, _unused_node_means, _unused_node_scales = _normalize_raw_tensor(
         val_node_raw,
         means=node_means,
@@ -795,17 +861,25 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
         scales=node_scales,
         torch=torch,
     )
+    val_graph_x, _unused_val_graph_means, _unused_val_graph_scales = _normalize_raw_tensor(
+        val_graph_raw,
+        means=graph_means,
+        scales=graph_scales,
+        torch=torch,
+    )
     return {
         "samples": total_samples,
         "node_samples": total_node_samples,
         "train_x": train_x,
         "train_source_node_x": train_source_node_x,
         "train_target_node_x": train_target_node_x,
+        "train_graph_x": train_graph_x,
         "train_y": train_y,
         "train_weight": train_weight,
         "val_x": val_x,
         "val_source_node_x": val_source_node_x,
         "val_target_node_x": val_target_node_x,
+        "val_graph_x": val_graph_x,
         "val_y": val_y,
         "train_node_x": train_node_x,
         "train_node_y": train_node_y,
@@ -816,6 +890,8 @@ def _load_training_tensors_streaming(args: argparse.Namespace, *, torch: Any) ->
         "scales": scales,
         "node_means": node_means,
         "node_scales": node_scales,
+        "graph_means": graph_means,
+        "graph_scales": graph_scales,
         "all_y_counts": all_y_counts,
         "all_node_y_counts": all_node_y_counts,
         "all_y_weighted": all_y_weighted,
@@ -934,16 +1010,18 @@ def _append_relation_tensor_chunk(
     x_chunks: list[Any],
     source_node_x_chunks: list[Any],
     target_node_x_chunks: list[Any],
+    graph_x_chunks: list[Any],
     y_chunks: list[Any],
     weight_chunks: list[Any] | None,
     torch: Any,
 ) -> None:
     if not samples:
         return
-    x, source_node_x, target_node_x, y, weights = _samples_to_relation_raw_tensors(
+    x, source_node_x, target_node_x, graph_x, y, weights = _samples_to_relation_raw_tensors(
         samples,
         feature_names=feature_names,
         node_feature_names=node_feature_names,
+        graph_feature_names=GRAPH_PARSER_GRAPH_FEATURES,
         labels=labels,
         label_key=label_key,
         torch=torch,
@@ -951,6 +1029,7 @@ def _append_relation_tensor_chunk(
     x_chunks.append(x)
     source_node_x_chunks.append(source_node_x)
     target_node_x_chunks.append(target_node_x)
+    graph_x_chunks.append(graph_x)
     y_chunks.append(y)
     if weight_chunks is not None:
         weight_chunks.append(weights)
@@ -961,14 +1040,16 @@ def _samples_to_relation_raw_tensors(
     *,
     feature_names: tuple[str, ...],
     node_feature_names: tuple[str, ...],
+    graph_feature_names: tuple[str, ...],
     labels: tuple[str, ...],
     label_key: str,
     torch: Any,
-) -> tuple[Any, Any, Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any, Any, Any]:
     label_to_index = {label: index for index, label in enumerate(labels)}
     feature_rows: list[list[float]] = []
     source_node_rows: list[list[float]] = []
     target_node_rows: list[list[float]] = []
+    graph_rows: list[list[float]] = []
     label_values: list[int] = []
     weights: list[float] = []
     for sample in samples:
@@ -981,15 +1062,20 @@ def _samples_to_relation_raw_tensors(
         target_node_features = sample.get("target_node_features", {})
         if not isinstance(target_node_features, dict):
             target_node_features = {}
+        graph_features = sample.get("graph_features", {})
+        if not isinstance(graph_features, dict):
+            graph_features = {}
         feature_rows.append([float(features.get(name, 0.0) or 0.0) for name in feature_names])
         source_node_rows.append([float(source_node_features.get(name, 0.0) or 0.0) for name in node_feature_names])
         target_node_rows.append([float(target_node_features.get(name, 0.0) or 0.0) for name in node_feature_names])
+        graph_rows.append([float(graph_features.get(name, 0.0) or 0.0) for name in graph_feature_names])
         label_values.append(label_to_index.get(str(sample.get(label_key, labels[0])), 0))
         weights.append(_sample_weight(sample))
     return (
         torch.tensor(feature_rows, dtype=torch.float32),
         torch.tensor(source_node_rows, dtype=torch.float32),
         torch.tensor(target_node_rows, dtype=torch.float32),
+        torch.tensor(graph_rows, dtype=torch.float32),
         torch.tensor(label_values, dtype=torch.long),
         torch.tensor(weights, dtype=torch.float32),
     )
@@ -1248,6 +1334,7 @@ def _evaluate_torch_model(
     *,
     source_node_x: Any | None = None,
     target_node_x: Any | None = None,
+    graph_x: Any | None = None,
     labels: tuple[str, ...],
     batch_size: int,
     device: str,
@@ -1270,13 +1357,15 @@ def _evaluate_torch_model(
             if source_node_x is not None and target_node_x is not None:
                 batch_source_node_x = source_node_x[start:end].to(device)
                 batch_target_node_x = target_node_x[start:end].to(device)
-                logits = model(batch_x, batch_source_node_x, batch_target_node_x)
+                batch_graph_x = graph_x[start:end].to(device) if graph_x is not None else None
+                logits = model(batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x)
                 predicted = _relation_predictions_from_logits(
                     model,
                     logits,
                     batch_x,
                     batch_source_node_x,
                     batch_target_node_x,
+                    batch_graph_x,
                     none_index=none_index,
                     keep_threshold=keep_threshold,
                     torch=torch,
@@ -1312,6 +1401,7 @@ def _evaluate_keep_head(
     x: Any,
     source_node_x: Any,
     target_node_x: Any,
+    graph_x: Any | None,
     y: Any,
     *,
     keep_threshold: float,
@@ -1334,7 +1424,8 @@ def _evaluate_keep_head(
             batch_x = x[start:end].to(device)
             batch_source_node_x = source_node_x[start:end].to(device)
             batch_target_node_x = target_node_x[start:end].to(device)
-            keep_logits = model.keep_logits(batch_x, batch_source_node_x, batch_target_node_x)
+            batch_graph_x = graph_x[start:end].to(device) if graph_x is not None else None
+            keep_logits = model.keep_logits(batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x)
             keep_prob = torch.sigmoid(keep_logits).cpu()
             expected = (y[start:end] != GRAPH_PARSER_RELATIONS.index("NONE")).cpu()
             predicted = keep_prob >= float(keep_threshold)
@@ -1360,6 +1451,7 @@ def _evaluate_family_head(
     x: Any,
     source_node_x: Any,
     target_node_x: Any,
+    graph_x: Any | None,
     y: Any,
     *,
     batch_size: int,
@@ -1383,7 +1475,8 @@ def _evaluate_family_head(
             batch_x = x[start:end].to(device)
             batch_source_node_x = source_node_x[start:end].to(device)
             batch_target_node_x = target_node_x[start:end].to(device)
-            logits = model.family_logits(batch_x, batch_source_node_x, batch_target_node_x)
+            batch_graph_x = graph_x[start:end].to(device) if graph_x is not None else None
+            logits = model.family_logits(batch_x, batch_source_node_x, batch_target_node_x, batch_graph_x)
             predicted = logits.argmax(dim=1).cpu()
             expected = expected_cpu[start:end]
             predicted_counts += torch.bincount(predicted, minlength=class_count).long()
@@ -1406,6 +1499,7 @@ def _relation_predictions_from_logits(
     edge_x: Any,
     source_node_x: Any,
     target_node_x: Any,
+    graph_x: Any | None,
     *,
     none_index: int,
     keep_threshold: float,
@@ -1414,7 +1508,7 @@ def _relation_predictions_from_logits(
     if getattr(model, "keep_output", None) is None or none_index < 0:
         return logits.argmax(dim=1)
     probabilities = torch.softmax(logits, dim=1)
-    keep_prob = torch.sigmoid(model.keep_logits(edge_x, source_node_x, target_node_x))
+    keep_prob = torch.sigmoid(model.keep_logits(edge_x, source_node_x, target_node_x, graph_x))
     positive = probabilities.clone()
     positive[:, none_index] = 0.0
     positive_mass = positive.sum(dim=1, keepdim=True).clamp_min(1e-12)

@@ -16,8 +16,8 @@ from typing import Any
 import unicodedata
 
 
-GRAPH_PARSER_ARTIFACT_VERSION = "tinybdmath_graph_parser_m4_json_v1"
-GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v8"
+GRAPH_PARSER_ARTIFACT_VERSION = "tinybdmath_graph_parser_m5_json_v1"
+GRAPH_PARSER_FEATURE_VERSION = "tinybdmath_graph_parser_features_v9"
 
 GRAPH_PARSER_RELATIONS = (
     "NONE",
@@ -53,6 +53,28 @@ GRAPH_PARSER_RELATIONS = (
 GRAPH_PARSER_NON_RUNTIME_SUPERVISION_RELATIONS = {
     "BASE",
     "CHILD",
+}
+GRAPH_PARSER_CHAIN_RELATIONS = {
+    "NEXT",
+    "TEXT_RUN_NEXT",
+    "MATRIX_ROW",
+    "MATRIX_CELL",
+}
+GRAPH_PARSER_EXCLUSIVE_CHILD_RELATIONS = {
+    "SUB",
+    "SUP",
+    "PRE_SUB",
+    "PRE_SUP",
+    "UNDER",
+    "OVER",
+    "ACCENT_BASE",
+    "RADICAL_BODY",
+    "RADICAL_INDEX",
+    "FENCE_BODY",
+    "FENCE_OPEN",
+    "FENCE_CLOSE",
+    "CELL_CONTENT",
+    "EQUATION_TAG",
 }
 
 GRAPH_PARSER_FEATURES = (
@@ -149,6 +171,35 @@ GRAPH_PARSER_NODE_FEATURES = (
     "same_font_letter_run_length",
 )
 
+GRAPH_PARSER_GRAPH_FEATURES = (
+    "bias",
+    "node_count",
+    "glyph_count",
+    "vector_count",
+    "candidate_pair_count",
+    "graph_width",
+    "graph_height",
+    "graph_aspect_ratio",
+    "candidate_density",
+    "source_out_degree",
+    "source_in_degree",
+    "target_out_degree",
+    "target_in_degree",
+    "source_out_degree_ratio",
+    "source_in_degree_ratio",
+    "target_out_degree_ratio",
+    "target_in_degree_ratio",
+    "candidate_distance_rank",
+    "candidate_distance_rank_ratio",
+    "candidate_distance_percentile",
+    "source_min_distance",
+    "source_mean_distance",
+    "target_min_distance",
+    "target_mean_distance",
+    "source_rule_neighbor_count",
+    "target_rule_neighbor_count",
+)
+
 
 @dataclass(frozen=True)
 class TinyBDGraphParserPrediction:
@@ -159,6 +210,41 @@ class TinyBDGraphParserPrediction:
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def graph_parser_structured_relation_selection(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    used_chain_sources: set[tuple[str, str]] = set()
+    used_chain_targets: set[tuple[str, str]] = set()
+    used_child_targets: set[str] = set()
+    ordered = sorted(
+        (item for item in predictions if isinstance(item, dict)),
+        key=lambda item: (
+            -float(item.get("confidence", 0.0) or 0.0),
+            str(item.get("source", "") or ""),
+            str(item.get("target", "") or ""),
+            str(item.get("relation", "") or ""),
+        ),
+    )
+    for item in ordered:
+        source = str(item.get("source", "") or "")
+        target = str(item.get("target", "") or "")
+        relation = str(item.get("relation", "") or "")
+        if not source or not target or not relation or relation == "NONE":
+            continue
+        if relation in GRAPH_PARSER_CHAIN_RELATIONS:
+            source_key = (relation, source)
+            target_key = (relation, target)
+            if source_key in used_chain_sources or target_key in used_chain_targets:
+                continue
+            used_chain_sources.add(source_key)
+            used_chain_targets.add(target_key)
+        elif relation in GRAPH_PARSER_EXCLUSIVE_CHILD_RELATIONS:
+            if target in used_child_targets:
+                continue
+            used_child_targets.add(target)
+        selected.append(dict(item))
+    return sorted(selected, key=lambda item: (str(item.get("source", "")), str(item.get("target", "")), str(item.get("relation", ""))))
 
 
 @dataclass(frozen=True)
@@ -188,6 +274,11 @@ class TinyBDGraphParserArtifact:
     keep_output_weights: tuple[float, ...] = ()
     keep_output_bias: float = 0.0
     keep_threshold: float = 0.5
+    graph_feature_names: tuple[str, ...] = GRAPH_PARSER_GRAPH_FEATURES
+    graph_means: tuple[float, ...] = ()
+    graph_scales: tuple[float, ...] = ()
+    graph_hidden_weights: tuple[tuple[tuple[float, ...], ...], ...] = field(default_factory=tuple)
+    graph_hidden_biases: tuple[tuple[float, ...], ...] = field(default_factory=tuple)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -235,6 +326,17 @@ class TinyBDGraphParserArtifact:
             keep_output_weights=tuple(float(value) for value in payload.get("keep_output_weights", [])),
             keep_output_bias=float(payload.get("keep_output_bias", 0.0) or 0.0),
             keep_threshold=float(payload.get("keep_threshold", 0.5) or 0.5),
+            graph_feature_names=tuple(str(item) for item in payload.get("graph_feature_names", GRAPH_PARSER_GRAPH_FEATURES)),
+            graph_means=tuple(float(item) for item in payload.get("graph_means", [])),
+            graph_scales=tuple(float(item) for item in payload.get("graph_scales", [])),
+            graph_hidden_weights=tuple(
+                tuple(tuple(float(value) for value in row) for row in layer)
+                for layer in payload.get("graph_hidden_weights", [])
+            ),
+            graph_hidden_biases=tuple(
+                tuple(float(value) for value in layer)
+                for layer in payload.get("graph_hidden_biases", [])
+            ),
         )
 
     @classmethod
@@ -257,6 +359,11 @@ class TinyBDGraphParser:
         all_nodes = graph_nodes(graph_row, include_blank=True)
         nodes = [node for node in all_nodes if node.get("node_type") == "vector" or str(node.get("text", "") or "").strip()]
         pairs = candidate_pairs(nodes)
+        node_features_by_id = {
+            str(node.get("node_id", "") or ""): graph_parser_node_features(node, nodes)
+            for node in nodes
+        }
+        graph_features_by_pair = graph_parser_graph_feature_map(nodes, pairs)
         predictions: list[TinyBDGraphParserPrediction] = []
         relation_alternatives: list[dict[str, Any]] = []
         cutoff = (
@@ -271,7 +378,15 @@ class TinyBDGraphParser:
         keep_cutoff = float(self.artifact.keep_threshold or 0.5)
         selected_confidences: list[float] = []
         for source, target in pairs:
-            probabilities, keep_probability = self._predict_relation_outputs(source, target, nodes)
+            key = (str(source["node_id"]), str(target["node_id"]))
+            probabilities, keep_probability = self._predict_relation_outputs(
+                source,
+                target,
+                nodes,
+                node_features_by_id.get(key[0], {}),
+                node_features_by_id.get(key[1], {}),
+                graph_features_by_pair.get(key, {}),
+            )
             if not probabilities:
                 continue
             relation, type_confidence, combined_confidence = _select_relation_prediction(
@@ -309,6 +424,8 @@ class TinyBDGraphParser:
                     confidence=round(combined_confidence, 6),
                 )
             )
+        prediction_payloads = graph_parser_structured_relation_selection([item.to_json() for item in predictions])
+        selected_confidences = [float(item.get("confidence", 0.0) or 0.0) for item in prediction_payloads]
         node_predictions = self._predict_node_labels(all_nodes)
         return {
             "schema_version": "tinybdmath_graph_parser_predictions_v1",
@@ -321,7 +438,7 @@ class TinyBDGraphParser:
             "node_filter_threshold": float(self.artifact.node_filter_threshold),
             "keep_threshold": float(self.artifact.keep_threshold),
             "graph_confidence": round(sum(selected_confidences) / len(selected_confidences), 6) if selected_confidences else 0.0,
-            "predictions": [item.to_json() for item in sorted(predictions, key=lambda item: (item.source, item.target, item.relation))],
+            "predictions": prediction_payloads,
             "relation_alternatives": sorted(
                 relation_alternatives,
                 key=_relation_alternative_sort_key,
@@ -346,14 +463,18 @@ class TinyBDGraphParser:
         source: dict[str, Any],
         target: dict[str, Any],
         nodes: list[dict[str, Any]],
+        source_node_features: dict[str, float],
+        target_node_features: dict[str, float],
+        graph_features: dict[str, float],
     ) -> tuple[list[float], float | None]:
         features = graph_parser_features(source, target, nodes)
         if not _artifact_uses_context_relation(self.artifact):
             return self._predict_probabilities(features), None
         return _context_relation_outputs(
             features,
-            graph_parser_node_features(source, nodes),
-            graph_parser_node_features(target, nodes),
+            source_node_features,
+            target_node_features,
+            graph_features,
             artifact=self.artifact,
         )
 
@@ -429,10 +550,11 @@ def _artifact_uses_context_relation(artifact: TinyBDGraphParserArtifact) -> bool
     mode = str((artifact.train_config or {}).get("mode", "") or "")
     model_version = str(artifact.model_version or "")
     return (
-        mode in {"graph_parser_m2", "graph_parser_m3", "graph_parser_m4"}
+        mode in {"graph_parser_m2", "graph_parser_m3", "graph_parser_m4", "graph_parser_m5"}
         or model_version.endswith("_m2")
         or model_version.endswith("_m3")
         or model_version.endswith("_m4")
+        or model_version.endswith("_m5")
     )
 
 
@@ -440,6 +562,7 @@ def _context_relation_outputs(
     edge_features: dict[str, float],
     source_node_features: dict[str, float],
     target_node_features: dict[str, float],
+    graph_features: dict[str, float] | None,
     *,
     artifact: TinyBDGraphParserArtifact,
 ) -> tuple[list[float], float | None]:
@@ -478,12 +601,26 @@ def _context_relation_outputs(
         hidden_weights=artifact.node_hidden_weights,
         hidden_biases=artifact.node_hidden_biases,
     )
+    graph_context: list[float] = []
+    if _artifact_uses_graph_context_relation(artifact):
+        graph_values = _normalized_feature_values(
+            graph_features or {},
+            feature_names=artifact.graph_feature_names,
+            means=artifact.graph_means,
+            scales=artifact.graph_scales,
+        )
+        graph_context = _hidden_layer_activations(
+            graph_values,
+            hidden_weights=artifact.graph_hidden_weights,
+            hidden_biases=artifact.graph_hidden_biases,
+        )
     source_logits = _linear_logits(source_context, weights=artifact.node_output_weights, bias=artifact.node_output_bias)
     target_logits = _linear_logits(target_context, weights=artifact.node_output_weights, bias=artifact.node_output_bias)
     fused = _relation_fusion_activations(
         edge_context=edge_context,
         source_context=source_context,
         target_context=target_context,
+        graph_context=graph_context,
         source_logits=source_logits,
         target_logits=target_logits,
         artifact=artifact,
@@ -498,6 +635,7 @@ def _relation_fusion_activations(
     edge_context: list[float],
     source_context: list[float],
     target_context: list[float],
+    graph_context: list[float],
     source_logits: list[float],
     target_logits: list[float],
     artifact: TinyBDGraphParserArtifact,
@@ -509,24 +647,36 @@ def _relation_fusion_activations(
             + target_context
             + _abs_difference(source_context, target_context)
             + _elementwise_product(source_context, target_context)
+            + graph_context
             + source_logits
             + target_logits
             + _abs_difference(source_logits, target_logits)
             + _elementwise_product(source_logits, target_logits)
         )
-    return edge_context + source_context + target_context + source_logits + target_logits
+    return edge_context + source_context + target_context + graph_context + source_logits + target_logits
+
+
+def _artifact_uses_graph_context_relation(artifact: TinyBDGraphParserArtifact) -> bool:
+    mode = str((artifact.train_config or {}).get("mode", "") or "")
+    model_version = str(artifact.model_version or "")
+    return mode == "graph_parser_m5" or model_version.endswith("_m5")
 
 
 def _artifact_uses_interaction_relation(artifact: TinyBDGraphParserArtifact) -> bool:
     mode = str((artifact.train_config or {}).get("mode", "") or "")
     model_version = str(artifact.model_version or "")
-    return mode in {"graph_parser_m3", "graph_parser_m4"} or model_version.endswith("_m3") or model_version.endswith("_m4")
+    return (
+        mode in {"graph_parser_m3", "graph_parser_m4", "graph_parser_m5"}
+        or model_version.endswith("_m3")
+        or model_version.endswith("_m4")
+        or model_version.endswith("_m5")
+    )
 
 
 def _artifact_uses_keep_relation(artifact: TinyBDGraphParserArtifact) -> bool:
     mode = str((artifact.train_config or {}).get("mode", "") or "")
     model_version = str(artifact.model_version or "")
-    return mode == "graph_parser_m4" or model_version.endswith("_m4")
+    return mode in {"graph_parser_m4", "graph_parser_m5"} or model_version.endswith("_m4") or model_version.endswith("_m5")
 
 
 def _abs_difference(left: list[float], right: list[float]) -> list[float]:
@@ -752,6 +902,119 @@ def graph_parser_node_features(node: dict[str, Any], nodes: list[dict[str, Any]]
     }
 
 
+def graph_parser_graph_features(
+    source: dict[str, Any],
+    target: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[str, float]:
+    return graph_parser_graph_feature_map(nodes, pairs).get(
+        (str(source.get("node_id", "") or ""), str(target.get("node_id", "") or "")),
+        {},
+    )
+
+
+def graph_parser_graph_feature_map(
+    nodes: list[dict[str, Any]],
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[tuple[str, str], dict[str, float]]:
+    node_count = max(1, len(nodes))
+    pair_count = max(1, len(pairs))
+    glyph_count = sum(1 for node in nodes if node.get("node_type") == "glyph")
+    vector_count = sum(1 for node in nodes if node.get("node_type") == "vector")
+    span = _nodes_bbox(nodes)
+    graph_width = max(1e-6, span[2] - span[0])
+    graph_height = max(1e-6, span[3] - span[1])
+    normalizer = max(graph_width, graph_height, 1.0)
+    out_distances_by_id: dict[str, list[float]] = {}
+    in_distances_by_id: dict[str, list[float]] = {}
+    out_count_by_id: dict[str, int] = {}
+    in_count_by_id: dict[str, int] = {}
+    out_rule_neighbor_count_by_id: dict[str, int] = {}
+    in_rule_neighbor_count_by_id: dict[str, int] = {}
+    edge_distances: dict[tuple[str, str], float] = {}
+    for left, right in pairs:
+        left_id = str(left.get("node_id", "") or "")
+        right_id = str(right.get("node_id", "") or "")
+        distance = _node_distance(left, right, normalizer=normalizer)
+        key = (left_id, right_id)
+        edge_distances[key] = distance
+        out_distances_by_id.setdefault(left_id, []).append(distance)
+        in_distances_by_id.setdefault(right_id, []).append(distance)
+        out_count_by_id[left_id] = out_count_by_id.get(left_id, 0) + 1
+        in_count_by_id[right_id] = in_count_by_id.get(right_id, 0) + 1
+        if right.get("node_type") == "vector":
+            out_rule_neighbor_count_by_id[left_id] = out_rule_neighbor_count_by_id.get(left_id, 0) + 1
+        if left.get("node_type") == "vector":
+            in_rule_neighbor_count_by_id[right_id] = in_rule_neighbor_count_by_id.get(right_id, 0) + 1
+    sorted_out_distances_by_id = {
+        node_id: sorted(distances)
+        for node_id, distances in out_distances_by_id.items()
+    }
+    output: dict[tuple[str, str], dict[str, float]] = {}
+    for source_id, target_id in edge_distances:
+        out_distances = out_distances_by_id.get(source_id, [])
+        in_distances = in_distances_by_id.get(target_id, [])
+        sorted_out = sorted_out_distances_by_id.get(source_id, [])
+        edge_distance = edge_distances[(source_id, target_id)]
+        distance_rank = _distance_rank(sorted_out, edge_distance)
+        source_out_count = out_count_by_id.get(source_id, 0)
+        source_in_count = in_count_by_id.get(source_id, 0)
+        target_out_count = out_count_by_id.get(target_id, 0)
+        target_in_count = in_count_by_id.get(target_id, 0)
+        output[(source_id, target_id)] = {
+            "bias": 1.0,
+            "node_count": float(node_count),
+            "glyph_count": float(glyph_count),
+            "vector_count": float(vector_count),
+            "candidate_pair_count": float(pair_count),
+            "graph_width": graph_width,
+            "graph_height": graph_height,
+            "graph_aspect_ratio": min(1000.0, graph_width / graph_height),
+            "candidate_density": float(pair_count) / float(node_count * node_count),
+            "source_out_degree": float(source_out_count),
+            "source_in_degree": float(source_in_count),
+            "target_out_degree": float(target_out_count),
+            "target_in_degree": float(target_in_count),
+            "source_out_degree_ratio": float(source_out_count) / float(pair_count),
+            "source_in_degree_ratio": float(source_in_count) / float(pair_count),
+            "target_out_degree_ratio": float(target_out_count) / float(pair_count),
+            "target_in_degree_ratio": float(target_in_count) / float(pair_count),
+            "candidate_distance_rank": float(distance_rank),
+            "candidate_distance_rank_ratio": float(distance_rank) / max(1.0, float(source_out_count)),
+            "candidate_distance_percentile": _distance_percentile(sorted_out, edge_distance),
+            "source_min_distance": min(out_distances) if out_distances else 0.0,
+            "source_mean_distance": sum(out_distances) / len(out_distances) if out_distances else 0.0,
+            "target_min_distance": min(in_distances) if in_distances else 0.0,
+            "target_mean_distance": sum(in_distances) / len(in_distances) if in_distances else 0.0,
+            "source_rule_neighbor_count": float(out_rule_neighbor_count_by_id.get(source_id, 0)),
+            "target_rule_neighbor_count": float(in_rule_neighbor_count_by_id.get(target_id, 0)),
+        }
+    return output
+
+
+def _node_distance(left: dict[str, Any], right: dict[str, Any], *, normalizer: float) -> float:
+    left_center = left.get("center", [0.0, 0.0])
+    right_center = right.get("center", [0.0, 0.0])
+    dx = float(right_center[0]) - float(left_center[0])
+    dy = float(right_center[1]) - float(left_center[1])
+    return math.sqrt(dx * dx + dy * dy) / max(float(normalizer), 1e-6)
+
+
+def _distance_rank(sorted_distances: list[float], value: float) -> int:
+    for index, item in enumerate(sorted_distances, start=1):
+        if value <= item + 1e-9:
+            return index
+    return len(sorted_distances)
+
+
+def _distance_percentile(sorted_distances: list[float], value: float) -> float:
+    if not sorted_distances:
+        return 0.0
+    rank = _distance_rank(sorted_distances, value)
+    return float(rank - 1) / max(1.0, float(len(sorted_distances) - 1))
+
+
 def _is_runtime_training_relation(relation: str) -> bool:
     return (
         relation in GRAPH_PARSER_RELATIONS
@@ -809,6 +1072,7 @@ def training_samples_from_rows(
                 continue
             pairs.append((node_by_id[source_id], node_by_id[target_id]))
             pair_keys.add((source_id, target_id))
+        graph_features_by_pair = graph_parser_graph_feature_map(nodes, pairs)
         for source, target in pairs:
             key = (str(source["node_id"]), str(target["node_id"]))
             relation, confidence = positive.get(key, ("NONE", 1.0))
@@ -822,6 +1086,7 @@ def training_samples_from_rows(
                     "features": graph_parser_features(source, target, nodes),
                     "source_node_features": node_features_by_id.get(key[0], {}),
                     "target_node_features": node_features_by_id.get(key[1], {}),
+                    "graph_features": graph_features_by_pair.get(key, {}),
                 }
             )
     return samples

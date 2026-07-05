@@ -4,11 +4,12 @@ from pathlib import Path
 from tools.tinybdmath_eval_decoded_latex import (
     _build_report,
     _candidates_from_graph_parser,
+    _candidates_from_graph_parser_torch,
     _decode_rows,
     _decode_rows_stream,
     _similarity,
 )
-from tests.test_tinybdmath_graph_parser import _graph_row, _toy_artifact
+from tests.test_tinybdmath_graph_parser import _graph_row, _toy_artifact, _toy_m5_artifact
 
 
 def test_decoded_latex_eval_counts_identical_commands_as_exact() -> None:
@@ -105,3 +106,17 @@ def test_decoded_latex_eval_can_generate_candidates_from_graph_parser_model(tmp_
     assert candidates[0]["candidate_only"] is True
     assert rows[0]["decoded_latex"]
     assert rows[0]["manual_review_recommendation"]["accepted"] is False
+
+
+def test_decoded_latex_eval_torch_inference_supports_m5_graph_context(tmp_path: Path) -> None:
+    model_path = tmp_path / "graph_parser_m5.json"
+    _toy_m5_artifact().save(model_path)
+    graph_rows = [_graph_row("m5", ["l", "i", "m"])]
+
+    candidates = _candidates_from_graph_parser_torch(graph_rows, model_path, batch_size=16)
+    relations = {item["relation"] for item in candidates[0]["selected_relations"]}
+
+    assert candidates[0]["model_version"] == "tinybdmath_graph_parser_m5"
+    assert candidates[0]["keep_threshold"] == 0.5
+    assert candidates[0]["graph_confidence"] > 0.0
+    assert "TEXT_RUN_NEXT" in relations
