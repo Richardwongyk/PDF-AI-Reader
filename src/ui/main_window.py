@@ -53,6 +53,7 @@ from src.core.glossary_manager import GlossaryManager
 from src.core.model_providers import display_model_name, normalize_litellm_model
 from src.core.navigator import Navigator
 from src.core.service_container import ServiceContainer
+from src.data.annotation_store import read_annotation_store, save_annotation_patch
 from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget, WebViewPool
@@ -2004,31 +2005,14 @@ class MainWindow(QMainWindow):
             self._annotations.pop(block_id, None)
             if block is not None:
                 block.metadata.pop("annotation", None)
-        self._save_annotations_for_current_document()
+        self._save_annotation_for_current_document(block_id, text)
         self._pdf_viewer.set_annotation_marker(block_id, bool(text))
         self._status_page_label.setText("批注已保存" if text else "批注已清空")
 
     def _read_annotation_store(self) -> dict[str, dict[str, str]]:
-        try:
-            if not self._annotation_store_path.exists():
-                return {}
-            raw = json.loads(self._annotation_store_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        store = read_annotation_store(self._annotation_store_path)
+        if not store and self._annotation_store_path.exists():
             self.logger.warning("批注文件读取失败，已忽略: %s", self._annotation_store_path)
-            return {}
-        if not isinstance(raw, dict):
-            return {}
-        store: dict[str, dict[str, str]] = {}
-        for doc_hash, notes in raw.items():
-            if not isinstance(notes, dict):
-                continue
-            clean_notes = {
-                str(block_id): str(note)
-                for block_id, note in notes.items()
-                if str(note).strip()
-            }
-            if clean_notes:
-                store[str(doc_hash)] = clean_notes
         return store
 
     def _load_annotations_for_current_document(self) -> None:
@@ -2044,25 +2028,18 @@ class MainWindow(QMainWindow):
             else:
                 block.metadata.pop("annotation", None)
 
-    def _save_annotations_for_current_document(self) -> None:
+    def _save_annotation_for_current_document(self, block_id: str, note: str) -> None:
         if not self._current_doc_hash:
             return
-        store = self._read_annotation_store()
-        clean_notes = {
-            block_id: note
-            for block_id, note in self._annotations.items()
-            if note.strip()
-        }
-        if clean_notes:
-            store[self._current_doc_hash] = clean_notes
-        else:
-            store.pop(self._current_doc_hash, None)
         try:
-            self._annotation_store_path.parent.mkdir(parents=True, exist_ok=True)
-            self._annotation_store_path.write_text(
-                json.dumps(store, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            store = save_annotation_patch(
+                self._annotation_store_path,
+                self._current_doc_hash,
+                block_id,
+                note,
             )
+            self._annotations.clear()
+            self._annotations.update(store.get(self._current_doc_hash, {}))
         except OSError:
             self.logger.warning("批注文件写入失败: %s", self._annotation_store_path)
 
@@ -2313,7 +2290,7 @@ class MainWindow(QMainWindow):
             self._annotations.pop(source_block_id, None)
             if block is not None:
                 block.metadata.pop("annotation", None)
-            self._save_annotations_for_current_document()
+            self._save_annotation_for_current_document(source_block_id, "")
             self._pdf_viewer.set_annotation_marker(source_block_id, False)
 
     # =========================================================================

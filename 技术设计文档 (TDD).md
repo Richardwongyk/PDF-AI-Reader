@@ -24,6 +24,14 @@
 - 批注持久化由 `MainWindow` 维护：以文档 hash 为一级 key、block id 为二级 key 写入 `data/annotations.json`。
   该文件属于本地用户数据，已加入 `.gitignore`；保存空文本等同删除批注。文档加载和页面 blocks 补齐时会回填
   `block.metadata["annotation"]` 并同步黄色标记。
+- 2026-07-05 多进程多窗口最小版：允许多个独立 PDF AI Reader 进程同时存在。每个进程使用独立
+  `data/runtime/process-<pid>/qtwebengine/` 和 `logs/app-<pid>.log`；第一个进程持有 primary instance lock，
+  后续 secondary 进程自动将 Chroma 知识库后端降级为 SQLite FTS，避免多进程同时访问同一个 ChromaDB
+  持久化目录。
+- 详细日志默认只写入 UTF-8 文件日志；终端默认不输出 INFO 级日志，避免 Windows/Conda 启动链路出现中文
+  mojibake。需要实时控制台日志时设置 `PDF_AI_READER_CONSOLE_LOG=1`。
+- 批注写入改为 `src/data/annotation_store.py` 负责：使用 `QLockFile` 锁住 `data/annotations.json.lock`，
+  单条 block patch 合并最新文件内容后再 `os.replace` 原子替换。实时跨窗口推送暂不实现；关闭重开后可读取最新批注。
 - 2026-07-05 大文档稳定性补充：导入时 `_FormulaImportPlanThread` 支持 `page_scan_pages` 限定自动页级公式扫描范围；
   超过 `AUTO_PAGE_SCAN_FULL_DOCUMENT_LIMIT` 的文档只自动扫描可见页附近，旧的持久化页扫描任务不会被空闲定时器全局扫完。
   后台页面 blocks 更新只刷新可见/已渲染页面，目录树生成改为防抖刷新，减少 Qt 原生控件高频重建导致的闪退风险。
@@ -194,6 +202,8 @@
 
 - 批注是阅读态用户数据，不进入 AI prompt、知识库、GraphRAG 或公式 accepted gate；它只通过
   `data/annotations.json` 本地保存，并按 `doc_hash -> block_id -> note` 查找。
+- 跨进程保存批注必须走 `save_annotation_patch()`：加锁后读取最新 JSON，只更新当前 block，避免两个窗口
+  修改同一文档不同段落时互相覆盖。删除行为写入空 note patch。
 - 批注裂缝和翻译/问答/解释裂缝共享 `PdfViewer.open_split_widget` 的分段布局能力，但必须使用独立
   split id，避免覆盖翻译裂缝。约定批注 split id 为 `<block_id>__annotation`。
 - 折叠批注不得改变页面正文布局；只保留 `PdfViewer.set_annotation_marker` 绘制的黄色侧边标记。
@@ -235,8 +245,9 @@ D:\程设大作业\
 │   └── knowledge_bases/           # ChromaDB 持久化数据（运行时生成）
 │       ├── chroma.sqlite3
 │       └── <collection_uuid>/
+│   └── runtime/                   # 多进程运行时目录（process-<pid>/qtwebengine）
 ├── logs/
-│   └── app.log                    # 应用运行日志
+│   └── app-<pid>.log              # 进程级应用运行日志
 ├── src/
 │   ├── __init__.py
 │   ├── main.py                    # 程序入口：QApplication + 服务初始化
@@ -268,6 +279,8 @@ D:\程设大作业\
 │   │   ├── tile_renderer.py
 │   │   ├── tile_cache.py
 │   │   └── ai_cache.py
+│   ├── data/
+│   │   └── annotation_store.py    # 批注 JSON 读写、跨进程锁、原子替换
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── main_window.py         # MainWindow 主窗口
@@ -1145,6 +1158,8 @@ apply_theme("sepia")   # 护眼羊皮纸
 3. **共享数据不可变传递**：`list[DocumentBlock]` 构建完成后通过信号传递，工作线程不再修改。
 4. **QThread 生命周期管理**：`AIEngine._active_threads` 保持引用防止 Python GC 回收导致信号断开。
 5. **线程中断处理**：_ParseThread 支持 `requestInterruption()`；旧线程 3s 超时后 `terminate()`。
+6. **多进程最小隔离**：`main.py` 启动时用 `data/runtime/primary-instance.lock` 区分 primary/secondary 实例。
+   每个进程设置独立 QtWebEngine cache/storage path；secondary 实例不创建共享 Chroma 后端，改用 SQLite FTS。
 
 ---
 
@@ -1276,6 +1291,7 @@ ConfigManager.config_changed(config)
 | 双栏页面数限制 | 仅候选页面（含 LaTeX 命令的页面）跑 MFD 模型 |
 | 线程池限制 | QThreadPool 最多 2 线程 |
 | Chromium 沙盒禁用 | Windows 上 `--no-sandbox --disable-gpu-sandbox` 避免 QtWebEngineProcess 崩溃 |
+| 多进程 QtWebEngine 隔离 | 每个进程使用 `data/runtime/process-<pid>/qtwebengine`，避免多个窗口争用同一 Chromium profile |
 | telemetry 关闭 | `ANONYMIZED_TELEMETRY=False` 避免 posthog 报错 |
 
 ---

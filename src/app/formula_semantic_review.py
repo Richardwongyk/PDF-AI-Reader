@@ -305,7 +305,13 @@ class FormulaSemanticReviewFlow(QObject):
 
     @property
     def is_running(self) -> bool:
-        return bool(self._thread and self._thread.isRunning())
+        if not self._thread:
+            return False
+        try:
+            return self._thread.isRunning()
+        except RuntimeError:
+            self._thread = None
+            return False
 
     def pending_count(self, doc_hash: str) -> int:
         if not doc_hash:
@@ -338,11 +344,18 @@ class FormulaSemanticReviewFlow(QObject):
         return True
 
     def stop(self) -> None:
-        if self._thread and self._thread.isRunning():
-            self._thread.requestInterruption()
-            self._thread.quit()
-            self._thread.wait(1500)
+        thread = self._thread
         self._thread = None
+        if not thread:
+            return
+        try:
+            is_running = thread.isRunning()
+        except RuntimeError:
+            return
+        if is_running:
+            thread.requestInterruption()
+            thread.quit()
+            thread.wait(1500)
 
     def _on_worker_finished(self, result: dict[str, object]) -> None:
         self.review_finished.emit(result)
