@@ -330,6 +330,29 @@ def test_formula_import_plan_thread_persists_all_rounds(tmp_path) -> None:
     }
 
 
+def test_formula_import_plan_thread_limits_page_scan_queue(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    formula = _formula("p0_b1", 0)
+    captured: list[dict[str, int | str]] = []
+    thread = _FormulaImportPlanThread(
+        store=store,
+        filepath="paper.pdf",
+        doc_hash="doc-1",
+        page_count=500,
+        page_scan_pages=[0, 2, 2, 999],
+        plan_blocks=[],
+        plan_priority_pages=set(),
+        plan_scan_round=FormulaScanRound.CACHED_RECOGNITION.value,
+        formula_blocks=[formula],
+    )
+    thread.finished_signal.connect(lambda result: captured.append(result))
+
+    thread.run()
+
+    assert captured[-1]["queued_pages"] == 2
+    assert [task.page_num for task in store.list_page_tasks("doc-1")] == [0, 2]
+
+
 def test_formula_index_flow_does_not_queue_done_formula_job(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula("p0_b1", 0)

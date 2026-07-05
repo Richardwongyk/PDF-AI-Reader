@@ -26,7 +26,7 @@ import platform
 if platform.system() == "Windows":
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu-sandbox"
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
@@ -400,6 +400,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("PDF AI Reader")
     app.setApplicationVersion("1.0.0")
+    app.setQuitOnLastWindowClosed(True)
+    app.lastWindowClosed.connect(lambda: logging.info("QApplication lastWindowClosed"))
+    app.aboutToQuit.connect(lambda: logging.info("QApplication aboutToQuit"))
     logging.info("QApplication 创建完成 (%.2fs)", __import__('time').perf_counter() - t_start)
 
     profile = QWebEngineProfile.defaultProfile()
@@ -413,6 +416,7 @@ def main() -> int:
         from src.ui.main_window import MainWindow
         t_ui = __import__('time').perf_counter()
         window = MainWindow(services)
+        app._main_window = window  # keep an explicit reference for the Qt object lifetime
         if args.test_mode:
             window._check_first_launch = lambda: None
             window._prewarm_webview_pool = lambda: None
@@ -420,6 +424,26 @@ def main() -> int:
         _error_handler.set_parent_widget(window)
 
         window.show()
+        def _activate_main_window() -> None:
+            window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+            app.setActiveWindow(window)
+            try:
+                logging.info("MainWindow activated: winId=0x%X visible=%s", int(window.winId()), window.isVisible())
+            except Exception:
+                logging.info("MainWindow activated")
+
+        QTimer.singleShot(250, _activate_main_window)
+        QTimer.singleShot(1500, _activate_main_window)
+        QTimer.singleShot(
+            2700,
+            lambda: (
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False),
+                window.showNormal(),
+            ),
+        )
         if args.test_mode:
             from src.app.test_command_bridge import TestCommandBridge
             command_file = Path("test_artifacts/e2e/commands.jsonl")

@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
     └─────────────────────────────────────────────┘
     """
 
+    AUTO_PAGE_SCAN_FULL_DOCUMENT_LIMIT = 120
+
     def __init__(self, services: ServiceContainer) -> None:
         """初始化主窗口。
 
@@ -155,6 +157,8 @@ class MainWindow(QMainWindow):
         self._viewer_document_loaded: bool = False
         self._has_native_toc: bool = False
         self._active_translation_blocks: set[str] = set()
+        self._annotations: dict[str, str] = {}
+        self._annotation_store_path = Path("data") / "annotations.json"
         self._last_user_translation_at: float = 0.0
         self._pymupdf4llm_pending_result: object | None = None
         self._dock_answer_text: str = ""
@@ -198,6 +202,10 @@ class MainWindow(QMainWindow):
         self._formula_idle_timer.setSingleShot(True)
         self._formula_idle_timer.setInterval(5000)
         self._formula_idle_timer.timeout.connect(self._schedule_idle_formula_scan)
+        self._generated_toc_timer = QTimer(self)
+        self._generated_toc_timer.setSingleShot(True)
+        self._generated_toc_timer.setInterval(1500)
+        self._generated_toc_timer.timeout.connect(self._refresh_generated_toc)
 
         self._init_ui()
         self._connect_signals()
@@ -1084,6 +1092,8 @@ class MainWindow(QMainWindow):
         self._pdf_viewer.block_retranslate_requested.connect(self._on_block_retranslate)
         self._pdf_viewer.block_question_requested.connect(self._on_block_question)
         self._pdf_viewer.block_explain_requested.connect(self._on_block_explain)
+        self._pdf_viewer.block_annotation_requested.connect(self._on_block_annotation)
+        self._pdf_viewer.block_annotation_saved.connect(self._on_annotation_saved)
         self._pdf_viewer.viewport_changed.connect(self._on_viewport_changed)
         self._pdf_viewer.split_close_requested.connect(self._on_split_closed)
 
@@ -1150,6 +1160,7 @@ class MainWindow(QMainWindow):
         self._loaded_block_pages.clear()
         self._pending_page_blocks.clear()
         self._active_translation_blocks.clear()
+        self._annotations.clear()
         self._last_user_translation_at = 0.0
         self._pymupdf4llm_pending_result = None
         self._pending_kb_upserts.clear()
@@ -1158,6 +1169,7 @@ class MainWindow(QMainWindow):
         self._stop_formula_import_thread()
         self._formula_viewport_timer.stop()
         self._formula_idle_timer.stop()
+        self._generated_toc_timer.stop()
         self._last_formula_viewport_pages.clear()
         self._viewer_document_loaded = False
         self._has_native_toc = False
@@ -1182,6 +1194,7 @@ class MainWindow(QMainWindow):
             self._loaded_block_pages = {b.page_num for b in self._current_blocks}
         self._has_native_toc = bool(result.toc)
         self._current_doc_hash = self._document_flow.current_hash
+        self._load_annotations_for_current_document()
         self._ask_flow.set_doc_hash(self._current_doc_hash)
         self._status_progress.setVisible(False)
         self._status_page_label.setText(
@@ -1197,6 +1210,8 @@ class MainWindow(QMainWindow):
 
         # 加载到 PdfViewer。不要在这里 processEvents；长文档后台页块信号可能插队拖慢首屏。
         self._pdf_viewer.load_document(result)
+        for block_id in self._annotations:
+            self._pdf_viewer.set_annotation_marker(block_id, True)
         for page_num, page_blocks in sorted(self._pending_page_blocks.items()):
             if page_num not in self._loaded_block_pages:
                 self._loaded_block_pages.add(page_num)
@@ -1262,12 +1277,40 @@ class MainWindow(QMainWindow):
         self._current_blocks.extend(page_blocks)
         for block in page_blocks:
             self._blocks_by_id[block.id] = block
-        if self._viewer_document_loaded:
+            note = self._annotations.get(block.id, "")
+            if note:
+                block.metadata["annotation"] = note
+        if self._viewer_document_loaded and self._should_update_viewer_page_blocks(page_num):
             self._pdf_viewer.update_page_blocks(page_num, page_blocks)
-        else:
+            for block in page_blocks:
+                self._pdf_viewer.set_annotation_marker(block.id, bool(self._annotations.get(block.id, "")))
+        elif not self._viewer_document_loaded:
             self._pending_page_blocks[page_num] = page_blocks
         if not self._has_native_toc and any(b.block_type == BlockType.HEADING for b in page_blocks):
-            self._navigator.generate_toc_from_blocks(self._current_blocks)
+            self._schedule_generated_toc_refresh()
+
+    def _should_update_viewer_page_blocks(self, page_num: int) -> bool:
+        if not self._viewer_document_loaded:
+            return False
+        try:
+            if page_num in self._pdf_viewer.visible_pages(margin_pages=True):
+                return True
+            if page_num in getattr(self._pdf_viewer, "_split_pages", set()):
+                return True
+            container = getattr(self._pdf_viewer, "_page_containers", {}).get(page_num)
+            return bool(container is not None and getattr(container, "rendered", False))
+        except Exception:
+            return False
+
+    def _schedule_generated_toc_refresh(self) -> None:
+        if self._has_native_toc:
+            return
+        self._generated_toc_timer.start(1500)
+
+    def _refresh_generated_toc(self) -> None:
+        if self._has_native_toc or not self._current_blocks:
+            return
+        self._navigator.generate_toc_from_blocks(self._current_blocks)
 
     def _on_parse_progress(self, current: int, total: int) -> None:
         """解析进度更新。"""
@@ -1424,6 +1467,7 @@ class MainWindow(QMainWindow):
             return
         self._last_formula_viewport_pages = set(pages)
         self._schedule_formula_scan(pages=pages, trigger=FormulaScanTrigger.VIEWPORT)
+        self._start_import_page_scan_batch(viewport_only=True)
 
     def _schedule_idle_formula_scan(self) -> None:
         """Run one low-priority background formula/index batch."""
@@ -1545,11 +1589,13 @@ class MainWindow(QMainWindow):
             trigger=FormulaScanTrigger.BACKGROUND,
             page_count=self._doc_engine.page_count,
         )
+        page_scan_pages = self._import_page_scan_pages()
         self._formula_import_thread = _FormulaImportPlanThread(
             store=self._formula_index_flow.store,
             filepath=filepath,
             doc_hash=self._current_doc_hash,
             page_count=self._doc_engine.page_count,
+            page_scan_pages=page_scan_pages,
             plan_blocks=plan.blocks,
             plan_priority_pages=plan.priority_pages,
             plan_scan_round=plan.scan_round,
@@ -1601,7 +1647,7 @@ class MainWindow(QMainWindow):
             thread.wait(1500)
         self._formula_import_thread = None
 
-    def _start_import_page_scan_batch(self) -> bool:
+    def _start_import_page_scan_batch(self, *, viewport_only: bool = False) -> bool:
         filepath = getattr(self._doc_engine, "_filepath", "")
         if not filepath or not self._current_doc_hash:
             return False
@@ -1619,6 +1665,8 @@ class MainWindow(QMainWindow):
         if started:
             self.logger.info("页面级公式检测启动: pages=%s batch=%d", sorted(pages), started)
             return True
+        if viewport_only or self._should_defer_full_document_page_scan():
+            return False
         started = self._formula_index_flow.start_page_scan_batch(
             filepath=filepath,
             doc_hash=self._current_doc_hash,
@@ -1708,15 +1756,62 @@ class MainWindow(QMainWindow):
     def _pending_formula_work_count(self) -> int:
         if not self._current_doc_hash:
             return self._pending_formula_block_count()
+        page_pending = self._formula_index_flow.page_pending_count(self._current_doc_hash)
+        if self._should_defer_full_document_page_scan():
+            page_pending = self._pending_visible_page_scan_count()
         return (
             self._pending_formula_block_count()
             + self._formula_index_flow.pending_count(self._current_doc_hash)
-            + self._formula_index_flow.page_pending_count(self._current_doc_hash)
+            + page_pending
             + self._formula_index_flow.round_pending_count(self._current_doc_hash)
             + self._formula_semantic_review_flow.pending_count(self._current_doc_hash)
             + self._formula_knowledge_graph_service.pending_count(self._current_doc_hash)
             + self._formula_knowledge_update_service.pending_count(self._current_doc_hash)
         )
+
+    def _should_defer_full_document_page_scan(self) -> bool:
+        try:
+            page_count = int(self._doc_engine.page_count)
+        except (TypeError, ValueError):
+            return False
+        return page_count > self.AUTO_PAGE_SCAN_FULL_DOCUMENT_LIMIT
+
+    def _import_page_scan_pages(self) -> list[int] | range:
+        try:
+            page_count = max(0, int(self._doc_engine.page_count))
+        except (TypeError, ValueError):
+            return []
+        if page_count <= self.AUTO_PAGE_SCAN_FULL_DOCUMENT_LIMIT:
+            return range(page_count)
+        pages = self._pdf_viewer.visible_pages(margin_pages=True)
+        if not pages:
+            pages = set(self._loaded_block_pages)
+        if not pages:
+            pages = set(range(min(page_count, 8)))
+        selected = sorted(page for page in pages if 0 <= page < page_count)
+        self.logger.info(
+            "Large document: defer full page formula scan; page_count=%d queued_pages=%s",
+            page_count,
+            selected,
+        )
+        return selected
+
+    def _pending_visible_page_scan_count(self) -> int:
+        if not self._current_doc_hash:
+            return 0
+        pages = self._pdf_viewer.visible_pages(margin_pages=True)
+        if not pages:
+            return 0
+        try:
+            tasks = self._formula_index_flow.store.list_page_tasks(
+                self._current_doc_hash,
+                statuses={"queued", "running"},
+                limit=10000,
+            )
+        except Exception:
+            self.logger.debug("Failed to count visible page formula scans", exc_info=True)
+            return 0
+        return sum(1 for task in tasks if int(task.page_num) in pages)
 
     def _reconcile_stale_cached_formula_jobs(self) -> int:
         """Skip stale r1 jobs after the full document parse has settled."""
@@ -1876,6 +1971,100 @@ class MainWindow(QMainWindow):
             return
         split.set_busy(True)
         self._explain_flow.request_explanation(block, split)
+
+    def _on_block_annotation(self, block_id: str) -> None:
+        """Right-click -> add or edit an inline note for the selected block."""
+        block = self._find_block(block_id)
+        if block is None:
+            return
+        split_id = self._pdf_viewer.annotation_split_id(block_id)
+        split = self._pdf_viewer.open_split_widget(
+            block_id,
+            SplitMode.ANNOTATION,
+            split_id=split_id,
+            after_split_id=block_id,
+        )
+        if not split:
+            return
+        note = self._annotations.get(block_id, str(block.metadata.get("annotation", "")))
+        split.set_annotation_text(note)
+        if split.collapsed:
+            split.expand()
+        self._pdf_viewer.set_annotation_marker(block_id, bool(note.strip()))
+
+    def _on_annotation_saved(self, block_id: str, note: str) -> None:
+        """Persist an inline note in the current in-memory document state."""
+        block = self._find_block(block_id)
+        text = note.strip()
+        if text:
+            self._annotations[block_id] = text
+            if block is not None:
+                block.metadata["annotation"] = text
+        else:
+            self._annotations.pop(block_id, None)
+            if block is not None:
+                block.metadata.pop("annotation", None)
+        self._save_annotations_for_current_document()
+        self._pdf_viewer.set_annotation_marker(block_id, bool(text))
+        self._status_page_label.setText("批注已保存" if text else "批注已清空")
+
+    def _read_annotation_store(self) -> dict[str, dict[str, str]]:
+        try:
+            if not self._annotation_store_path.exists():
+                return {}
+            raw = json.loads(self._annotation_store_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self.logger.warning("批注文件读取失败，已忽略: %s", self._annotation_store_path)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        store: dict[str, dict[str, str]] = {}
+        for doc_hash, notes in raw.items():
+            if not isinstance(notes, dict):
+                continue
+            clean_notes = {
+                str(block_id): str(note)
+                for block_id, note in notes.items()
+                if str(note).strip()
+            }
+            if clean_notes:
+                store[str(doc_hash)] = clean_notes
+        return store
+
+    def _load_annotations_for_current_document(self) -> None:
+        self._annotations.clear()
+        if not self._current_doc_hash:
+            return
+        store = self._read_annotation_store()
+        self._annotations.update(store.get(self._current_doc_hash, {}))
+        for block in self._current_blocks:
+            note = self._annotations.get(block.id, "")
+            if note:
+                block.metadata["annotation"] = note
+            else:
+                block.metadata.pop("annotation", None)
+
+    def _save_annotations_for_current_document(self) -> None:
+        if not self._current_doc_hash:
+            return
+        store = self._read_annotation_store()
+        clean_notes = {
+            block_id: note
+            for block_id, note in self._annotations.items()
+            if note.strip()
+        }
+        if clean_notes:
+            store[self._current_doc_hash] = clean_notes
+        else:
+            store.pop(self._current_doc_hash, None)
+        try:
+            self._annotation_store_path.parent.mkdir(parents=True, exist_ok=True)
+            self._annotation_store_path.write_text(
+                json.dumps(store, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            self.logger.warning("批注文件写入失败: %s", self._annotation_store_path)
 
     def _on_split_ask(self, question: str, block_id: str) -> None:
         """裂缝中提交问题 → 委托 AskQuestionFlow 协调器。"""
@@ -2118,7 +2307,14 @@ class MainWindow(QMainWindow):
 
     def _on_split_closed(self, block_id: str) -> None:
         """裂缝关闭后的清理。"""
-        pass  # 目前保留裂缝实例以便重新打开时恢复缓存
+        if block_id.endswith("__annotation"):
+            source_block_id = block_id[: -len("__annotation")]
+            block = self._find_block(source_block_id)
+            self._annotations.pop(source_block_id, None)
+            if block is not None:
+                block.metadata.pop("annotation", None)
+            self._save_annotations_for_current_document()
+            self._pdf_viewer.set_annotation_marker(source_block_id, False)
 
     # =========================================================================
     # 导航
@@ -2437,6 +2633,7 @@ class MainWindow(QMainWindow):
         清理顺序：文档引擎 → 知识库引擎 → 术语表 → 配置。
         确保 ChromaDB WAL 文件正确刷入磁盘。
         """
+        self.logger.info("MainWindow closeEvent: accepted; shutting down services")
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
@@ -2449,6 +2646,8 @@ class MainWindow(QMainWindow):
         # 3. 保存术语表变更
         self._glossary_manager.save()
         event.accept()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
 
 
 class _PyMuPDF4LLMThread(QThread):
@@ -2495,6 +2694,7 @@ class _FormulaImportPlanThread(QThread):
         filepath: str,
         doc_hash: str,
         page_count: int,
+        page_scan_pages: list[int] | range | None = None,
         plan_blocks: list[DocumentBlock],
         plan_priority_pages: set[int],
         plan_scan_round: str,
@@ -2505,6 +2705,18 @@ class _FormulaImportPlanThread(QThread):
         self._filepath = filepath
         self._doc_hash = doc_hash
         self._page_count = int(page_count)
+        if page_scan_pages is None:
+            self._page_scan_pages = list(range(max(0, self._page_count)))
+        else:
+            valid_pages: set[int] = set()
+            for page in page_scan_pages:
+                try:
+                    page_num = int(page)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= page_num < max(0, self._page_count):
+                    valid_pages.add(page_num)
+            self._page_scan_pages = sorted(valid_pages)
         self._plan_blocks = [block.model_copy(deep=True) for block in plan_blocks]
         self._plan_priority_pages = set(plan_priority_pages)
         self._plan_scan_round = str(plan_scan_round)
@@ -2534,12 +2746,13 @@ class _FormulaImportPlanThread(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(result)
                 return
-            result["queued_pages"] = self._store.enqueue_pages(
-                self._doc_hash,
-                self._filepath,
-                range(max(0, self._page_count)),
-                scan_round=FormulaScanRound.PDF_STRUCTURE,
-            )
+            if self._page_scan_pages:
+                result["queued_pages"] = self._store.enqueue_pages(
+                    self._doc_hash,
+                    self._filepath,
+                    self._page_scan_pages,
+                    scan_round=FormulaScanRound.PDF_STRUCTURE,
+                )
             if self.isInterruptionRequested():
                 self.finished_signal.emit(result)
                 return
