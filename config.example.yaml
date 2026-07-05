@@ -26,7 +26,8 @@ routing:
   auto_upgrade_threshold: 2000
 ui:
   language: zh_CN
-  theme: light
+  # 当前界面默认使用黑色背景；设置窗口暂不提供主题切换入口。
+  theme: dark
   split_position: below
   font_size: 12
   line_spacing: 1.5
