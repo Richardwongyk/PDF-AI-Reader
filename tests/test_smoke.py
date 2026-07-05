@@ -646,6 +646,11 @@ def test_split_widget_followup_buttons() -> None:
         widget._adjust_height(180)
         assert widget.minimumHeight() == 224
         assert widget.maximumHeight() == 224
+        widget._mode = SplitMode.ANNOTATION
+        widget._update_mode_ui()
+        assert widget._collapse_btn.text() == "折叠"
+        assert widget._collapse_btn.toolTip() == "折叠批注 (Esc)"
+        assert widget._collapse_btn.accessibleName() == "折叠批注"
         widget._mode = SplitMode.TRANSLATION
         widget._update_mode_ui()
         widget.apply_theme("light")

@@ -126,6 +126,11 @@ class BlockOverlay(QWidget):
 
     def _on_context_menu(self, pos) -> None:
         """右键菜单。"""
+        menu = self._build_context_menu()
+        menu.exec(self.mapToGlobal(pos))
+
+    def _build_context_menu(self) -> QMenu:
+        """Build the block context menu without showing it."""
         menu = QMenu(self)
 
         translate_action = QAction("📖 翻译段落", menu)
@@ -134,23 +139,9 @@ class BlockOverlay(QWidget):
         )
         menu.addAction(translate_action)
 
-        annotation_action = QAction("批注/备注", menu)
+        annotation_action = QAction("📝 批注/备注", menu)
         annotation_action.triggered.connect(
             lambda: self.annotation_requested.emit(self._block.id)
         )
         menu.addAction(annotation_action)
-
-        question_action = QAction("🔍 在此处提问", menu)
-        question_action.triggered.connect(
-            lambda: self.question_requested.emit(self._block.id)
-        )
-        menu.addAction(question_action)
-
-        label = "✏️ 解释此公式" if self._block.block_type == BlockType.FORMULA else "✏️ 解释此概念"
-        explain_action = QAction(label, menu)
-        explain_action.triggered.connect(
-            lambda: self.explain_requested.emit(self._block.id)
-        )
-        menu.addAction(explain_action)
-
-        menu.exec(self.mapToGlobal(pos))
+        return menu

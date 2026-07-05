@@ -246,7 +246,8 @@
 D:\程设大作业\
 ├── config.yaml                    # 应用配置（模型、路由、UI、API Key）
 ├── requirements.txt               # 精确依赖清单
-├── run_py314.bat                  # Conda 环境启动脚本
+├── run_py314_silent.vbs           # Windows 静默启动脚本（pythonw，无控制台窗口）
+├── run_py314.bat                  # 兼容入口，转发到静默启动脚本
 ├── TODO.md                        # 开发 TODO
 ├── .gitignore
 ├── .vscode/settings.json          # VS Code 配置（conda 路径）
@@ -370,7 +371,7 @@ D:\程设大作业\
 
 ### 3.3 流程 C：裂缝问答（含知识库检索）
 
-1. 用户右键 BlockOverlay → "在此处提问"
+1. 用户通过问答入口打开 `SplitMode.QUESTION`（当前不在段落右键菜单展示）
 2. `SplitWidget` 以 `SplitMode.QUESTION` 模式打开，显示输入框
 3. 用户输入问题后点"发送"或 Ctrl+Enter
 4. `MainWindow._on_split_ask()`:
@@ -1085,8 +1086,9 @@ class BlockOverlay(QWidget):
     - clicked(str)               单击 → block_id
     - double_clicked(str)        双击 → block_id
     - translate_requested(str)   右键"翻译段落"
-    - question_requested(str)    右键"在此处提问"
-    - explain_requested(str)     右键"解释此概念/公式"
+    - question_requested(str)    保留给后续问答入口（当前右键菜单不展示）
+    - explain_requested(str)     保留给后续解释入口（当前右键菜单不展示）
+    - annotation_requested(str)  右键"批注/备注"
 
     视觉效果:
     - 默认完全透明（不遮挡 PDF）
@@ -1097,8 +1099,7 @@ class BlockOverlay(QWidget):
 
     右键菜单:
     - 📖 翻译段落
-    - 🔍 在此处提问
-    - ✏️ 解释此公式/概念
+    - 📝 批注/备注
     """
 ```
 
@@ -1340,11 +1341,9 @@ api_keys: {}
 
 ### 启动脚本
 
-`run_py314.bat`:
-```batch
-set PYTHONPATH=D:\程设大作业
-conda run -n pdf_ai_reader_314 python src/main.py
-```
+`run_py314_silent.vbs` 是 Windows 推荐启动入口：脚本根据自身位置推导项目目录，并在 `%USERPROFILE%\.conda\envs\` 与 `%USERPROFILE%\anaconda3\envs\` 下查找 `pdf_ai_reader_3144`（兼容 `pdf_ai_reader_314`）环境，补齐 `PYTHONPATH`、`CONDA_PREFIX`、`PATH` 后直接调用 `pythonw.exe src\main.py`，避免显示多余控制台窗口。
+
+`run_py314.bat` 仅作为旧习惯兼容入口，内部调用 `wscript.exe run_py314_silent.vbs` 后立即退出。
 
 ---
 

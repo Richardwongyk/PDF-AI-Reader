@@ -70,16 +70,21 @@ QPushButton#send_button:pressed {
     background: #4a3db0;
 }
 
-QPushButton#close_button {
+QPushButton#close_button,
+QPushButton#collapse_button {
     background: transparent;
-    border: none;
-    font-size: 18px;
+    border: 1px solid #d0d0e8;
+    border-radius: 6px;
+    font-size: 12px;
     color: #8888aa;
-    padding: 2px 6px;
+    padding: 4px 10px;
+    font-weight: bold;
 }
 
-QPushButton#close_button:hover {
-    color: #e74c3c;
+QPushButton#close_button:hover,
+QPushButton#collapse_button:hover {
+    color: #4a3f6b;
+    background: rgba(108, 92, 231, 0.08);
 }
 
 QPushButton#action_button {
@@ -154,16 +159,21 @@ QPushButton#send_button:pressed {
     background: #4a3db0;
 }
 
-QPushButton#close_button {
+QPushButton#close_button,
+QPushButton#collapse_button {
     background: transparent;
-    border: none;
-    font-size: 18px;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    font-size: 12px;
     color: #a6adc8;
-    padding: 2px 6px;
+    padding: 4px 10px;
+    font-weight: bold;
 }
 
-QPushButton#close_button:hover {
-    color: #e74c3c;
+QPushButton#close_button:hover,
+QPushButton#collapse_button:hover {
+    color: #cdd6f4;
+    background: rgba(108, 92, 231, 0.15);
 }
 
 QPushButton#action_button {

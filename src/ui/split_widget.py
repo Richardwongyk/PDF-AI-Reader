@@ -435,11 +435,13 @@ class SplitWidget(QFrame):
         self._header_label.setObjectName("header_title")
         header_layout.addWidget(self._header_label)
         header_layout.addStretch()
-        collapse_btn = QPushButton("∧")
-        collapse_btn.setObjectName("close_button")
+        collapse_btn = QPushButton("折叠")
+        collapse_btn.setObjectName("collapse_button")
         collapse_btn.setToolTip("折叠 (Esc)")
+        collapse_btn.setAccessibleName("折叠")
         collapse_btn.clicked.connect(self.collapse)
         header_layout.addWidget(collapse_btn)
+        self._collapse_btn = collapse_btn
         body_layout.addWidget(header_widget)
 
         # 上下文
@@ -570,6 +572,18 @@ class SplitWidget(QFrame):
             QPushButton#action_button:hover {{
                 background: {self._BLUE_DARK};
             }}
+            QPushButton#collapse_button {{
+                background: transparent;
+                color: {self._BLUE_DARK};
+                border: 1px solid {self._BLUE};
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton#collapse_button:hover {{
+                background: {self._BLUE_LIGHT};
+            }}
         """)
 
     def _apply_annotation_style(self) -> None:
@@ -620,6 +634,19 @@ class SplitWidget(QFrame):
             QPushButton#action_button:hover {{
                 background: #e0b83f;
             }}
+            QPushButton#collapse_button {{
+                background: rgba(242, 201, 76, 0.18);
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton#collapse_button:hover {{
+                background: #f2c94c;
+                color: #1f2937;
+            }}
         """)
 
     def _update_mode_ui(self) -> None:
@@ -628,6 +655,9 @@ class SplitWidget(QFrame):
         self._copy_btn.setVisible(True)
         self._regen_btn.setVisible(True)
         self._send_btn.setText("发送")
+        self._collapse_btn.setText("折叠")
+        self._collapse_btn.setToolTip("折叠 (Esc)")
+        self._collapse_btn.setAccessibleName("折叠")
         if self._mode == SplitMode.TRANSLATION:
             self._header_label.setVisible(False)
             self._context_label.setVisible(False)
@@ -647,6 +677,8 @@ class SplitWidget(QFrame):
             self._frozen_label.setVisible(False)
             self._regen_btn.setVisible(False)
             self._send_btn.setText("保存批注")
+            self._collapse_btn.setToolTip("折叠批注 (Esc)")
+            self._collapse_btn.setAccessibleName("折叠批注")
             self._input_area.setPlaceholderText("在此输入批注或备注...")
         elif self._mode == SplitMode.EXPLANATION:
             self._apply_translation_style()
@@ -656,7 +688,7 @@ class SplitWidget(QFrame):
             self._input_widget.setVisible(True)
             self._action_widget.setVisible(True)
             self._followup_widget.setVisible(False)
-            self._input_area.setPlaceholderText("请解释此概念的含义...")
+            self._input_area.setPlaceholderText("请输入需要补充说明的内容...")
         else:
             from src.ui.theme import SPLIT_WIDGET_STYLE
             self.setStyleSheet(SPLIT_WIDGET_STYLE)
