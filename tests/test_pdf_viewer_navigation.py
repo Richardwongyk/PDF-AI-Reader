@@ -47,6 +47,22 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
+def test_block_overlay_context_menu_shows_translation_and_annotation_only() -> None:
+    _app()
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph",
+        bbox=(0.0, 0.0, 100.0, 40.0),
+    )
+    overlay = BlockOverlay(block)
+
+    actions = [action.text() for action in overlay._build_context_menu().actions()]
+
+    assert actions == ["📖 翻译段落", "📝 批注/备注"]
+
+
 def test_pdf_viewer_scrolls_to_bbox_and_shows_highlight() -> None:
     _app()
     engine = _DocEngine()
