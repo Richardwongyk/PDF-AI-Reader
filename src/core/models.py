@@ -160,8 +160,8 @@ class ModelConfig(BaseModel):
     cloud_translation: str = "deepseek/deepseek-v4-flash" # 翻译与轻量任务模型
     cloud_reasoning: str = "deepseek/deepseek-v4-pro" # 全文问答、结构抽取与图谱模型
     embed_local: str = "bge-m3"          # 可选本地嵌入模型；不可用时使用轻量哈希嵌入
-    formula_ocr_backend: str = "pix2text-mfr"  # pix2text-mfr / paddle_formula / unimernet
-    formula_ocr_model: str = "PP-FormulaNet_plus-S"  # Paddle: PP-FormulaNet_plus-S/M/L or UniMERNet
+    formula_ocr_backend: str = "pix2text-mfr"  # legacy image-formula cache/OCR fallback
+    formula_ocr_model: str = ""                # legacy config field; third-party tool models are not used
     ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
 
 

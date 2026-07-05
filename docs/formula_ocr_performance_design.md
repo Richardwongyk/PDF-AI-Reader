@@ -4,9 +4,9 @@
 CSLT alignment 和 Graph Parser；图片、扫描、无文本层或低证据区域才进入 OCR/MFR
 候选轮。
 
-2026-05-28 状态补充：外部 OCR/MFR 工具仍只作为 r1/r2 候选后端；accepted/rejected
+2026-05-28 状态补充：OCR/MFR 仍只作为 r1/r2 候选后端；accepted/rejected
 审核、manual revision、evidence 预览、PDF bbox 定位和 r5 写回已经接线，但这些不改变
-OCR 边界。默认 born-digital 路径仍不能加载 OCR/MFR，r2 多工具输出仍必须经过 fusion/门禁。
+OCR 边界。默认 born-digital 路径仍不能加载 OCR/MFR，r2/r2a 候选输出仍必须经过 fusion/门禁。
 
 同日性能复盘补充：阅读器渲染优化不能用 OCR/MFR 或 tile-only 占位来掩盖页面不可见问题。Napkin
 极大缩放快速滚动时出现黑底/空白页属于 UI P0，不是 OCR 后端问题；修复应在渲染 fallback 层完成。
@@ -18,7 +18,7 @@ OCR 边界。默认 born-digital 路径仍不能加载 OCR/MFR，r2 多工具输
 硬约束：
 
 - 默认打开、滚动、缩放、翻译不等待 MFD/MFR。
-- 不把新虚拟环境作为主程序默认部署方案；重工具只能作为独立 worker。
+- 不把新虚拟环境作为主程序默认部署方案；第三方公式工具 worker 已从当前代码路线移除。
 - 不把 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet 等重依赖混进主环境。
 - 任何新后端必须先通过 Attention/Napkin 的速度和 LaTeX 对齐审计。
 - 同一图片、同一模型、同一预处理版本必须命中缓存，不能重复推理。
@@ -28,22 +28,16 @@ OCR 边界。默认 born-digital 路径仍不能加载 OCR/MFR，r2 多工具输
 
 当前主环境是 Python 3.14 + CPU PyTorch + ONNXRuntime，无 CUDA。PaddlePaddle 没有可用的 Python 3.14 wheel，因此 PaddleOCR 不能直接装进主环境。单独新建 Python 3.12 worker 能跑，但会增加部署复杂度和磁盘体积，不适合作为默认方案。
 
-2026-07-05 状态补充：2026-05-24 曾按隔离 worker 思路建立
-`pdf_tool_paddle310`、`pdf_tool_mineru310`、`pdf_tool_pix2text310`、
-`pdf_tool_magic310`、`pdf_tool_pek310`，但本次 `conda env list` 未显示这些环境。
-下一次评估 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet 时，必须先重新确认
-conda 环境和残留进程；如果环境缺失，按官方文档重新设计矩阵并顺序安装验证。
-任何恢复后的后端仍需记录真实 PDF 小页烟测、冷启动、推理耗时、峰值内存、
-缓存路径和源码对照质量。
+2026-07-05 状态补充：第三方公式工具 worker 和 Paddle 适配层已拆除。
+当前代码不再自动发现或调用 `pdf_tool_*` 隔离环境。若未来单独评估第三方工具，
+应作为仓库外离线研究，不再恢复为内置 r2 worker 通道。
 
-PaddleOCR 官方公式模块提供 `FormulaRecognition(model_name=...)` 和 `predict(input=..., batch_size=...)`，输出字段为 `rec_formula`。官方数据里 `PP-FormulaNet_plus-S` 侧重速度和英文公式，CPU 高性能模式约 260ms/公式；`PP-FormulaNet_plus-M/L` 准确率更高但 CPU 推理明显更慢。RapidLaTeXOCR 使用 ONNXRuntime/OpenVINO，技术路线更轻，但当前包对 Python 3.14 不友好，不能无代价接入主环境。
-
-所以默认路线应是：
+2026-07-05 决策更新：第三方公式工具 worker 和 Paddle 适配层已拆除。后续默认路线应是：
 
 1. 保留现有 Pix2Text/cnstd 栈作为默认后端。
-2. 把 OCR 做成可插拔后端，已接入 `paddle_formula` 适配层但不默认启用。
+2. born-digital 公式质量主线转到 TinyBDMath 本机结构模型。
 3. 先优化裁剪、去重、批量、缓存、后台调度。
-4. 只有在真实审计证明收益时，才启用 Paddle/ONNX 高精度后端。
+4. 不再通过本项目内置接口发现或调用 PaddleOCR、MinerU、PDF-Extract-Kit、UniMERNet 等第三方公式工具。
 
 ## 分层架构
 
@@ -75,15 +69,13 @@ PDF 打开
 
 - r0：只做 PDF 结构快扫，不走 OCR/MFR。
 - r1：缓存优先 OCR/MFR，处理图片/扫描/needs_ocr 候选。
-- r2：本地高精度 worker 复核低置信或用户精扫候选。
+- r2：本机/缓存候选复核低置信或用户精扫候选；第三方公式工具 worker 已移除。
 - r3：云端语义复核只校对候选，不替代 OCR/MFR 或 PDF 结构证据。
 
 ## 后端策略
 
 - `pix2text-mfr`: 默认后端。优点是当前环境已有、可运行、部署成本低。短期优化重点是管线，不是盲目换模型。
-- `paddle_formula`: 已接入适配层。适合后续高精度实验，不默认启用。缓存命名空间包含模型名，例如 `paddle_formula:PP-FormulaNet_plus-S:png-v1`。
-- `rapid_latex_ocr`: ONNXRuntime/OpenVINO 方向，适合未来轻量后端。需要解决 Python 3.14 包兼容或手动模型集成问题后再接入。
-- `pix2tex/simple-latex-ocr/texify`: 目前依赖增量较大或 CPU 性能不确定，先不进入默认路线。
+- 第三方公式工具 worker / PaddleOCR / MinerU / PEK / UniMERNet：已从当前代码路线移除，不再作为本项目内置候选后端。
 
 ## 性能优化优先级
 
@@ -125,10 +117,10 @@ PDF 打开
 
 ## 下一步
 
-1. 对现有 Pix2Text/Paddle/MinerU worker 做大样本性能和质量对照，报告冷启动、批量、缓存命中、P95 和源码相似度。
+1. 对现有本机候选路径和 TinyBDMath r2a 做大样本性能和质量对照，报告冷启动、批量、缓存命中、P95 和源码相似度。
 2. 优化常驻 worker、批内 hash 去重、裁剪参数、后台 batch budget 和超时策略。
 3. 对 r2 候选继续执行 `local_precise_degraded_against_born_digital` 检查，质量低于 born-digital 结构证据时不得进入 accepted。
-4. 若 Pix2Text/Paddle/PEK 仍达不到门禁，只保留为显式精扫或离线审计；默认程序继续保持轻量。
+4. 若图片公式 OCR fallback 仍达不到门禁，只保留为显式精扫或离线审计；默认程序继续保持轻量。
 
 ## 当前基准
 

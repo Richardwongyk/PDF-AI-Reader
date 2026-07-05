@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import logging
 import hashlib
-import time
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from src.app.formula_index_scheduler import FormulaScanPlan
 from src.app.formula_index_store import FormulaIndexStore, FormulaScanRound
-from src.core.external_formula_tools import ExternalFormulaToolRunner, ExternalFormulaToolSpec
 from src.core.models import BlockType, DocumentBlock, wrap_math_text
 
 _logger = logging.getLogger(__name__)
@@ -756,7 +754,6 @@ class _FormulaOcrWorker(QThread):
         doc_hash: str = "",
         cache_only: bool = True,
         scan_round: str = FormulaScanRound.CACHED_RECOGNITION.value,
-        external_tool_specs: list[ExternalFormulaToolSpec] | None = None,
     ) -> None:
         super().__init__()
         self._filepath = filepath
@@ -764,7 +761,6 @@ class _FormulaOcrWorker(QThread):
         self._doc_hash = doc_hash
         self._cache_only = cache_only
         self._scan_round = scan_round
-        self._external_tool_specs = list(external_tool_specs) if external_tool_specs is not None else None
 
     def run(self) -> None:
         import fitz
@@ -847,24 +843,6 @@ class _FormulaOcrWorker(QThread):
                     "preprocess_version": "crop-dpi300-pad6",
                     "scan_round": self._scan_round,
                 })
-            if self._scan_round == FormulaScanRound.LOCAL_HIGH_PRECISION.value:
-                done.extend(
-                    self._external_tool_candidates(
-                        [
-                            (
-                                block.id,
-                                image,
-                                {
-                                    "pdf_path": self._filepath,
-                                    "page_num": block.page_num,
-                                    "bbox": list(block.bbox),
-                                },
-                            )
-                            for block, image in zip(image_blocks, images, strict=False)
-                        ],
-                        image_hashes,
-                    )
-                )
             pending = len(self._blocks) - len(updated)
             self.finished_signal.emit({
                 "doc_hash": self._doc_hash,
@@ -893,50 +871,6 @@ class _FormulaOcrWorker(QThread):
                     for block in self._blocks
                 ],
             })
-
-    def _external_tool_candidates(
-        self,
-        images: list[tuple[str, bytes, dict[str, object]]],
-        image_hashes: list[str],
-    ) -> list[dict[str, object]]:
-        if not images:
-            return []
-        hash_by_id = {
-            candidate_id: image_hash
-            for (candidate_id, _, _), image_hash in zip(images, image_hashes, strict=False)
-        }
-        started = time.perf_counter()
-        try:
-            candidates = ExternalFormulaToolRunner().recognize_images(
-                images,
-                specs=self._external_tool_specs,
-            )
-        except Exception as exc:
-            _logger.info("外部公式工具候选生成失败: %s", exc)
-            return []
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        done: list[dict[str, object]] = []
-        for candidate in candidates:
-            image_hash = hash_by_id.get(candidate.candidate_id, "")
-            if not image_hash:
-                continue
-            if not candidate.latex and not candidate.warnings:
-                continue
-            done.append({
-                "block_id": candidate.candidate_id,
-                "latex": candidate.latex,
-                "normalized_latex": candidate.latex,
-                "image_hash": image_hash,
-                "model": candidate.model,
-                "model_version": candidate.model_version,
-                "preprocess_version": candidate.preprocess_version,
-                "score": candidate.score,
-                "duration_ms": candidate.duration_ms or elapsed_ms,
-                "warnings": list(candidate.warnings),
-                "scan_round": self._scan_round,
-            })
-        return done
-
 
 class _FormulaPageScanWorker(QThread):
     """Run MFD on a small page batch to discover scanned/image formulas."""

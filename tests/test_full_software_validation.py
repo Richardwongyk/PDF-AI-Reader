@@ -15,7 +15,6 @@ def _options(tmp_path: Path, **overrides):
         "fail_fast": False,
         "include_desktop_e2e": False,
         "include_cloud": False,
-        "include_local_tools": False,
         "strict_logs": False,
         "tinybdmath_graph_parser_model": None,
         "stress_multiplier": 1,
@@ -43,7 +42,7 @@ def test_build_plan_covers_whole_software_gates(tmp_path) -> None:
     assert "desktop_e2e" not in categories
 
 
-def test_build_plan_enables_explicit_e2e_cloud_and_local_tools(tmp_path) -> None:
+def test_build_plan_enables_explicit_e2e_and_cloud(tmp_path) -> None:
     from tools.full_software_validation import build_plan
 
     steps = build_plan(
@@ -51,7 +50,6 @@ def test_build_plan_enables_explicit_e2e_cloud_and_local_tools(tmp_path) -> None
             tmp_path,
             include_desktop_e2e=True,
             include_cloud=True,
-            include_local_tools=True,
         )
     )
     by_name = {step.name: step for step in steps}
@@ -60,7 +58,6 @@ def test_build_plan_enables_explicit_e2e_cloud_and_local_tools(tmp_path) -> None
     multiround = by_name["formula_multiround_attention"]
     command = " ".join(multiround.command)
     assert "--run-cloud-review" in command
-    assert "--auto-local-tools" in command
     assert "--r2-sample-formulas" in command
 
 
@@ -72,7 +69,6 @@ def test_stress_multiplier_scales_pages_limits_and_desktop_e2e(tmp_path) -> None
             tmp_path,
             include_desktop_e2e=True,
             include_cloud=True,
-            include_local_tools=True,
             max_pages=2,
             stress_multiplier=5,
         )
@@ -85,8 +81,8 @@ def test_stress_multiplier_scales_pages_limits_and_desktop_e2e(tmp_path) -> None
 
     assert index_cmd[index_cmd.index("--max-pages") + 1] == "10"
     assert multiround_cmd[multiround_cmd.index("--max-pages") + 1] == "10"
-    assert multiround_cmd[multiround_cmd.index("--r2-limit") + 1] == "40"
-    assert multiround_cmd[multiround_cmd.index("--r2-sample-formulas") + 1] == "40"
+    assert multiround_cmd[multiround_cmd.index("--r2-limit") + 1] == "0"
+    assert multiround_cmd[multiround_cmd.index("--r2-sample-formulas") + 1] == "0"
     assert multiround_cmd[multiround_cmd.index("--r3-limit") + 1] == "20"
     assert multiround_cmd[multiround_cmd.index("--r4-limit") + 1] == "80"
     assert multiround_cmd[multiround_cmd.index("--r5-limit") + 1] == "20"

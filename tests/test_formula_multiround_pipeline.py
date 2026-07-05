@@ -72,7 +72,6 @@ def test_multiround_pipeline_reports_r0_to_r4(monkeypatch, tmp_path) -> None:
             doc_hash="",
             cache_only=True,
             scan_round="",
-            external_tool_specs=None,
         ) -> None:
             self.finished_signal = _Signal()
             self._blocks = blocks
@@ -200,7 +199,6 @@ def test_multiround_pipeline_reuses_done_jobs(monkeypatch, tmp_path) -> None:
             doc_hash="",
             cache_only=True,
             scan_round="",
-            external_tool_specs=None,
         ) -> None:
             self.finished_signal = _Signal()
             self._blocks = blocks
@@ -302,7 +300,6 @@ def test_multiround_pipeline_can_run_targeted_r2_after_fusion(monkeypatch, tmp_p
             doc_hash="",
             cache_only=True,
             scan_round="",
-            external_tool_specs=None,
         ) -> None:
             self.finished_signal = _Signal()
             self._blocks = blocks
@@ -407,7 +404,7 @@ def test_multiround_pipeline_can_drain_targeted_r2_batches(monkeypatch, tmp_path
     class FakeOcrWorker:
         full_runs = 0
 
-        def __init__(self, filepath, blocks, doc_hash="", cache_only=True, scan_round="", external_tool_specs=None) -> None:
+        def __init__(self, filepath, blocks, doc_hash="", cache_only=True, scan_round="") -> None:
             self.finished_signal = _Signal()
             self._blocks = blocks
             self._doc_hash = doc_hash

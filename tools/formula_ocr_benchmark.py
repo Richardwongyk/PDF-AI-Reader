@@ -207,7 +207,10 @@ def _benchmark_case(
     )
 
     MathOCR._instance = None
-    MathOCR.set_default_backend_config(backend, model_name=model)
+    backend_kwargs = {}
+    if model and backend not in {"pix2text", "pix2text-mfr"}:
+        backend_kwargs["model_name"] = model
+    MathOCR.set_default_backend_config(backend, **backend_kwargs)
     ocr = MathOCR()
     ocr._cache = _NoCache()
 
@@ -302,7 +305,7 @@ def main() -> int:
         default="",
         help="Comma-separated recognizer backends to benchmark; overrides --backend.",
     )
-    parser.add_argument("--model", default="PP-FormulaNet_plus-S")
+    parser.add_argument("--model", default="")
     parser.add_argument("--start-page", type=int, default=0)
     parser.add_argument("--max-pages", type=int, default=8)
     parser.add_argument("--sample-limit", type=int, default=8)

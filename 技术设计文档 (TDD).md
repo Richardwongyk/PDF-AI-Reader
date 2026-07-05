@@ -66,7 +66,7 @@
   评估迭代，输出 `layout_status=not_run`，不能作为 accepted gate 依据。
 - 2026-07-05 当前可见 conda 环境为 `base`、`drawing`、`cs231n`、`lab3fast`、
   `lottery_python`、`pdf_ai_reader_314`、`pku_elective`、`science`；旧文档中
-  `pdf_tool_*` 隔离工具环境本次未显示。
+  `pdf_tool_*` 隔离工具环境本次未显示；第三方公式工具 worker/对比通道已移除。
 - 2026-07-05 验证：新增批注/TOC/运行时检查 27 passed；
   合并回归 + M5 定向组合 94 passed；轻量接手测试 95 passed；
   TinyBDMath 主线测试 159 passed。
@@ -277,7 +277,6 @@ D:\程设大作业\
 │   │   ├── glossary_manager.py    # GlossaryManager 术语表管理
 │   │   ├── navigator.py           # Navigator 目录/书签管理
 │   │   ├── born_digital_formula_extractor.py
-│   │   ├── external_formula_tools.py
 │   │   ├── tinybdmath_*.py        # TinyBDMath CSLT/alignment/parser/decoder/verifier
 │   │   └── knowledge_backends.py
 │   ├── app/

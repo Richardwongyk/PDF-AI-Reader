@@ -277,7 +277,7 @@ PDF / OCR / MFR
 
 - 全篇高精度确认流：允许用户主动开启更激进的 `max_mfd_pages/max_uncached`，但必须可暂停和恢复。
 - 公式精度审计：把 Attention / Napkin 的 PDF 抽取结果与 LaTeX 源公式做 recall/precision 对照。
-- 可插拔公式识别后端：PaddleOCR `FormulaRecognition` 适配层已接入为 `paddle_formula`；默认保持 Pix2Text，候选后端必须通过 Attention/Napkin 性能和精度审计后才能进入默认策略。
+- 公式识别后端：第三方公式工具 worker 和 PaddleOCR 适配层已拆除；born-digital 公式质量主线改为 TinyBDMath 本机结构模型，图片公式仍走旧 cache/OCR fallback。
 - `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
 
 验收门槛：
@@ -288,12 +288,10 @@ PDF / OCR / MFR
 
 公式 OCR 工具迁移原则：
 
-- 不直接在 UI 或知识库层绑定某个 OCR 库，新增 `FormulaRecognizer` 抽象后再接入 Paddle/UniMERNet。
+- 不直接在 UI 或知识库层绑定第三方公式工具。
 - 缓存 key 必须包含 `image_hash/model/model_version/preprocess_version`，防止不同模型结果互相污染。
-- 默认后端以速度稳定为先，高精度后端只进入用户确认的精扫或低置信度修正轮。
-- `paddle_formula` 使用 PaddleOCR 3.x 模块 API：`FormulaRecognition(model_name=...)` 初始化模型，`predict(input=..., batch_size=...)` 批量识别裁剪公式图，并读取结果中的 `rec_formula`；模型名由 `model.formula_ocr_model` 控制，缓存命名空间包含具体模型名。
-- PP-FormulaNet_plus-S 优先作为“快且准”的候选，PP-FormulaNet_plus-M/L 和 UniMERNet 作为更高精度候选。
-- 当前环境尚未安装 `paddleocr/paddlepaddle`，因此本阶段只能验证适配层、缓存隔离和默认路径不回退；真实准确率和速度必须在安装后用 Attention/Napkin 源 LaTeX 对齐审计判断。
+- 默认后端以速度稳定为先，高精度 born-digital 质量改由 TinyBDMath 本机结构模型承担。
+- 不再在当前代码中接入 PaddleOCR/UniMERNet/PDF-Extract-Kit 作为公式候选后端。
 
 ## 官方资料
 
@@ -305,7 +303,4 @@ PDF / OCR / MFR
 - Microsoft GraphRAG: https://microsoft.github.io/graphrag/get_started/
 - Neo4j GraphRAG Python: https://neo4j.com/docs/neo4j-graphrag-python/current/
 - SQLite FTS5: https://sqlite.org/fts5.html
-- PaddleOCR Formula Recognition Module: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/module_usage/formula_recognition.html
-- PaddleOCR Formula Recognition Pipeline: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/pipeline_usage/formula_recognition.html
-- UniMERNet: https://github.com/opendatalab/UniMERNet
 - Nougat: https://github.com/facebookresearch/nougat
