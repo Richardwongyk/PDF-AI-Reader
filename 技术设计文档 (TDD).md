@@ -1139,10 +1139,11 @@ class SplitWidget(QFrame):
 ### 7.5 主题模块 (`src/ui/theme.py`)
 
 ```python
-# 三套 QPalette 主题（通过 QApplication.setPalette() 全局应用）:
-apply_theme("light")   # 素白（学术）
-apply_theme("dark")    # 暗夜
-apply_theme("sepia")   # 护眼羊皮纸
+# 当前默认黑色背景（config.yaml: ui.theme=dark）:
+apply_theme("dark")
+
+# 代码层仍保留 light/dark/sepia 三套 QPalette；
+# 设置窗口当前不提供主题切换入口，避免未验证的全窗口对比度回归。
 
 # SplitWidget 专用 QSS (SPLIT_WIDGET_STYLE):
 # - 蓝紫渐变背景 (qlineargradient)
@@ -1330,7 +1331,7 @@ routing:
 
 ui:
   language: zh_CN
-  theme: light           # light / dark / sepia
+  theme: dark            # 默认黑色背景；设置窗口暂不提供主题切换入口
   split_position: below
   font_size: 12
   line_spacing: 1.5
@@ -1388,7 +1389,7 @@ ollama pull bge-m3
 | 书签管理 | ✅ 已实现 | 手动添加 + AI 建议 |
 | 混合路由 | ✅ 已实现 | 本地/云端/回退三级策略 |
 | 配置管理 | ✅ 已实现 | YAML + 热加载 + .env |
-| 主题系统 | ✅ 已实现 | QPalette 三套主题 |
+| 主题系统 | 🟡 默认黑底 | QPalette 能力保留；设置窗口暂不开放主题切换 |
 | 侧栏控制 | ✅ 已实现 | 菜单栏同层左右角按钮隐藏/显示；左右 dock 均可弹出/归位且不可关闭 |
 | 顶部工具栏折叠 | 🟡 基础已实现 | 工具栏空白区和恢复细条可双击折叠/恢复；菜单栏文字双击折叠未可靠实现，暂不继续 |
 | 文档标签页 | ⏳ 暂不实现 | 已讨论但当前不做多文档标签/标签关闭当前文档 |
