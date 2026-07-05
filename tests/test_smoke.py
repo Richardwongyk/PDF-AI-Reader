@@ -1,8 +1,10 @@
 import os
+import logging
 import subprocess
 import sys
 import textwrap
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -81,6 +83,30 @@ def test_setup_logging_prunes_old_app_logs(tmp_path, monkeypatch) -> None:
     assert not stale.exists()
     assert fresh.exists()
     assert keep_awake.exists()
+
+
+def test_setup_logging_keeps_console_quiet_by_default(tmp_path, monkeypatch) -> None:
+    from src import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(main._CONSOLE_LOG_ENV, raising=False)
+
+    main.setup_logging()
+
+    handlers = logging.getLogger().handlers
+    assert any(isinstance(handler, RotatingFileHandler) for handler in handlers)
+    assert not any(getattr(handler, "stream", None) is sys.stdout for handler in handlers)
+
+
+def test_setup_logging_allows_explicit_console_log(tmp_path, monkeypatch) -> None:
+    from src import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(main._CONSOLE_LOG_ENV, "1")
+
+    main.setup_logging()
+
+    assert any(getattr(handler, "stream", None) is sys.stdout for handler in logging.getLogger().handlers)
 
 
 def test_ollama_reachability_negative_result_is_fast_and_cached() -> None:

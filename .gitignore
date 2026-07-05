@@ -19,11 +19,13 @@ env/
 .idea/
 .claude/
 .tools/
+tempCodeRunnerFile.*
 
 # 应用数据
 data/knowledge_bases/
 data/knowledge_bases_fts/
 data/annotations.json
+data/runtime/
 
 # 日志
 logs/
