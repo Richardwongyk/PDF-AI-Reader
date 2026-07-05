@@ -30,6 +30,7 @@ class SplitMode(str, Enum):
     QUESTION = "question"          # 提问模式：显示输入框 + 结果区
     TRANSLATION = "translation"    # 翻译模式：仅显示结果区（译文）
     EXPLANATION = "explanation"    # 解释模式：自动发送解释请求
+    ANNOTATION = "annotation"      # 批注模式：显示可编辑备注
 
 
 class SplitState(str, Enum):

@@ -420,6 +420,8 @@ class PdfViewer(QScrollArea):
     block_retranslate_requested = Signal(str)
     block_question_requested = Signal(str)
     block_explain_requested = Signal(str)
+    block_annotation_requested = Signal(str)
+    block_annotation_saved = Signal(str, str)
     viewport_changed = Signal(int, int)
     split_close_requested = Signal(str)
 
@@ -441,6 +443,7 @@ class PdfViewer(QScrollArea):
         self._all_blocks: list[DocumentBlock] = []
         self._page_segments: dict[int, list[dict]] = {}
         self._splits: dict[str, SplitWidget] = {}
+        self._split_sources: dict[str, str] = {}
         self._page_rects_pt: dict[int, tuple[float, float]] = {}
         self._block_to_page: dict[str, int] = {}
         self._blocks_by_id: dict[str, DocumentBlock] = {}
@@ -448,6 +451,8 @@ class PdfViewer(QScrollArea):
         self._requested_block_pages: set[int] = set()
         self._overlays: dict[str, BlockOverlay] = {}
         self._trans_indicators: dict[str, QWidget] = {}
+        self._annotation_indicators: dict[str, QWidget] = {}
+        self._annotated_blocks: set[str] = set()
         self._evidence_highlight: QWidget | None = None
 
         # 瓦片化渲染器（借鉴 qpageview + Syncfusion），使用屏幕物理 DPI
@@ -581,6 +586,7 @@ class PdfViewer(QScrollArea):
             ov.raise_()
             ov.show()
             self._connect_overlay(ov)
+            self._refresh_block_markers(b.id)
         return w
 
     def _segment_page_from_blocks(self, blocks: list[DocumentBlock]) -> int | None:
@@ -735,6 +741,7 @@ class PdfViewer(QScrollArea):
             ov.show()
             container._overlays[block.id] = ov
             self._overlays[block.id] = ov
+            self._refresh_block_markers(block.id)
 
         for block_id, ov in list(container._overlays.items()):
             if block_id in keep:
@@ -786,6 +793,7 @@ class PdfViewer(QScrollArea):
             ov.raise_()
             ov.show()
             self._overlays[block.id] = ov
+            self._refresh_block_markers(block.id)
 
         for block_id, ov in existing.items():
             if block_id in keep:
@@ -1385,6 +1393,15 @@ class PdfViewer(QScrollArea):
     # ── 翻译指示器 ──
 
     def _set_translation_marker(self, block_id: str, has: bool) -> None:
+        self._set_block_marker(
+            block_id,
+            has,
+            self._trans_indicators,
+            x=0,
+            color="#a0c4f0",
+            tooltip="已翻译；双击原文展开",
+        )
+        return
         ov = self._get_overlay(block_id)
         if not ov:
             return
@@ -1404,6 +1421,57 @@ class PdfViewer(QScrollArea):
                 indicator.setToolTip("已翻译 — 双击原文展开")
                 indicator.show()
                 self._trans_indicators[block_id] = indicator
+
+    def set_annotation_marker(self, block_id: str, has: bool) -> None:
+        if has:
+            self._annotated_blocks.add(block_id)
+        else:
+            self._annotated_blocks.discard(block_id)
+        self._set_block_marker(
+            block_id,
+            has,
+            self._annotation_indicators,
+            x=4,
+            color="#f2c94c",
+            tooltip="已有批注；右键可编辑",
+        )
+
+    def _set_block_marker(
+        self,
+        block_id: str,
+        has: bool,
+        indicators: dict[str, QWidget],
+        *,
+        x: int,
+        color: str,
+        tooltip: str,
+    ) -> None:
+        old = indicators.pop(block_id, None)
+        if old and _isValid(old):
+            old.deleteLater()
+        if not has:
+            return
+
+        ov = self._get_overlay(block_id)
+        if not ov:
+            return
+
+        parent_w = ov.parentWidget()
+        if parent_w:
+            y = ov.geometry().y()
+            h = max(ov.geometry().height(), 20)
+            indicator = QWidget(parent_w)
+            indicator.setGeometry(x, y, 3, h)
+            indicator.setStyleSheet(f"background: {color};")
+            indicator.setToolTip(tooltip)
+            indicator.show()
+            indicators[block_id] = indicator
+
+    def _refresh_block_markers(self, block_id: str) -> None:
+        if block_id in self._trans_indicators:
+            self._set_translation_marker(block_id, True)
+        if block_id in self._annotated_blocks:
+            self.set_annotation_marker(block_id, True)
 
     def _get_overlay(self, block_id: str) -> BlockOverlay | None:
         ov = self._overlays.get(block_id)
@@ -1444,10 +1512,132 @@ class PdfViewer(QScrollArea):
         right_pad = max(0, int((page_pt_w - float(block.bbox[2])) * self._scale))
         split.set_content_padding(left_pad, right_pad)
 
-    def open_split_widget(
-        self, block_id: str, mode: SplitMode = SplitMode.TRANSLATION
+    def _create_split_widget(
+        self,
+        block: DocumentBlock,
+        *,
+        split_id: str,
+        mode: SplitMode,
+        page_num: int,
+        block_pixel_height: int,
+    ) -> SplitWidget:
+        page_display_w = self._page_metas[page_num]["width"]
+        split = SplitWidget(
+            block,
+            mode=mode,
+            position="below",
+            block_pixel_height=max(block_pixel_height, 60),
+            page_width=page_display_w,
+            split_id=split_id,
+        )
+        self._align_split_content_to_block(split, block, page_num)
+        split.question_submitted.connect(lambda q, _sid, bid=block.id: self._on_split_q(q, bid))
+        split.translation_requested.connect(self.block_translate_requested.emit)
+        split.translation_refresh_requested.connect(self.block_retranslate_requested.emit)
+        split.annotation_saved.connect(
+            lambda text, sid=split_id: self._on_annotation_saved(sid, text)
+        )
+        split.close_requested.connect(lambda sid=split_id: self._on_clear_close(sid))
+        return split
+
+    def _register_split_widget(
+        self,
+        split_id: str,
+        source_block_id: str,
+        split: SplitWidget,
+        page_num: int,
+    ) -> None:
+        self._splits[split_id] = split
+        self._split_sources[split_id] = source_block_id
+        self._split_pages.add(page_num)
+        split._page_num = page_num
+        self._remember_widget_page(split, page_num)
+        split._prev_split_h = float(split._saved_height)
+        if self._vlayout:
+            self._vlayout.register_split(page_num, split._prev_split_h)
+        split.height_changed.connect(self._on_split_height_changed)
+
+    def _on_annotation_saved(self, split_id: str, note: str) -> None:
+        source_block_id = self._source_block_id_for_split(split_id)
+        self.block_annotation_saved.emit(source_block_id, note)
+
+    def _open_adjacent_split_widget(
+        self,
+        block_id: str,
+        split_id: str,
+        mode: SplitMode,
+        page_num: int,
+        block: DocumentBlock,
+        after_split_id: str | None,
     ) -> SplitWidget | None:
-        existing = self._splits.get(block_id)
+        segs = self._page_segments.get(page_num, [])
+        insert_after_idx = -1
+        if after_split_id:
+            for i, seg in enumerate(segs):
+                if seg.get("split_id") == after_split_id:
+                    insert_after_idx = i
+                    break
+        if insert_after_idx < 0:
+            if mode == SplitMode.TRANSLATION:
+                annotation_id = self.annotation_split_id(block_id)
+                for i, seg in enumerate(segs):
+                    if seg.get("split_id") == annotation_id:
+                        insert_after_idx = i - 1
+                        break
+            if insert_after_idx < 0:
+                for i, seg in enumerate(segs):
+                    sid = seg.get("split_id")
+                    if sid and self._source_block_id_for_split(sid) == block_id:
+                        insert_after_idx = i
+                        break
+
+        if insert_after_idx < 0:
+            return None
+
+        block_px_h = int((block.bbox[3] - block.bbox[1]) * self._scale)
+        split = self._create_split_widget(
+            block,
+            split_id=split_id,
+            mode=mode,
+            page_num=page_num,
+            block_pixel_height=block_px_h,
+        )
+        scroll_anchor = self._capture_scroll_anchor()
+        anchor_seg = segs[insert_after_idx]
+        anchor_sid = anchor_seg.get("split_id")
+        anchor_widget = self._splits.get(anchor_sid) if anchor_sid else anchor_seg.get("widget")
+        anchor_layout_idx = self._layout.indexOf(anchor_widget) if anchor_widget is not None else -1
+        mounted = anchor_layout_idx >= 0
+        if mounted:
+            self._insert_page_content_widget(anchor_layout_idx + 1, split)
+        else:
+            split.hide()
+
+        split.open(mode)
+        if not mounted:
+            split.hide()
+        self._register_split_widget(split_id, block_id, split, page_num)
+        self._page_segments[page_num] = (
+            segs[: insert_after_idx + 1]
+            + [{"split_id": split_id}]
+            + segs[insert_after_idx + 1:]
+        )
+        self._active_pages.add(page_num)
+        self._rendered_pages.add(page_num)
+        self._adjust_spacers(self._active_pages | {page_num})
+        self._restore_scroll_anchor(scroll_anchor)
+        return split
+
+    def open_split_widget(
+        self,
+        block_id: str,
+        mode: SplitMode = SplitMode.TRANSLATION,
+        *,
+        split_id: str | None = None,
+        after_split_id: str | None = None,
+    ) -> SplitWidget | None:
+        split_id = split_id or block_id
+        existing = self._splits.get(split_id)
         if existing is not None:
             if existing.collapsed:
                 existing.expand()
@@ -1467,6 +1657,25 @@ class PdfViewer(QScrollArea):
         if container is not None and page_num not in self._rendered_pages:
             self._render_page(page_num)
             return None
+
+        block = self._find_block(block_id)
+        if block is None:
+            return None
+        if any(
+            self._source_block_id_for_split(seg.get("split_id", "")) == block_id
+            for seg in self._page_segments.get(page_num, [])
+            if "split_id" in seg
+        ):
+            adjacent = self._open_adjacent_split_widget(
+                block_id,
+                split_id,
+                mode,
+                page_num,
+                block,
+                after_split_id,
+            )
+            if adjacent is not None:
+                return adjacent
 
         segs = self._page_segments.get(page_num, [])
         seg_idx = -1
@@ -1501,17 +1710,13 @@ class PdfViewer(QScrollArea):
         below_blocks = [b for b in all_blocks if b.bbox[1] * self._scale >= cut_y - 5]
 
         block_px_h = int((block.bbox[3] - block.bbox[1]) * self._scale)
-        page_display_w = self._page_metas[page_num]["width"] if page_num in self._page_metas else pixmap.width()
-        split = SplitWidget(
-            block, mode=mode, position="below",
-            block_pixel_height=max(block_px_h, 60),
-            page_width=page_display_w,
+        split = self._create_split_widget(
+            block,
+            split_id=split_id,
+            mode=mode,
+            page_num=page_num,
+            block_pixel_height=block_px_h,
         )
-        self._align_split_content_to_block(split, block, page_num)
-        split.question_submitted.connect(lambda q, bid=block_id: self._on_split_q(q, bid))
-        split.translation_requested.connect(self.block_translate_requested.emit)
-        split.translation_refresh_requested.connect(self.block_retranslate_requested.emit)
-        split.close_requested.connect(lambda bid=block_id: self._on_clear_close(bid))
 
         # Layout 操作：移除老 widget，插入段+裂缝+段
         old_idx = self._layout.indexOf(old_widget)
@@ -1526,6 +1731,9 @@ class PdfViewer(QScrollArea):
             for b_id in list(self._trans_indicators.keys()):
                 if self._block_to_page.get(b_id) == page_num:
                     del self._trans_indicators[b_id]
+            for b_id in list(self._annotation_indicators.keys()):
+                if self._block_to_page.get(b_id) == page_num:
+                    del self._annotation_indicators[b_id]
         else:
             for child in old_widget.findChildren(BlockOverlay):
                 self._overlays.pop(child.block_id, None)
@@ -1547,19 +1755,12 @@ class PdfViewer(QScrollArea):
         self._insert_page_content_widget(old_idx + 2, bot_w)
 
         split.open(mode)
-        self._splits[block_id] = split
+        self._register_split_widget(split_id, block_id, split, page_num)
         _logger.info("裂缝已打开: block=%s page=%d mode=%s", block_id, page_num, mode.value)
-        self._split_pages.add(page_num)
-        self._set_translation_marker(block_id, True)
+        if mode == SplitMode.TRANSLATION:
+            self._set_translation_marker(block_id, True)
 
         # 更新虚拟布局 + 连接高度变化信号
-        split._page_num = page_num
-        self._remember_widget_page(split, page_num)
-        split._prev_split_h = float(split._saved_height)
-        if self._vlayout:
-            self._vlayout.register_split(page_num, split._prev_split_h)
-        split.height_changed.connect(self._on_split_height_changed)
-
         new_segs = segs[:seg_idx] + [
             {
                 "y0": seg["y0"], "y1": cut_y,
@@ -1567,7 +1768,7 @@ class PdfViewer(QScrollArea):
                 "y1_pt": cut_y / self._scale if self._scale else 0.0,
                 "blocks": above_blocks, "widget": top_w,
             },
-            {"split_id": block_id},
+            {"split_id": split_id},
             {
                 "y0": cut_y, "y1": seg["y1"],
                 "y0_pt": cut_y / self._scale if self._scale else 0.0,
@@ -1883,7 +2084,7 @@ class PdfViewer(QScrollArea):
                 if "split_id" in seg:
                     split = self._splits.get(seg["split_id"])
                     if split:
-                        block = self._find_block(seg["split_id"])
+                        block = self._block_for_split(seg["split_id"])
                         if block is not None:
                             self._align_split_content_to_block(split, block, pn)
                         else:
@@ -1992,6 +2193,7 @@ class PdfViewer(QScrollArea):
             s.close()
             s.deleteLater()
         self._splits.clear()
+        self._split_sources.clear()
         self._page_segments.clear()
         self._block_to_page.clear()
         self._blocks_by_id.clear()
@@ -2001,6 +2203,11 @@ class PdfViewer(QScrollArea):
             if _isValid(ind):
                 ind.deleteLater()
         self._trans_indicators.clear()
+        for ind in list(self._annotation_indicators.values()):
+            if _isValid(ind):
+                ind.deleteLater()
+        self._annotation_indicators.clear()
+        self._annotated_blocks.clear()
         self._clear_evidence_highlight()
         self._all_blocks.clear()
         self._page_rects_pt.clear()
@@ -2046,9 +2253,36 @@ class PdfViewer(QScrollArea):
         ov.translate_requested.connect(self.block_translate_requested.emit)
         ov.question_requested.connect(self.block_question_requested.emit)
         ov.explain_requested.connect(self.block_explain_requested.emit)
+        ov.annotation_requested.connect(self.block_annotation_requested.emit)
 
     def _find_block(self, block_id: str) -> DocumentBlock | None:
         return self._blocks_by_id.get(block_id)
+
+    @staticmethod
+    def annotation_split_id(block_id: str) -> str:
+        return f"{block_id}__annotation"
+
+    @staticmethod
+    def is_annotation_split_id(split_id: str) -> bool:
+        return split_id.endswith("__annotation")
+
+    @staticmethod
+    def block_id_from_annotation_split_id(split_id: str) -> str:
+        if split_id.endswith("__annotation"):
+            return split_id[: -len("__annotation")]
+        return split_id
+
+    def _source_block_id_for_split(self, split_id: str) -> str:
+        return self._split_sources.get(
+            split_id,
+            self.block_id_from_annotation_split_id(split_id),
+        )
+
+    def _page_num_for_split(self, split_id: str) -> int | None:
+        return self._block_to_page.get(self._source_block_id_for_split(split_id))
+
+    def _block_for_split(self, split_id: str) -> DocumentBlock | None:
+        return self._find_block(self._source_block_id_for_split(split_id))
 
     # ── 内部槽 ──
 
@@ -2082,7 +2316,7 @@ class PdfViewer(QScrollArea):
             total_split_h = sum(
                 self._split_virtual_height(s)
                 for bid, s in self._splits.items()
-                if self._block_to_page.get(bid) == page_num
+                if self._page_num_for_split(bid) == page_num
             )
             self._vlayout.set_split_extra(page_num, total_split_h)
 
@@ -2094,10 +2328,16 @@ class PdfViewer(QScrollArea):
 
     def _on_clear_close(self, block_id: str) -> None:
         scroll_anchor = self._capture_scroll_anchor()
-        self._set_translation_marker(block_id, False)
+        source_block_id = self._source_block_id_for_split(block_id)
+        page_num = self._page_num_for_split(block_id)
         s = self._splits.pop(block_id, None)
         if s is None:
             return
+        self._split_sources.pop(block_id, None)
+        if getattr(s, "mode", None) == SplitMode.TRANSLATION:
+            self._set_translation_marker(source_block_id, False)
+        elif getattr(s, "mode", None) == SplitMode.ANNOTATION:
+            self.set_annotation_marker(source_block_id, False)
         self._forget_widget_page(s)
         if self._layout.indexOf(s) >= 0:
             self._layout.removeWidget(s)
@@ -2105,10 +2345,9 @@ class PdfViewer(QScrollArea):
             s.height_changed.disconnect(self._on_split_height_changed)
         except Exception:
             pass
-        page_num = self._block_to_page.get(block_id)
         if page_num is not None:
             has_other_splits = any(
-                self._block_to_page.get(bid) == page_num
+                self._page_num_for_split(bid) == page_num
                 for bid in self._splits
             )
             if has_other_splits:
@@ -2123,7 +2362,7 @@ class PdfViewer(QScrollArea):
             total_split_h = sum(
                 self._split_virtual_height(other)
                 for bid, other in self._splits.items()
-                if self._block_to_page.get(bid) == page_num
+                if self._page_num_for_split(bid) == page_num
             )
             self._vlayout.set_split_extra(page_num, total_split_h)
         self._adjust_spacers(self._active_pages)
@@ -2182,6 +2421,12 @@ class PdfViewer(QScrollArea):
                 if i > 0 and i + 1 < len(segs):
                     prev_seg = segs[i - 1]
                     next_seg = segs[i + 1]
+                    if "split_id" in prev_seg or "split_id" in next_seg:
+                        self._page_segments[page_num] = segs[:i] + segs[i + 1:]
+                        self._page_containers.pop(page_num, None)
+                        self._rendered_pages.add(page_num)
+                        self._active_pages.add(page_num)
+                        break
                     pixmap = self._doc_engine.get_page_pixmap(page_num, dpi=self._dpi)
                     if pixmap is None or pixmap.isNull():
                         self._page_segments[page_num] = segs[:i] + segs[i + 1:]
@@ -2226,4 +2471,6 @@ class PdfViewer(QScrollArea):
                         self._page_containers.pop(page_num, None)
                         self._rendered_pages.add(page_num)
                         self._active_pages.add(page_num)
+                else:
+                    self._page_segments[page_num] = segs[:i] + segs[i + 1:]
                 break

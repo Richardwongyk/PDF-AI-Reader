@@ -18,6 +18,15 @@
 
 2026-05-28 以来新增的权威边界：
 
+- 2026-07-05 新增段落批注/备注裂缝：`SplitMode.ANNOTATION` 复用现有裂缝布局，`ParagraphWidget`/`BlockOverlay`
+  右键菜单触发批注请求，`SplitWidget` 在 annotation 模式下显示纯文本编辑区与保存按钮，`PdfViewer` 使用稳定 split id
+  `<block_id>__annotation` 保证同一段落只有一个批注裂缝。批注默认插入在翻译裂缝之后，折叠时只保留黄色侧边标记。
+- 批注持久化由 `MainWindow` 维护：以文档 hash 为一级 key、block id 为二级 key 写入 `data/annotations.json`。
+  该文件属于本地用户数据，已加入 `.gitignore`；保存空文本等同删除批注。文档加载和页面 blocks 补齐时会回填
+  `block.metadata["annotation"]` 并同步黄色标记。
+- 2026-07-05 大文档稳定性补充：导入时 `_FormulaImportPlanThread` 支持 `page_scan_pages` 限定自动页级公式扫描范围；
+  超过 `AUTO_PAGE_SCAN_FULL_DOCUMENT_LIMIT` 的文档只自动扫描可见页附近，旧的持久化页扫描任务不会被空闲定时器全局扫完。
+  后台页面 blocks 更新只刷新可见/已渲染页面，目录树生成改为防抖刷新，减少 Qt 原生控件高频重建导致的闪退风险。
 - 生成模型走可配置路由：LiteLLM 云端、Ollama 本地和 Mock 降级都必须明确标注，不能把云端伪装成本地。
 - 知识库由 `KnowledgeEngine` facade 统一管理，可选 SQLite FTS5、Chroma、LlamaIndex 编排等后端；无真实 embedding 时优先 FTS5 快速召回。
 - 公式解析采用 r0/r0.5/r1/r2/r2a/r3/r4/r5 多轮异步持久化流水线。born-digital PDF 默认不 OCR，低置信结果只做候选。
@@ -180,6 +189,17 @@
   不是唯一可见层。
 - 任何缩放/滚动性能优化必须同时记录视觉验收截图和日志，尤其是 Napkin 极大缩放、翻译框打开、
   连续大滚轮和缩放状态跳页。
+
+批注层约束补充：
+
+- 批注是阅读态用户数据，不进入 AI prompt、知识库、GraphRAG 或公式 accepted gate；它只通过
+  `data/annotations.json` 本地保存，并按 `doc_hash -> block_id -> note` 查找。
+- 批注裂缝和翻译/问答/解释裂缝共享 `PdfViewer.open_split_widget` 的分段布局能力，但必须使用独立
+  split id，避免覆盖翻译裂缝。约定批注 split id 为 `<block_id>__annotation`。
+- 折叠批注不得改变页面正文布局；只保留 `PdfViewer.set_annotation_marker` 绘制的黄色侧边标记。
+  展开时恢复到该段落相关的 annotation split，并回填上次保存文本。
+- 删除行为以“保存空文本”或清除 split 为准：同时删除 `_annotations`、block metadata、黄色标记和
+  JSON 持久化记录。
 
 翻译层约束补充：
 

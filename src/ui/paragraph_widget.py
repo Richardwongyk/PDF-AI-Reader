@@ -32,6 +32,7 @@ class BlockOverlay(QWidget):
     translate_requested = Signal(str)
     question_requested = Signal(str)
     explain_requested = Signal(str)
+    annotation_requested = Signal(str)
 
     def __init__(self, block: DocumentBlock) -> None:
         """初始化透明叠加层。
@@ -132,6 +133,12 @@ class BlockOverlay(QWidget):
             lambda: self.translate_requested.emit(self._block.id)
         )
         menu.addAction(translate_action)
+
+        annotation_action = QAction("批注/备注", menu)
+        annotation_action.triggered.connect(
+            lambda: self.annotation_requested.emit(self._block.id)
+        )
+        menu.addAction(annotation_action)
 
         question_action = QAction("🔍 在此处提问", menu)
         question_action.triggered.connect(
