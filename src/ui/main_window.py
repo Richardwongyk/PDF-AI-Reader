@@ -1232,7 +1232,7 @@ class MainWindow(QMainWindow):
         # 加载目录
         if result.toc:
             self._navigator.load_toc(result.toc)
-        elif result.blocks:
+        else:
             self._navigator.generate_toc_from_blocks(result.blocks)
 
         render_engine = "PyMuPDF"
@@ -2323,10 +2323,20 @@ class MainWindow(QMainWindow):
     def _on_toc_ready(self, toc: list[dict[str, Any]]) -> None:
         """目录数据就绪，更新左侧目录树。"""
         self._toc_tree.clear()
+        parents_by_level: dict[int, QTreeWidgetItem] = {}
         for item in toc:
-            tree_item = QTreeWidgetItem(self._toc_tree)
+            try:
+                level = max(1, int(item.get("level", 1) or 1))
+            except (TypeError, ValueError):
+                level = 1
+            parent_item = parents_by_level.get(level - 1)
+            tree_item = QTreeWidgetItem(parent_item or self._toc_tree)
             tree_item.setText(0, item.get("title", ""))
             tree_item.setData(0, Qt.ItemDataRole.UserRole, item.get("page", 0))
+            parents_by_level[level] = tree_item
+            for stale_level in [key for key in parents_by_level if key > level]:
+                del parents_by_level[stale_level]
+        self._toc_tree.expandToDepth(1)
 
     def _on_toc_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """目录项点击 → 跳转到对应页。"""

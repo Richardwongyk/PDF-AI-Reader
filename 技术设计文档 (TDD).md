@@ -306,7 +306,7 @@ D:\程设大作业\
    - 发射 `finished_parsing(ParseResult)` 信号
 4. 主线程接收 `parse_finished`：
    - `PdfViewer.load_document(result)` 创建 `_LazyPageWidget` 占位（按 `page.rect` 计算尺寸）
-   - `Navigator.load_toc()` 或 `Navigator.generate_toc_from_blocks()` 加载目录
+   - `Navigator.load_toc()` 或 `Navigator.generate_toc_from_blocks()` 加载目录；自动生成目录优先识别结构化标题模式（如“第X节”“一、”“1、”），再回退到 heading 块，并过滤乱码/公式碎片/空标题/重复项，低于可靠目录门槛时发出空目录清空左侧树
    - 立即可以滚动浏览（首屏懒加载渲染）
 
 **阶段二（后台精扫，不阻塞阅读）**：
@@ -896,7 +896,7 @@ class Navigator(BaseService):
 
     方法:
     - load_toc(raw_toc: list[dict]) → None              加载原生大纲
-    - generate_toc_from_blocks(blocks) → list[dict]    从 heading 块推断目录
+    - generate_toc_from_blocks(blocks) → list[dict]    从结构化标题或 heading 块推断目录；无法形成可靠目录时返回 [] 并发出空 toc_ready
     - add_bookmark(page_num, title, note) → Bookmark    手动添加书签
     - remove_bookmark(bookmark_id) → bool               删除书签
     - reorder_bookmarks(ordered_ids) → None             拖拽排序
