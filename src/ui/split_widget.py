@@ -22,6 +22,7 @@ from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPalette, QP
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -195,6 +196,7 @@ class SplitWidget(QFrame):
     question_submitted = Signal(str, str)
     translation_requested = Signal(str)
     translation_refresh_requested = Signal(str)
+    annotation_saved = Signal(str)
     close_requested = Signal(str)
     height_changed = Signal(int)  # 当 setFixedHeight 改变高度时发射
 
@@ -545,9 +547,6 @@ class SplitWidget(QFrame):
         else:
             bg, accent, accent_hover, text_color = "#fef8ee", "#d4902a", "#b87a20", "#191928"
 
-        # 清除可能残留的旧花纹 palette
-        self.setAutoFillBackground(False)
-        self.setPalette(QApplication.instance().palette())
         # 翻译框撑满页面宽度
         main_layout = self.layout()
         if main_layout is not None:

@@ -1528,7 +1528,6 @@ class PdfViewer(QScrollArea):
             position="below",
             block_pixel_height=max(block_pixel_height, 60),
             page_width=page_display_w,
-            split_id=split_id,
         )
         self._align_split_content_to_block(split, block, page_num)
         split.question_submitted.connect(lambda q, _sid, bid=block.id: self._on_split_q(q, bid))
