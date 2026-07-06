@@ -7,6 +7,7 @@ MainWindow: 管理全局布局（菜单栏/工具栏/状态栏/中央阅读区/�
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,6 +198,7 @@ class MainWindow(QMainWindow):
         self._suppress_reader_tab_change: bool = False
         self._document_open_in_progress: bool = False
         self._reader_tab_activation_generation: int = 0
+        self._reader_tab_width_px: int = 168
         self._toolbar_restore_handle: QFrame | None = None
         self._reader_chrome_collapsed: bool = False
         self._left_panel_toggle_corner: QWidget | None = None
@@ -470,6 +472,8 @@ class MainWindow(QMainWindow):
 
         self._reader_tab_strip = QWidget()
         self._reader_tab_strip.setObjectName("reader_tab_strip")
+        self._reader_tab_strip.setMinimumWidth(0)
+        self._reader_tab_strip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         tab_layout = QHBoxLayout(self._reader_tab_strip)
         tab_layout.setContentsMargins(8, 4, 8, 0)
         tab_layout.setSpacing(6)
@@ -478,11 +482,13 @@ class MainWindow(QMainWindow):
         self._reader_tab_bar.setObjectName("reader_tab_bar")
         self._reader_tab_bar.setDocumentMode(True)
         self._reader_tab_bar.setExpanding(False)
+        self._reader_tab_bar.setUsesScrollButtons(False)
         self._reader_tab_bar.setMovable(True)
-        self._reader_tab_bar.setTabsClosable(True)
+        self._reader_tab_bar.setTabsClosable(False)
         self._reader_tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
+        self._reader_tab_bar.setMinimumWidth(0)
+        self._reader_tab_bar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._reader_tab_bar.currentChanged.connect(self._on_reader_tab_changed)
-        self._reader_tab_bar.tabCloseRequested.connect(self._on_reader_tab_close_requested)
         self._reader_tab_bar.tabMoved.connect(self._on_reader_tab_moved)
         tab_layout.addWidget(self._reader_tab_bar, 1)
 
@@ -491,6 +497,7 @@ class MainWindow(QMainWindow):
         self._new_reader_tab_button.setText("+")
         self._new_reader_tab_button.setToolTip("新建阅读标签 (Ctrl+T)")
         self._new_reader_tab_button.clicked.connect(self._on_new_reader_tab)
+        self._new_reader_tab_button.setFixedWidth(30)
         tab_layout.addWidget(self._new_reader_tab_button)
         central_layout.addWidget(self._reader_tab_strip)
 
@@ -539,9 +546,11 @@ class MainWindow(QMainWindow):
         self._next_reader_tab_id += 1
         self._reader_tabs.append(tab)
         if self._reader_tab_bar is not None:
-            index = self._reader_tab_bar.addTab(tab.title)
+            label = self._reader_tab_display_title(tab.title, tab.filepath)
+            index = self._reader_tab_bar.addTab(label)
             self._reader_tab_bar.setTabData(index, tab.tab_id)
             self._reader_tab_bar.setTabToolTip(index, filepath or tab.title)
+            self._install_reader_tab_close_button(index, tab.tab_id)
             if switch:
                 self._suppress_reader_tab_change = True
                 try:
@@ -587,13 +596,81 @@ class MainWindow(QMainWindow):
     def _sync_reader_tab_bar(self) -> None:
         if self._reader_tab_bar is None:
             return
+        self._update_reader_tab_width()
         for index in range(self._reader_tab_bar.count()):
             tab = self._reader_tab_by_id(self._reader_tab_bar.tabData(index))
             if tab is None:
                 continue
-            title = tab.title or (Path(tab.filepath).name if tab.filepath else "新标签")
+            title = self._reader_tab_display_title(tab.title, tab.filepath)
             self._reader_tab_bar.setTabText(index, title)
             self._reader_tab_bar.setTabToolTip(index, tab.filepath or title)
+            self._install_reader_tab_close_button(index, tab.tab_id)
+
+    def _install_reader_tab_close_button(self, index: int, tab_id: int) -> None:
+        if self._reader_tab_bar is None or index < 0:
+            return
+        button = self._reader_tab_bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if not isinstance(button, QToolButton):
+            button = QToolButton(self._reader_tab_bar)
+            button.setObjectName("reader_tab_close_button")
+            button.setText("\u00d7")
+            button.setToolTip("关闭标签")
+            button.setAccessibleName("关闭标签")
+            button.setAutoRaise(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setFixedSize(24, 16)
+            self._reader_tab_bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, button)
+        try:
+            button.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        button.clicked.connect(lambda _checked=False, tab_id=tab_id: self._on_reader_tab_close_button(tab_id))
+
+    def _on_reader_tab_close_button(self, tab_id: int) -> None:
+        index = self._reader_tab_index(tab_id)
+        if index >= 0:
+            self._on_reader_tab_close_requested(index)
+
+    def _reader_tab_display_title(self, title: str = "", filepath: str = "") -> str:
+        raw = str(title or "").strip()
+        if not raw and filepath:
+            try:
+                raw = Path(filepath).stem
+            except OSError:
+                raw = str(filepath)
+        raw = re.sub(r"\.pdf$", "", raw.strip(), flags=re.IGNORECASE)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        if not raw:
+            return "新标签"
+
+        # Many book PDFs are named "Book Title - Author"; keep the stable book name
+        # so selected/unselected tab labels do not change shape.
+        for separator in (" - ", " -- ", " _ ", " by ", " By "):
+            if separator in raw:
+                left = raw.split(separator, 1)[0].strip()
+                if len(left) >= 3:
+                    raw = left
+                    break
+        raw = re.sub(r"\s*\([^)]*(?:author|editor|作者|著)[^)]*\)\s*$", "", raw, flags=re.IGNORECASE)
+        return raw or "新标签"
+
+    def _update_reader_tab_width(self) -> None:
+        if self._reader_tab_bar is None:
+            return
+        count = max(1, self._reader_tab_bar.count())
+        available = max(0, self._reader_tab_bar.width() - 8)
+        if available <= 0 and self._reader_tab_strip is not None:
+            available = max(0, self._reader_tab_strip.width() - 52)
+        preferred = 168
+        minimum = 76
+        if available <= 0 or count * preferred <= available:
+            width = preferred
+        else:
+            width = max(minimum, int(available / count) - 3)
+        if width != self._reader_tab_width_px:
+            self._reader_tab_width_px = width
+            self._apply_reader_tab_style(self._config.ui.theme)
 
     def _sync_reader_tabs_from_bar_order(self) -> None:
         if self._reader_tab_bar is None:
@@ -630,7 +707,7 @@ class MainWindow(QMainWindow):
             self._suppress_reader_tab_change = False
 
     def _reader_tab_to_session_dict(self, tab: _ReaderTabState) -> dict[str, Any]:
-        title = tab.title or (Path(tab.filepath).name if tab.filepath else "新标签")
+        title = self._reader_tab_display_title(tab.title, tab.filepath)
         position = tab.position if isinstance(tab.position, dict) else {}
         return {
             "title": title,
@@ -648,7 +725,7 @@ class MainWindow(QMainWindow):
         if self._current_doc_hash:
             tab.doc_hash = self._current_doc_hash
         if self._current_filepath:
-            tab.title = Path(self._current_filepath).name
+            tab.title = self._reader_tab_display_title(filepath=self._current_filepath)
         if self._viewer_document_loaded:
             try:
                 position = self._pdf_viewer.current_reading_position()
@@ -792,20 +869,20 @@ class MainWindow(QMainWindow):
         tab = self._active_reader_tab()
         if tab is None:
             return self._create_reader_tab(
-                title=Path(filepath).name,
+                title=self._reader_tab_display_title(filepath=filepath),
                 filepath=filepath,
                 switch=True,
             )
         if tab.filepath and not replace_current_tab:
             tab = self._create_reader_tab(
-                title=Path(filepath).name,
+                title=self._reader_tab_display_title(filepath=filepath),
                 filepath=filepath,
                 switch=True,
             )
             self._set_active_reader_tab(tab.tab_id)
             return tab
         tab.filepath = filepath
-        tab.title = Path(filepath).name
+        tab.title = self._reader_tab_display_title(filepath=filepath)
         tab.position = {}
         self._set_active_reader_tab(tab.tab_id)
         self._sync_reader_tab_bar()
@@ -832,6 +909,11 @@ class MainWindow(QMainWindow):
                     self._set_reader_chrome_collapsed(not self._reader_chrome_collapsed)
                     return True
         return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._reader_tab_bar is not None:
+            QTimer.singleShot(0, self._sync_reader_tab_bar)
 
     def _event_is_menu_bar_double_click(self, watched: QObject, event: object) -> bool:
         if self._is_side_panel_toggle_widget(watched):
@@ -1930,18 +2012,33 @@ class MainWindow(QMainWindow):
                 border-bottom: none;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
-                min-width: 120px;
-                max-width: 240px;
-                padding: 7px 12px 6px 12px;
+                min-width: {self._reader_tab_width_px}px;
+                max-width: {self._reader_tab_width_px}px;
+                width: {self._reader_tab_width_px}px;
+                min-height: 28px;
+                max-height: 28px;
+                padding: 6px 10px 6px 12px;
                 margin-right: 2px;
             }}
             QTabBar#reader_tab_bar::tab:selected {{
                 background: {active_bg};
-                border-top: 2px solid {accent};
-                padding-top: 6px;
+                border-color: {accent};
             }}
             QTabBar#reader_tab_bar::tab:hover {{
                 border-color: {accent};
+            }}
+            QToolButton#reader_tab_close_button {{
+                background: transparent;
+                color: {text};
+                border: none;
+                border-radius: 8px;
+                padding: 0px;
+                margin: 0px;
+                font-size: 15px;
+                font-weight: 500;
+            }}
+            QToolButton#reader_tab_close_button:hover {{
+                background: rgba(255, 255, 255, 0.14);
             }}
             QToolButton#new_reader_tab_button {{
                 background: {tab_bg};
@@ -2184,7 +2281,7 @@ class MainWindow(QMainWindow):
             replace_current_tab=replace_current_tab,
         )
         tab.filepath = resolved
-        tab.title = Path(resolved).name
+        tab.title = self._reader_tab_display_title(filepath=resolved)
         if tab_position:
             tab.position = dict(tab_position)
         self._sync_reader_tab_bar()
@@ -2233,7 +2330,7 @@ class MainWindow(QMainWindow):
             filepath = str(payload.get("filepath", "") or "").strip()
             title = str(payload.get("title", "") or "").strip()
             if not title:
-                title = Path(filepath).name if filepath else "新标签"
+                title = self._reader_tab_display_title(filepath=filepath)
             position = payload.get("position")
             restored_tabs.append(
                 {
@@ -2310,7 +2407,7 @@ class MainWindow(QMainWindow):
                 position = dict(raw_position) if isinstance(raw_position, dict) else None
             tab.filepath = self._current_filepath
             tab.doc_hash = self._current_doc_hash
-            tab.title = Path(self._current_filepath).name
+            tab.title = self._reader_tab_display_title(filepath=self._current_filepath)
             if position:
                 tab.position = position
         self._sync_reader_tabs_from_bar_order()
@@ -2467,7 +2564,7 @@ class MainWindow(QMainWindow):
         if tab is not None:
             tab.filepath = self._current_filepath
             tab.doc_hash = self._current_doc_hash
-            tab.title = result.title or Path(result.filepath).name
+            tab.title = self._reader_tab_display_title(result.title, result.filepath)
             self._sync_reader_tab_bar()
         self._load_annotations_for_current_document()
         self._ask_flow.set_doc_hash(self._current_doc_hash)

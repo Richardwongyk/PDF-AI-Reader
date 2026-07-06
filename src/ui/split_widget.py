@@ -201,6 +201,10 @@ class SplitWidget(QFrame):
 
     _MAX_HISTORY_ROUNDS: int = 6
     _MIN_HEIGHT: int = 80
+    _ANNOTATION_INITIAL_HEIGHT: int = 150
+    _ANNOTATION_MAX_HEIGHT: int = 260
+    _ANNOTATION_INPUT_MIN_HEIGHT: int = 52
+    _ANNOTATION_INPUT_MAX_HEIGHT: int = 142
     _COLLAPSED_WIDTH: int = 6
 
     # 蓝色系
@@ -233,7 +237,7 @@ class SplitWidget(QFrame):
             int(block_pixel_height * 0.7),
         )
         if mode == SplitMode.ANNOTATION:
-            self._saved_height = max(self._saved_height, 240)
+            self._saved_height = self._ANNOTATION_INITIAL_HEIGHT
         self._block_pixel_height: int = block_pixel_height
         self._page_width: int = page_width
         self._user_resized: bool = False
@@ -372,6 +376,61 @@ class SplitWidget(QFrame):
         self._current_answer = note or ""
         self._cached_result = self._current_answer
         self._input_area.setPlainText(self._current_answer)
+        self._refresh_annotation_layout()
+
+    def _on_input_text_changed(self) -> None:
+        if self._mode == SplitMode.ANNOTATION:
+            self._refresh_annotation_layout()
+
+    def _place_send_button(self, *, in_action_row: bool) -> None:
+        if in_action_row:
+            if self._action_layout.indexOf(self._send_btn) >= 0:
+                return
+            self._send_layout.removeWidget(self._send_btn)
+            clear_index = self._action_layout.indexOf(self._clear_btn)
+            insert_at = clear_index if clear_index >= 0 else self._action_layout.count()
+            self._action_layout.insertWidget(insert_at, self._send_btn)
+            return
+        if self._send_layout.indexOf(self._send_btn) >= 0:
+            return
+        self._action_layout.removeWidget(self._send_btn)
+        self._send_layout.addWidget(self._send_btn)
+
+    def _reset_input_area_height(self) -> None:
+        self._input_area.setMinimumHeight(0)
+        self._input_area.setMaximumHeight(200)
+        self._input_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    def _refresh_annotation_layout(self) -> None:
+        if self._mode != SplitMode.ANNOTATION:
+            return
+        self._input_area.setMinimumHeight(self._ANNOTATION_INPUT_MIN_HEIGHT)
+        self._input_area.setMaximumHeight(self._ANNOTATION_INPUT_MAX_HEIGHT)
+
+        viewport_w = max(self._input_area.viewport().width(), self.width() - 48, 240)
+        document = self._input_area.document()
+        document.setTextWidth(float(viewport_w))
+        content_h = int(document.size().height()) + 18
+        input_h = max(
+            self._ANNOTATION_INPUT_MIN_HEIGHT,
+            min(content_h, self._ANNOTATION_INPUT_MAX_HEIGHT),
+        )
+        self._input_area.setFixedHeight(input_h)
+        if content_h > self._ANNOTATION_INPUT_MAX_HEIGHT:
+            self._input_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        else:
+            self._input_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        if self._user_resized or self._collapsed:
+            return
+        target = max(
+            self._ANNOTATION_INITIAL_HEIGHT,
+            min(self._compute_chrome_height() + 8, self._ANNOTATION_MAX_HEIGHT),
+        )
+        self._saved_height = int(target)
+        if self.isVisible() and self._state != SplitState.HIDDEN:
+            self.setFixedHeight(self._saved_height)
+            self.height_changed.emit(self._saved_height)
 
     def show_followup_questions(self, questions: list[str]) -> None:
         while self._followup_layout.count():
@@ -460,6 +519,7 @@ class SplitWidget(QFrame):
         self._input_area.setObjectName("input_area")
         self._input_area.setPlaceholderText("在此输入问题...(Ctrl+Enter 发送)")
         self._input_area.setMaximumHeight(200)
+        self._input_area.textChanged.connect(self._on_input_text_changed)
         input_layout.addWidget(self._input_area)
         send_layout = QHBoxLayout()
         send_layout.addStretch()
@@ -467,6 +527,7 @@ class SplitWidget(QFrame):
         send_btn.setObjectName("send_button")
         send_btn.clicked.connect(self._on_send)
         send_layout.addWidget(send_btn)
+        self._send_layout = send_layout
         self._send_btn = send_btn
         input_layout.addLayout(send_layout)
         body_layout.addWidget(self._input_widget)
@@ -522,6 +583,7 @@ class SplitWidget(QFrame):
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(6)
         action_layout.addStretch()
+        self._action_layout = action_layout
         copy_btn = QPushButton("复制")
         copy_btn.setObjectName("action_button")
         copy_btn.clicked.connect(self._on_copy)
@@ -613,12 +675,10 @@ class SplitWidget(QFrame):
             QTextEdit#input_area {{
                 border: 1px solid {border};
                 border-radius: 6px;
-                padding: 8px;
+                padding: 6px 8px;
                 background: rgba(255, 255, 255, 0.78);
                 color: #1f2937;
                 font-size: 13px;
-                min-height: 96px;
-                max-height: 260px;
             }}
             QPushButton#send_button,
             QPushButton#action_button {{
@@ -659,6 +719,8 @@ class SplitWidget(QFrame):
         self._collapse_btn.setToolTip("折叠 (Esc)")
         self._collapse_btn.setAccessibleName("折叠")
         if self._mode == SplitMode.TRANSLATION:
+            self._place_send_button(in_action_row=False)
+            self._reset_input_area_height()
             self._header_label.setVisible(False)
             self._context_label.setVisible(False)
             self._input_widget.setVisible(False)
@@ -667,6 +729,7 @@ class SplitWidget(QFrame):
             self._regen_btn.setText("⟳ 重新翻译")
             self._apply_translation_style()
         elif self._mode == SplitMode.ANNOTATION:
+            self._place_send_button(in_action_row=True)
             self._apply_annotation_style()
             self._header_label.setVisible(True)
             self._header_label.setText("批注")
@@ -680,7 +743,10 @@ class SplitWidget(QFrame):
             self._collapse_btn.setToolTip("折叠批注 (Esc)")
             self._collapse_btn.setAccessibleName("折叠批注")
             self._input_area.setPlaceholderText("在此输入批注或备注...")
+            self._refresh_annotation_layout()
         elif self._mode == SplitMode.EXPLANATION:
+            self._place_send_button(in_action_row=False)
+            self._reset_input_area_height()
             self._apply_translation_style()
             self._header_label.setVisible(True)
             self._header_label.setText("✏️ 解释")
@@ -690,6 +756,8 @@ class SplitWidget(QFrame):
             self._followup_widget.setVisible(False)
             self._input_area.setPlaceholderText("请输入需要补充说明的内容...")
         else:
+            self._place_send_button(in_action_row=False)
+            self._reset_input_area_height()
             from src.ui.theme import SPLIT_WIDGET_STYLE
             self.setStyleSheet(SPLIT_WIDGET_STYLE)
             self._header_label.setVisible(True)
