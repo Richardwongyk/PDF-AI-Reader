@@ -1,32 +1,8 @@
 """
 主窗口 —— PDF AI Reader 应用的主界面。
 
-MainWindow
-    管理全局布局（菜单栏 / 工具栏 / 状态栏 / 中央阅读区 / 侧边栏），
-    负责连接 UI 信号到 Core 服务，协调所有子组件和流程。
-
-布局 ASCII
-----------
-┌──────────────────────────────────────────────┐
-│ MenuBar  (文件/视图/工具/帮助)                │
-│  左角落 [◀] panel toggle          panel toggle [▶] 右角落
-├──────────────────────────────────────────────┤
-│ ToolBar  (打开/搜索/页码/公式精扫)             │
-├─────┬────────────────────────────┬───────────┤
-│ 左  │  中央 PDF 阅读区           │  右       │
-│ 侧  │  (PdfViewer)              │  侧       │
-│ 导  │                           │  AI       │
-│ 航  │                           │  工具     │
-│ 栏  │                           │  集       │
-├─────┴────────────────────────────┴───────────┤
-│ StatusBar  (页码/模型状态/任务进度)           │
-└──────────────────────────────────────────────┘
-
-设计约定
---------
-- 所有 QSS 中的颜色均通过 theme.py 中的 get_xxx_style() 函数获取，
-  禁止在此文件中直接写入硬编码色值。
-- 注释语言：模块/类/方法级别使用中文 docstring，行内解释使用中文。
+MainWindow: 管理全局布局（菜单栏/工具栏/状态栏/中央阅读区/侧边栏），
+负责连接 UI 信号到 Core 服务，协调所有子组件。
 """
 
 import json
@@ -359,9 +335,36 @@ class MainWindow(QMainWindow):
         self._update_right_panel_toggle_icon()
 
     def _side_panel_toggle_style(self) -> str:
-        """返回当前主题下面板切换按钮的 QSS——调用 theme.py 工厂函数。"""
-        from src.ui.theme import get_panel_toggle_style
-        return get_panel_toggle_style(self._config.ui.theme)
+        return """
+            QToolButton#left_panel_toggle_button,
+            QToolButton#right_panel_toggle_button {
+                background: #111827;
+                color: #3b82f6;
+                border: 1px solid #f8fafc;
+                border-radius: 6px;
+                padding: 0;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QToolButton#left_panel_toggle_button:hover,
+            QToolButton#right_panel_toggle_button:hover {
+                background: #0f172a;
+                color: #60a5fa;
+                border-color: #ffffff;
+            }
+            QToolButton#left_panel_toggle_button:pressed,
+            QToolButton#right_panel_toggle_button:pressed {
+                background: #020617;
+                color: #2563eb;
+                border-color: #e5e7eb;
+            }
+            QToolTip {
+                color: #ffffff;
+                background-color: #111827;
+                border: 1px solid #f8fafc;
+                padding: 4px 6px;
+            }
+        """
 
     def _create_panel_toggle_button(self, side: str) -> QToolButton:
         button = QToolButton()
@@ -463,9 +466,17 @@ class MainWindow(QMainWindow):
         self._toolbar_restore_handle.setFixedHeight(8)
         self._toolbar_restore_handle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._toolbar_restore_handle.setToolTip("双击显示工具栏")
-        from src.ui.theme import get_toolbar_handle_style
         self._toolbar_restore_handle.setStyleSheet(
-            get_toolbar_handle_style(self._config.ui.theme)
+            "QFrame#toolbar_restore_handle {"
+            "background: #111827;"
+            "border-bottom: 1px solid #3b82f6;"
+            "}"
+            "QToolTip {"
+            "color: #ffffff;"
+            "background-color: #111827;"
+            "border: 1px solid #f8fafc;"
+            "padding: 4px 6px;"
+            "}"
         )
         self._toolbar_restore_handle.setVisible(False)
         central_layout.addWidget(self._toolbar_restore_handle)
@@ -604,6 +615,7 @@ class MainWindow(QMainWindow):
         self._ai_doc_status = QLabel("未打开文档")
         self._ai_doc_status.setObjectName("ai_doc_status")
         self._ai_doc_status.setWordWrap(True)
+        self._ai_doc_status.setStyleSheet("color: #444; font-weight: 600;")
         right_layout.addWidget(self._ai_doc_status)
 
         self._right_panel_body = QWidget()
@@ -629,7 +641,6 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(separator)
 
         evidence_label = QLabel("检索依据")
-        evidence_label.setObjectName("evidence_label")
         evidence_label.setStyleSheet("font-weight: 600;")
         self._ai_evidence_label = evidence_label
         body_layout.addWidget(evidence_label)
@@ -645,7 +656,6 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self._ai_evidence_tree, 1)
 
         answer_label = QLabel("回答")
-        answer_label.setObjectName("answer_label")
         answer_label.setStyleSheet("font-weight: 600;")
         self._ai_answer_label = answer_label
         body_layout.addWidget(answer_label)
@@ -747,21 +757,11 @@ class MainWindow(QMainWindow):
         self._left_panel_toggle_button.setStatusTip(tooltip)
 
     def _make_panel_toggle_icon(self, side: str, *, collapsed: bool) -> QIcon:
-        """绘制面板折叠/展开箭头图标。
-
-        Args:
-            side: 'left' 或 'right'，决定箭头方向。
-            collapsed: 面板当前是否已折叠，决定箭头指向。
-
-        颜色取自 QPalette 高亮色，确保主题切换时图标跟随。
-        """
         pixmap = QPixmap(18, 18)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        # 使用调色板高亮色作为箭头颜色，跟随主题
-        arrow_color = self.palette().color(QPalette.ColorRole.Highlight)
-        pen = QPen(arrow_color)
+        pen = QPen(QColor("#3b82f6"))
         pen.setWidthF(2.2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -1017,7 +1017,6 @@ class MainWindow(QMainWindow):
         self._sync_theme_menu()
         if self._pdf_viewer:
             self._pdf_viewer.apply_theme_to_splits(theme)
-        # 同步右侧问答 WebView 的主题
         self._set_dock_answer_theme(theme)
 
     def _main_window_theme_stylesheet(self, theme: str) -> str:
@@ -1609,10 +1608,10 @@ class MainWindow(QMainWindow):
             blockquote = QColor("#e5e7eb") if bg.lightness() < 128 else QColor("#4b5563")
         html_theme = "dark" if bg.lightness() < 128 else "light"
         safe_theme = json.dumps(html_theme)
-        safe_bg = json.dumps(bg)
-        safe_fg = json.dumps(fg)
-        safe_link = json.dumps(link)
-        safe_blockquote = json.dumps(blockquote)
+        safe_bg = json.dumps(bg.name())
+        safe_fg = json.dumps(fg.name())
+        safe_link = json.dumps(link.name())
+        safe_blockquote = json.dumps(blockquote.name())
         js_code = (
             f"setTheme({safe_theme});"
             f"document.body.style.setProperty('--bg-color', {safe_bg});"
@@ -3061,25 +3060,6 @@ class MainWindow(QMainWindow):
     # 设置与主题
     # =========================================================================
 
-    def _on_theme_changed(self, theme_name: str) -> None:
-        """菜单栏主题切换 → 更新配置、持久化并应用新主题。
-
-        Args:
-            theme_name: 'light' / 'dark' / 'sepia'
-        """
-        if theme_name == self._config.ui.theme:
-            return
-        cm = self._services.get("config_manager")
-        cm.update({"ui": {"theme": theme_name}})
-
-    def _sync_theme_menu(self) -> None:
-        """同步菜单栏主题选中状态与当前配置。"""
-        if not hasattr(self, "_theme_actions"):
-            return
-        current = self._config.ui.theme
-        for theme_key, action in self._theme_actions.items():
-            action.setChecked(theme_key == current)
-
     def _on_open_settings(self) -> None:
         """打开设置对话框 — 配置云端 API 与界面主题。"""
         from PySide6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QComboBox
@@ -3491,7 +3471,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "术语表管理器", "术语表编辑器将在后续版本实现。")
 
     def _on_config_changed(self, config: AppConfig) -> None:
-        """配置变更：更新本地引用、同步主题菜单、重新应用主题。"""
+        """配置变更：重新应用主题。"""
         self._config = config
         self._sync_theme_menu()
         self._apply_theme()
@@ -3653,9 +3633,9 @@ class MainWindow(QMainWindow):
         return logging.getLogger("MainWindow")
 
     def closeEvent(self, event) -> None:
-        """窗口关闭事件：按顺序清理资源并保存阅读进度。
+        """窗口关闭事件：按顺序清理资源。
 
-        清理顺序：文档引擎 → 知识库引擎 → 术语表 → 保存进度 → 配置。
+        清理顺序：文档引擎 → 知识库引擎 → 术语表 → 配置。
         确保 ChromaDB WAL 文件正确刷入磁盘。
         """
         self.logger.info("MainWindow closeEvent: accepted; shutting down services")
@@ -3664,8 +3644,6 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
-        # 0. 保存当前阅读位置以便下次自动恢复
-        self._save_session()
         # 1. 关闭文档（停止解析线程，关闭 PDF 文件）
         self._formula_index_flow.stop()
         self._stop_formula_import_thread()
@@ -3677,36 +3655,6 @@ class MainWindow(QMainWindow):
         event.accept()
         if app is not None:
             QTimer.singleShot(0, app.quit)
-
-    def _save_session(self) -> None:
-        """保存当前文档路径和页码到配置，下次启动时自动恢复。"""
-        filepath = getattr(self._doc_engine, "_filepath", "")
-        if not filepath or not self._viewer_document_loaded:
-            return
-        visible = self._pdf_viewer.visible_pages(margin_pages=False)
-        current_page = min(visible) if visible else 0
-        cm = self._services.get("config_manager")
-        cm.update({
-            "ui": {
-                "last_document": filepath,
-                "last_page": max(0, current_page),
-            }
-        })
-
-    def _restore_last_session(self) -> None:
-        """启动时自动恢复上次阅读的文档和位置。"""
-        last_doc = self._config.ui.last_document
-        if not last_doc:
-            return
-        path = Path(last_doc)
-        if not path.exists():
-            self.logger.info("上次文档已不存在: %s", last_doc)
-            return
-        self._open_pdf_file(last_doc)
-        # 跳转到上次阅读位置（在文档加载完成后执行）
-        last_page = self._config.ui.last_page
-        if last_page > 0:
-            QTimer.singleShot(600, lambda: self._pdf_viewer.scroll_to_page(last_page))
 
 
 class _PyMuPDF4LLMThread(QThread):
