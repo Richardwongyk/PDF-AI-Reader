@@ -10,7 +10,6 @@ param(
   [switch]$FailFast,
   [switch]$IncludeDesktopE2E,
   [switch]$IncludeCloud,
-  [switch]$IncludeLocalTools,
   [switch]$StrictLogs,
   [switch]$Foreground
 )
@@ -36,7 +35,6 @@ if ($DryRun) { $argsList += "--dry-run" }
 if ($FailFast) { $argsList += "--fail-fast" }
 if ($IncludeDesktopE2E) { $argsList += "--include-desktop-e2e" }
 if ($IncludeCloud) { $argsList += "--include-cloud" }
-if ($IncludeLocalTools) { $argsList += "--include-local-tools" }
 if ($StrictLogs) { $argsList += "--strict-logs" }
 
 Push-Location $repo

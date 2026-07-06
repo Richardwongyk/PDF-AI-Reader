@@ -2,6 +2,7 @@ from pathlib import Path
 
 from src.core.tinybdmath_graph_parser import (
     GRAPH_PARSER_FEATURES,
+    GRAPH_PARSER_GRAPH_FEATURES,
     GRAPH_PARSER_NODE_FEATURES,
     GRAPH_PARSER_NODE_LABELS,
     GRAPH_PARSER_RELATIONS,
@@ -10,6 +11,7 @@ from src.core.tinybdmath_graph_parser import (
     graph_nodes,
     graph_parser_node_features,
     graph_parser_predictions_to_structural_candidate,
+    graph_parser_structured_relation_selection,
     node_training_samples_from_rows,
     training_samples_from_rows,
 )
@@ -28,6 +30,7 @@ def test_graph_parser_training_samples_include_positive_and_none_edges() -> None
     assert any(sample["relation"] == "NONE" for sample in samples)
     assert not any(sample["relation"] in {"BASE", "CHILD"} for sample in samples)
     assert set(GRAPH_PARSER_FEATURES).issubset(samples[0]["features"])
+    assert set(GRAPH_PARSER_GRAPH_FEATURES).issubset(samples[0]["graph_features"])
 
 
 def test_graph_parser_node_samples_label_symbol_operator_and_spacing_nodes() -> None:
@@ -379,6 +382,21 @@ def test_graph_parser_m4_artifact_uses_keep_and_type_heads(tmp_path: Path) -> No
     assert "TEXT_RUN_NEXT" in relations
 
 
+def test_graph_parser_m5_artifact_uses_whole_formula_graph_context(tmp_path: Path) -> None:
+    artifact = _toy_m5_artifact()
+    path = tmp_path / "m5-model.json"
+    artifact.save(path)
+    parser = TinyBDGraphParser.load(path)
+
+    payload = parser.predict_row(_graph_row("m5", ["l", "i", "m"]), threshold=0.8)
+    relations = {item["relation"] for item in payload["predictions"]}
+
+    assert payload["model_version"] == "tinybdmath_graph_parser_m5"
+    assert payload["keep_threshold"] == 0.5
+    assert payload["graph_confidence"] > 0.0
+    assert "TEXT_RUN_NEXT" in relations
+
+
 def test_graph_parser_structural_candidate_accepts_model_structure_relations() -> None:
     payload = {
         "model_version": "toy",
@@ -419,6 +437,27 @@ def test_graph_parser_structural_candidate_accepts_model_structure_relations() -
     assert ("v0000", "g0001", "BELOW") in relations
     assert structural["relation_alternatives"][0]["alternatives"][0]["relation"] == "UNDER"
     assert structural["relation_alternatives"][0]["alternatives"][1]["relation"] == "OVER"
+
+
+def test_graph_parser_structured_relation_selection_removes_conflicting_edges() -> None:
+    selected = graph_parser_structured_relation_selection(
+        [
+            {"source": "a", "target": "b", "relation": "NEXT", "confidence": 0.70},
+            {"source": "a", "target": "c", "relation": "NEXT", "confidence": 0.91},
+            {"source": "x", "target": "s", "relation": "SUB", "confidence": 0.60},
+            {"source": "y", "target": "s", "relation": "SUP", "confidence": 0.95},
+            {"source": "rule", "target": "n1", "relation": "ABOVE", "confidence": 0.88},
+            {"source": "rule", "target": "n2", "relation": "ABOVE", "confidence": 0.87},
+        ]
+    )
+    relations = {(item["source"], item["target"], item["relation"]) for item in selected}
+
+    assert ("a", "c", "NEXT") in relations
+    assert ("a", "b", "NEXT") not in relations
+    assert ("y", "s", "SUP") in relations
+    assert ("x", "s", "SUB") not in relations
+    assert ("rule", "n1", "ABOVE") in relations
+    assert ("rule", "n2", "ABOVE") in relations
 
 
 def _toy_artifact() -> TinyBDGraphParserArtifact:
@@ -595,6 +634,58 @@ def _toy_m4_artifact() -> TinyBDGraphParserArtifact:
         keep_output_weights=tuple(keep_weights),
         keep_output_bias=0.0,
         keep_threshold=0.5,
+    )
+
+
+def _toy_m5_artifact() -> TinyBDGraphParserArtifact:
+    relation_count = len(GRAPH_PARSER_RELATIONS)
+    node_label_count = len(GRAPH_PARSER_NODE_LABELS)
+    edge_width = len(GRAPH_PARSER_FEATURES)
+    node_width = len(GRAPH_PARSER_NODE_FEATURES)
+    graph_width = len(GRAPH_PARSER_GRAPH_FEATURES)
+    fusion_width = edge_width + (4 * node_width) + graph_width + (4 * node_label_count)
+    none_index = GRAPH_PARSER_RELATIONS.index("NONE")
+    text_run_index = GRAPH_PARSER_RELATIONS.index("TEXT_RUN_NEXT")
+    output_weights = [[0.0 for _ in range(fusion_width)] for _ in range(relation_count)]
+    output_bias = [0.0 for _ in range(relation_count)]
+    output_bias[none_index] = 5.0
+    output_bias[text_run_index] = 4.0
+    for index in range(relation_count):
+        if index not in {none_index, text_run_index}:
+            output_bias[index] = -4.0
+    keep_weights = [0.0 for _ in range(fusion_width)]
+    graph_offset = edge_width + (2 * node_width)
+    keep_weights[graph_offset + GRAPH_PARSER_GRAPH_FEATURES.index("node_count")] = 2.0
+    return TinyBDGraphParserArtifact(
+        version="tinybdmath_graph_parser_m5_json_v1",
+        model_version="tinybdmath_graph_parser_m5",
+        feature_version="tinybdmath_graph_parser_features_v9",
+        feature_names=GRAPH_PARSER_FEATURES,
+        relation_labels=GRAPH_PARSER_RELATIONS,
+        means=tuple(0.0 for _ in range(len(GRAPH_PARSER_FEATURES))),
+        scales=tuple(1.0 for _ in range(len(GRAPH_PARSER_FEATURES))),
+        hidden_weights=(),
+        hidden_biases=(),
+        output_weights=tuple(tuple(row) for row in output_weights),
+        output_bias=tuple(output_bias),
+        threshold=0.8,
+        train_config={"mode": "graph_parser_m5"},
+        node_feature_names=GRAPH_PARSER_NODE_FEATURES,
+        node_label_names=GRAPH_PARSER_NODE_LABELS,
+        node_means=tuple(0.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_scales=tuple(1.0 for _ in GRAPH_PARSER_NODE_FEATURES),
+        node_hidden_weights=(),
+        node_hidden_biases=(),
+        node_output_weights=_toy_node_weights(),
+        node_output_bias=tuple(0.0 for _ in GRAPH_PARSER_NODE_LABELS),
+        keep_output_weights=tuple(keep_weights),
+        keep_output_bias=0.0,
+        keep_threshold=0.5,
+        graph_feature_names=GRAPH_PARSER_GRAPH_FEATURES,
+        graph_means=tuple(0.0 for _ in GRAPH_PARSER_GRAPH_FEATURES),
+        graph_scales=tuple(1.0 for _ in GRAPH_PARSER_GRAPH_FEATURES),
+        graph_hidden_weights=(),
+        graph_hidden_biases=(),
     )
 
 

@@ -330,6 +330,29 @@ def test_formula_import_plan_thread_persists_all_rounds(tmp_path) -> None:
     }
 
 
+def test_formula_import_plan_thread_limits_page_scan_queue(tmp_path) -> None:
+    store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
+    formula = _formula("p0_b1", 0)
+    captured: list[dict[str, int | str]] = []
+    thread = _FormulaImportPlanThread(
+        store=store,
+        filepath="paper.pdf",
+        doc_hash="doc-1",
+        page_count=500,
+        page_scan_pages=[0, 2, 2, 999],
+        plan_blocks=[],
+        plan_priority_pages=set(),
+        plan_scan_round=FormulaScanRound.CACHED_RECOGNITION.value,
+        formula_blocks=[formula],
+    )
+    thread.finished_signal.connect(lambda result: captured.append(result))
+
+    thread.run()
+
+    assert captured[-1]["queued_pages"] == 2
+    assert [task.page_num for task in store.list_page_tasks("doc-1")] == [0, 2]
+
+
 def test_formula_index_flow_does_not_queue_done_formula_job(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     block = _formula("p0_b1", 0)
@@ -1230,13 +1253,12 @@ def test_high_precision_worker_outputs_candidate_only(monkeypatch, tmp_path) -> 
     }]
 
 
-def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> None:
+def test_high_precision_worker_uses_only_local_ocr_candidate(monkeypatch) -> None:
     import hashlib
     import sys
     from types import ModuleType
 
     import src.app.formula_index_flow as module
-    from src.core.external_formula_tools import ExternalFormulaCandidate
 
     block = _formula("p0_b1", 0)
     worker = module._FormulaOcrWorker(
@@ -1266,46 +1288,6 @@ def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> 
         def recognize_batch(self, images: list[bytes], max_uncached: int = 0) -> list[str]:
             return [r"\alpha"]
 
-    class FakeExternalRunner:
-        def recognize_images(
-            self,
-            images: list[tuple[str, bytes, dict[str, object]]],
-            specs: object = None,
-        ) -> list[ExternalFormulaCandidate]:
-            assert images == [
-                (
-                    "p0_b1",
-                    b"png-bytes",
-                    {
-                        "pdf_path": "paper.pdf",
-                        "page_num": 0,
-                        "bbox": [0.0, 0.0, 100.0, 20.0],
-                    },
-                )
-            ]
-            assert specs is None
-            return [
-                ExternalFormulaCandidate(
-                    candidate_id="p0_b1",
-                    latex=r"\beta",
-                    model="paddle_formula",
-                    model_version="PP-FormulaNet_plus-S",
-                    preprocess_version="png-v1",
-                    score=0.42,
-                    duration_ms=123,
-                    warnings=("candidate_only",),
-                ),
-                ExternalFormulaCandidate(
-                    candidate_id="p0_b1",
-                    latex=r"\gamma",
-                    model="pix2text_formula",
-                    model_version="pix2text",
-                    preprocess_version="png-v1",
-                    score=0.91,
-                    duration_ms=456,
-                ),
-            ]
-
     fake_fitz = ModuleType("fitz")
     fake_fitz.open = lambda path: FakeDoc()  # type: ignore[attr-defined]
     fake_detector_module = ModuleType("src.core.formula_detector")
@@ -1315,7 +1297,7 @@ def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> 
     monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
     monkeypatch.setitem(sys.modules, "src.core.formula_detector", fake_detector_module)
     monkeypatch.setitem(sys.modules, "src.core.math_ocr", fake_math_ocr_module)
-    monkeypatch.setattr(module, "ExternalFormulaToolRunner", FakeExternalRunner)
+    assert not hasattr(module, "ExternalFormulaToolRunner")
 
     worker.run()
 
@@ -1331,36 +1313,10 @@ def test_high_precision_worker_appends_external_tool_candidates(monkeypatch) -> 
             "preprocess_version": "crop-dpi300-pad6",
             "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
         },
-        {
-            "block_id": "p0_b1",
-            "latex": r"\beta",
-            "normalized_latex": r"\beta",
-            "image_hash": image_hash,
-            "model": "paddle_formula",
-            "model_version": "PP-FormulaNet_plus-S",
-            "preprocess_version": "png-v1",
-            "score": 0.42,
-            "duration_ms": 123,
-            "warnings": ["candidate_only"],
-            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
-        },
-        {
-            "block_id": "p0_b1",
-            "latex": r"\gamma",
-            "normalized_latex": r"\gamma",
-            "image_hash": image_hash,
-            "model": "pix2text_formula",
-            "model_version": "pix2text",
-            "preprocess_version": "png-v1",
-            "score": 0.91,
-            "duration_ms": 456,
-            "warnings": [],
-            "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
-        },
     ]
 
 
-def test_high_precision_external_candidates_are_persisted_unaccepted(tmp_path) -> None:
+def test_high_precision_candidates_are_persisted_unaccepted(tmp_path) -> None:
     store = FormulaIndexStore(str(tmp_path / "formula_jobs.db"))
     flow = FormulaIndexFlow(store=store)
     block = _formula("p0_b1", 0)
@@ -1387,19 +1343,6 @@ def test_high_precision_external_candidates_are_persisted_unaccepted(tmp_path) -
                     "model": "pix2text-mfr",
                     "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
                 },
-                {
-                    "block_id": "p0_b1",
-                    "latex": r"\beta",
-                    "normalized_latex": r"\beta",
-                    "image_hash": "hash-1",
-                    "model": "paddle_formula",
-                    "model_version": "PP-FormulaNet_plus-S",
-                    "preprocess_version": "png-v1",
-                    "score": 0.42,
-                    "duration_ms": 123,
-                    "warnings": ["candidate_only"],
-                    "scan_round": FormulaScanRound.LOCAL_HIGH_PRECISION.value,
-                },
             ],
             "skipped": [],
             "failed": [],
@@ -1414,11 +1357,8 @@ def test_high_precision_external_candidates_are_persisted_unaccepted(tmp_path) -
         stage="local_precise",
     )
     by_model = {result.model: result for result in results}
-    assert set(by_model) == {"pix2text-mfr", "paddle_formula"}
-    assert by_model["paddle_formula"].accepted is False
-    assert by_model["paddle_formula"].score == 0.42
-    assert by_model["paddle_formula"].duration_ms == 123
-    assert by_model["paddle_formula"].warnings == ("candidate_only",)
+    assert set(by_model) == {"pix2text-mfr"}
+    assert by_model["pix2text-mfr"].accepted is False
 
 
 class _Signal:

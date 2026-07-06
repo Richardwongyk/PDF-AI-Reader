@@ -41,7 +41,6 @@ CORE_TESTS = [
 
 FORMULA_TESTS = [
     "tests/test_born_digital_math.py",
-    "tests/test_external_formula_tools.py",
     "tests/test_formula_detector.py",
     "tests/test_formula_index_flow.py",
     "tests/test_formula_index_performance.py",
@@ -50,7 +49,6 @@ FORMULA_TESTS = [
     "tests/test_formula_knowledge_update.py",
     "tests/test_formula_multiround_pipeline.py",
     "tests/test_formula_semantic_review.py",
-    "tests/test_formula_tool_comparison.py",
     "tests/test_latex_mathml_extractor.py",
     "tests/test_pdf_glyph_graph.py",
     "tests/test_symbol_identity_repair.py",
@@ -101,7 +99,6 @@ class ValidationOptions:
     fail_fast: bool = False
     include_desktop_e2e: bool = False
     include_cloud: bool = False
-    include_local_tools: bool = False
     strict_logs: bool = False
     tinybdmath_graph_parser_model: Path | None = None
     stress_multiplier: int = 1
@@ -337,9 +334,6 @@ def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
         r3_limit = 0
         r4_limit = 64 if options.profile in {"full", "nightly"} else 16
         r5_limit = 16 if options.profile in {"full", "nightly"} else 4
-        if options.include_local_tools:
-            r2_limit = _scale_positive(8, options.stress_multiplier)
-            r2_sample_limit = r2_limit
         if options.include_cloud:
             r3_limit = _scale_positive(4, options.stress_multiplier)
         r4_limit = _scale_positive(r4_limit, options.stress_multiplier)
@@ -378,9 +372,6 @@ def _multiround_steps(options: ValidationOptions) -> list[ValidationStep]:
             notes.append("TinyBDMath Graph Parser model is loaded")
         else:
             notes.append("TinyBDMath r2a will abstain because Graph Parser artifact is absent")
-        if options.include_local_tools:
-            command.append("--auto-local-tools")
-            notes.append("explicit local OCR/MFR tool comparison enabled")
         if options.include_cloud:
             command.append("--run-cloud-review")
             notes.append("explicit cloud semantic review enabled")
@@ -721,7 +712,6 @@ def _check_multiround_artifact(step: ValidationStep, payload: dict[str, Any]) ->
     if not reports:
         return checks, ["multiround report has no case reports"]
     include_cloud = "--run-cloud-review" in step.command
-    include_local_tools = "--auto-local-tools" in step.command
     expect_reuse = "reopen_skip" in step.name
     for report in reports:
         case = str(report.get("case", "unknown"))
@@ -737,8 +727,6 @@ def _check_multiround_artifact(step: ValidationStep, payload: dict[str, Any]) ->
         tiny_count = _count_prefix(recognition, "tinybdmath_structural:") if isinstance(recognition, dict) else 0
         if processed > 0 and tiny_count <= 0:
             problems.append(f"{case}: TinyBDMath processed {processed} rows but recognition result is missing")
-        if not include_local_tools and isinstance(recognition, dict) and _count_prefix(recognition, "local_precise:") > 0:
-            problems.append(f"{case}: local OCR/MFR results appeared without --include-local-tools")
         for item in report.get("rounds", []) or []:
             if not isinstance(item, dict) or item.get("round") != "r3_cloud_semantic_review":
                 continue
@@ -872,7 +860,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--include-desktop-e2e", action="store_true")
     parser.add_argument("--include-cloud", action="store_true")
-    parser.add_argument("--include-local-tools", action="store_true")
     parser.add_argument("--strict-logs", action="store_true")
     parser.add_argument("--tinybdmath-graph-parser-model", type=Path)
     parser.add_argument(
@@ -892,7 +879,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> ValidationOptions:
         fail_fast=args.fail_fast,
         include_desktop_e2e=args.include_desktop_e2e,
         include_cloud=args.include_cloud,
-        include_local_tools=args.include_local_tools,
         strict_logs=args.strict_logs,
         tinybdmath_graph_parser_model=args.tinybdmath_graph_parser_model,
         stress_multiplier=max(1, args.stress_multiplier),

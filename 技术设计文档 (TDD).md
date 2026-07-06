@@ -1,9 +1,9 @@
 # PDF AI 阅读器 · 技术设计文档 (TDD)
 
-**版本:** V5.1（2026-06-05 状态校准）
-**日期:** 2026-06-05
+**版本:** V5.2（2026-07-05 状态校准）
+**日期:** 2026-07-05
 **状态:** 架构基线 + 历史设计说明
-**依赖文档:** 产品需求文档 (PRD) V5.1
+**依赖文档:** 产品需求文档 (PRD) V5.2
 **开发语言:** Python 3.14.4
 **GUI 框架:** PySide6 ≥ 6.11.0
 **生成模型:** LiteLLM 云端 / Ollama 本地 / Mock 测试降级
@@ -18,6 +18,23 @@
 
 2026-05-28 以来新增的权威边界：
 
+- 2026-07-05 新增段落批注/备注裂缝：`SplitMode.ANNOTATION` 复用现有裂缝布局，`ParagraphWidget`/`BlockOverlay`
+  右键菜单触发批注请求，`SplitWidget` 在 annotation 模式下显示纯文本编辑区与保存按钮，`PdfViewer` 使用稳定 split id
+  `<block_id>__annotation` 保证同一段落只有一个批注裂缝。批注默认插入在翻译裂缝之后，折叠时只保留黄色侧边标记。
+- 批注持久化由 `MainWindow` 维护：以文档 hash 为一级 key、block id 为二级 key 写入 `data/annotations.json`。
+  该文件属于本地用户数据，已加入 `.gitignore`；保存空文本等同删除批注。文档加载和页面 blocks 补齐时会回填
+  `block.metadata["annotation"]` 并同步黄色标记。
+- 2026-07-05 多进程多窗口最小版：允许多个独立 PDF AI Reader 进程同时存在。每个进程使用独立
+  `data/runtime/process-<pid>/qtwebengine/` 和 `logs/app-<pid>.log`；第一个进程持有 primary instance lock，
+  后续 secondary 进程自动将 Chroma 知识库后端降级为 SQLite FTS，避免多进程同时访问同一个 ChromaDB
+  持久化目录。
+- 详细日志默认只写入 UTF-8 文件日志；终端默认不输出 INFO 级日志，避免 Windows/Conda 启动链路出现中文
+  mojibake。需要实时控制台日志时设置 `PDF_AI_READER_CONSOLE_LOG=1`。
+- 批注写入改为 `src/data/annotation_store.py` 负责：使用 `QLockFile` 锁住 `data/annotations.json.lock`，
+  单条 block patch 合并最新文件内容后再 `os.replace` 原子替换。实时跨窗口推送暂不实现；关闭重开后可读取最新批注。
+- 2026-07-05 大文档稳定性补充：导入时 `_FormulaImportPlanThread` 支持 `page_scan_pages` 限定自动页级公式扫描范围；
+  超过 `AUTO_PAGE_SCAN_FULL_DOCUMENT_LIMIT` 的文档只自动扫描可见页附近，旧的持久化页扫描任务不会被空闲定时器全局扫完。
+  后台页面 blocks 更新只刷新可见/已渲染页面，目录树生成改为防抖刷新，减少 Qt 原生控件高频重建导致的闪退风险。
 - 生成模型走可配置路由：LiteLLM 云端、Ollama 本地和 Mock 降级都必须明确标注，不能把云端伪装成本地。
 - 知识库由 `KnowledgeEngine` facade 统一管理，可选 SQLite FTS5、Chroma、LlamaIndex 编排等后端；无真实 embedding 时优先 FTS5 快速召回。
 - 公式解析采用 r0/r0.5/r1/r2/r2a/r3/r4/r5 多轮异步持久化流水线。born-digital PDF 默认不 OCR，低置信结果只做候选。
@@ -39,6 +56,20 @@
 - 最新 UI/导航回归：`tests/test_pdf_viewer_navigation.py -q` 为 19 passed；
   `tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q` 为 30 passed。
   这不是 Attention/Napkin 桌面 E2E 或公式质量门禁。
+- 2026-07-05 当前 HEAD 已快进到 GitHub `origin/master` 的 `915d5f5`。
+  本地协作/交接文档已由 `.gitignore` 管理，不再作为可提交设计文档的一部分，
+  但仍必须先读。
+- 2026-07-05 当前工作树保留未提交 TinyBDMath Graph Parser M5 改动：
+  artifact/feature 版本升到 M5/v9，relation head 新增 whole-formula graph
+  context，训练默认 `graph_parser_m5`，评估默认批量 torch inference，并新增
+  `decode_latex_candidate(..., verify_layout=False)` 快速路径。该快速路径只用于
+  评估迭代，输出 `layout_status=not_run`，不能作为 accepted gate 依据。
+- 2026-07-05 当前可见 conda 环境为 `base`、`drawing`、`cs231n`、`lab3fast`、
+  `lottery_python`、`pdf_ai_reader_314`、`pku_elective`、`science`；旧文档中
+  `pdf_tool_*` 隔离工具环境本次未显示；第三方公式工具 worker/对比通道已移除。
+- 2026-07-05 验证：新增批注/TOC/运行时检查 27 passed；
+  合并回归 + M5 定向组合 94 passed；轻量接手测试 95 passed；
+  TinyBDMath 主线测试 159 passed。
 
 本文档覆盖：
 - 主要模块结构与类定义（历史章节保留基线，当前状态以源码和交接文档为准）
@@ -181,6 +212,19 @@
 - 任何缩放/滚动性能优化必须同时记录视觉验收截图和日志，尤其是 Napkin 极大缩放、翻译框打开、
   连续大滚轮和缩放状态跳页。
 
+批注层约束补充：
+
+- 批注是阅读态用户数据，不进入 AI prompt、知识库、GraphRAG 或公式 accepted gate；它只通过
+  `data/annotations.json` 本地保存，并按 `doc_hash -> block_id -> note` 查找。
+- 跨进程保存批注必须走 `save_annotation_patch()`：加锁后读取最新 JSON，只更新当前 block，避免两个窗口
+  修改同一文档不同段落时互相覆盖。删除行为写入空 note patch。
+- 批注裂缝和翻译/问答/解释裂缝共享 `PdfViewer.open_split_widget` 的分段布局能力，但必须使用独立
+  split id，避免覆盖翻译裂缝。约定批注 split id 为 `<block_id>__annotation`。
+- 折叠批注不得改变页面正文布局；只保留 `PdfViewer.set_annotation_marker` 绘制的黄色侧边标记。
+  展开时恢复到该段落相关的 annotation split，并回填上次保存文本。
+- 删除行为以“保存空文本”或清除 split 为准：同时删除 `_annotations`、block metadata、黄色标记和
+  JSON 持久化记录。
+
 翻译层约束补充：
 
 - `TextPreprocessor` 的公式占位映射必须按翻译请求隔离。流式 token 期间不能复用可被其他请求
@@ -202,7 +246,8 @@
 D:\程设大作业\
 ├── config.yaml                    # 应用配置（模型、路由、UI、API Key）
 ├── requirements.txt               # 精确依赖清单
-├── run_py314.bat                  # Conda 环境启动脚本
+├── run_py314_silent.vbs           # Windows 静默启动脚本（pythonw，无控制台窗口）
+├── run_py314.bat                  # 兼容入口，转发到静默启动脚本
 ├── TODO.md                        # 开发 TODO
 ├── .gitignore
 ├── .vscode/settings.json          # VS Code 配置（conda 路径）
@@ -215,8 +260,9 @@ D:\程设大作业\
 │   └── knowledge_bases/           # ChromaDB 持久化数据（运行时生成）
 │       ├── chroma.sqlite3
 │       └── <collection_uuid>/
+│   └── runtime/                   # 多进程运行时目录（process-<pid>/qtwebengine）
 ├── logs/
-│   └── app.log                    # 应用运行日志
+│   └── app-<pid>.log              # 进程级应用运行日志
 ├── src/
 │   ├── __init__.py
 │   ├── main.py                    # 程序入口：QApplication + 服务初始化
@@ -232,7 +278,6 @@ D:\程设大作业\
 │   │   ├── glossary_manager.py    # GlossaryManager 术语表管理
 │   │   ├── navigator.py           # Navigator 目录/书签管理
 │   │   ├── born_digital_formula_extractor.py
-│   │   ├── external_formula_tools.py
 │   │   ├── tinybdmath_*.py        # TinyBDMath CSLT/alignment/parser/decoder/verifier
 │   │   └── knowledge_backends.py
 │   ├── app/
@@ -248,6 +293,8 @@ D:\程设大作业\
 │   │   ├── tile_renderer.py
 │   │   ├── tile_cache.py
 │   │   └── ai_cache.py
+│   ├── data/
+│   │   └── annotation_store.py    # 批注 JSON 读写、跨进程锁、原子替换
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── main_window.py         # MainWindow 主窗口
@@ -286,7 +333,7 @@ D:\程设大作业\
    - 发射 `finished_parsing(ParseResult)` 信号
 4. 主线程接收 `parse_finished`：
    - `PdfViewer.load_document(result)` 创建 `_LazyPageWidget` 占位（按 `page.rect` 计算尺寸）
-   - `Navigator.load_toc()` 或 `Navigator.generate_toc_from_blocks()` 加载目录
+   - `Navigator.load_toc()` 或 `Navigator.generate_toc_from_blocks()` 加载目录；自动生成目录优先识别结构化标题模式（如“第X节”“一、”“1、”），再回退到 heading 块，并过滤乱码/公式碎片/空标题/重复项，低于可靠目录门槛时发出空目录清空左侧树
    - 立即可以滚动浏览（首屏懒加载渲染）
 
 **阶段二（后台精扫，不阻塞阅读）**：
@@ -324,7 +371,7 @@ D:\程设大作业\
 
 ### 3.3 流程 C：裂缝问答（含知识库检索）
 
-1. 用户右键 BlockOverlay → "在此处提问"
+1. 用户通过问答入口打开 `SplitMode.QUESTION`（当前不在段落右键菜单展示）
 2. `SplitWidget` 以 `SplitMode.QUESTION` 模式打开，显示输入框
 3. 用户输入问题后点"发送"或 Ctrl+Enter
 4. `MainWindow._on_split_ask()`:
@@ -395,7 +442,7 @@ class RoutingConfig(BaseModel):
 
 class UIConfig(BaseModel):
     language: str = "zh_CN"
-    theme: str = "light"                    # light / dark / sepia
+    theme: str = "dark"                     # light / dark / sepia
     split_position: str = "below"
     font_size: int = 12
     line_spacing: float = 1.5
@@ -876,7 +923,7 @@ class Navigator(BaseService):
 
     方法:
     - load_toc(raw_toc: list[dict]) → None              加载原生大纲
-    - generate_toc_from_blocks(blocks) → list[dict]    从 heading 块推断目录
+    - generate_toc_from_blocks(blocks) → list[dict]    从结构化标题或 heading 块推断目录；无法形成可靠目录时返回 [] 并发出空 toc_ready
     - add_bookmark(page_num, title, note) → Bookmark    手动添加书签
     - remove_bookmark(bookmark_id) → bool               删除书签
     - reorder_bookmarks(ordered_ids) → None             拖拽排序
@@ -1039,8 +1086,9 @@ class BlockOverlay(QWidget):
     - clicked(str)               单击 → block_id
     - double_clicked(str)        双击 → block_id
     - translate_requested(str)   右键"翻译段落"
-    - question_requested(str)    右键"在此处提问"
-    - explain_requested(str)     右键"解释此概念/公式"
+    - question_requested(str)    保留给后续问答入口（当前右键菜单不展示）
+    - explain_requested(str)     保留给后续解释入口（当前右键菜单不展示）
+    - annotation_requested(str)  右键"批注/备注"
 
     视觉效果:
     - 默认完全透明（不遮挡 PDF）
@@ -1051,8 +1099,7 @@ class BlockOverlay(QWidget):
 
     右键菜单:
     - 📖 翻译段落
-    - 🔍 在此处提问
-    - ✏️ 解释此公式/概念
+    - 📝 批注/备注
     """
 ```
 
@@ -1092,10 +1139,11 @@ class SplitWidget(QFrame):
 ### 7.5 主题模块 (`src/ui/theme.py`)
 
 ```python
-# 三套 QPalette 主题（通过 QApplication.setPalette() 全局应用）:
-apply_theme("light")   # 素白（学术）
-apply_theme("dark")    # 暗夜
-apply_theme("sepia")   # 护眼羊皮纸
+# 当前默认黑色背景（config.yaml: ui.theme=dark）:
+apply_theme("dark")
+
+# 代码层仍保留 light/dark/sepia 三套 QPalette；
+# 设置窗口当前不提供主题切换入口，避免未验证的全窗口对比度回归。
 
 # SplitWidget 专用 QSS (SPLIT_WIDGET_STYLE):
 # - 蓝紫渐变背景 (qlineargradient)
@@ -1125,6 +1173,8 @@ apply_theme("sepia")   # 护眼羊皮纸
 3. **共享数据不可变传递**：`list[DocumentBlock]` 构建完成后通过信号传递，工作线程不再修改。
 4. **QThread 生命周期管理**：`AIEngine._active_threads` 保持引用防止 Python GC 回收导致信号断开。
 5. **线程中断处理**：_ParseThread 支持 `requestInterruption()`；旧线程 3s 超时后 `terminate()`。
+6. **多进程最小隔离**：`main.py` 启动时用 `data/runtime/primary-instance.lock` 区分 primary/secondary 实例。
+   每个进程设置独立 QtWebEngine cache/storage path；secondary 实例不创建共享 Chroma 后端，改用 SQLite FTS。
 
 ---
 
@@ -1256,6 +1306,7 @@ ConfigManager.config_changed(config)
 | 双栏页面数限制 | 仅候选页面（含 LaTeX 命令的页面）跑 MFD 模型 |
 | 线程池限制 | QThreadPool 最多 2 线程 |
 | Chromium 沙盒禁用 | Windows 上 `--no-sandbox --disable-gpu-sandbox` 避免 QtWebEngineProcess 崩溃 |
+| 多进程 QtWebEngine 隔离 | 每个进程使用 `data/runtime/process-<pid>/qtwebengine`，避免多个窗口争用同一 Chromium profile |
 | telemetry 关闭 | `ANONYMIZED_TELEMETRY=False` 避免 posthog 报错 |
 
 ---
@@ -1280,7 +1331,7 @@ routing:
 
 ui:
   language: zh_CN
-  theme: light           # light / dark / sepia
+  theme: dark            # 默认黑色背景；设置窗口暂不提供主题切换入口
   split_position: below
   font_size: 12
   line_spacing: 1.5
@@ -1291,11 +1342,9 @@ api_keys: {}
 
 ### 启动脚本
 
-`run_py314.bat`:
-```batch
-set PYTHONPATH=D:\程设大作业
-conda run -n pdf_ai_reader_314 python src/main.py
-```
+`run_py314_silent.vbs` 是 Windows 推荐启动入口：脚本根据自身位置推导项目目录，并在 `%USERPROFILE%\.conda\envs\` 与 `%USERPROFILE%\anaconda3\envs\` 下查找 `pdf_ai_reader_3144`（兼容 `pdf_ai_reader_314`）环境，补齐 `PYTHONPATH`、`CONDA_PREFIX`、`PATH` 后直接调用 `pythonw.exe src\main.py`，避免显示多余控制台窗口。
+
+`run_py314.bat` 仅作为旧习惯兼容入口，内部调用 `wscript.exe run_py314_silent.vbs` 后立即退出。
 
 ---
 
@@ -1340,7 +1389,7 @@ ollama pull bge-m3
 | 书签管理 | ✅ 已实现 | 手动添加 + AI 建议 |
 | 混合路由 | ✅ 已实现 | 本地/云端/回退三级策略 |
 | 配置管理 | ✅ 已实现 | YAML + 热加载 + .env |
-| 主题系统 | ✅ 已实现 | QPalette 三套主题 |
+| 主题系统 | 🟡 默认黑底 | QPalette 能力保留；设置窗口暂不开放主题切换 |
 | 侧栏控制 | ✅ 已实现 | 菜单栏同层左右角按钮隐藏/显示；左右 dock 均可弹出/归位且不可关闭 |
 | 顶部工具栏折叠 | 🟡 基础已实现 | 工具栏空白区和恢复细条可双击折叠/恢复；菜单栏文字双击折叠未可靠实现，暂不继续 |
 | 文档标签页 | ⏳ 暂不实现 | 已讨论但当前不做多文档标签/标签关闭当前文档 |
@@ -1352,6 +1401,7 @@ ollama pull bge-m3
 | AI 工具集侧边栏 | ✅ 已实现基础入口 | 全文问答输入、证据树、回答 WebView、追问建议、证据跳转 |
 | 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5、审核 UI 已接线；最终质量未达标 |
 | 公式审核与写回 | 🟡 进行中 | manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回已接线；批量审核待补 |
+| TinyBDMath Graph Parser M5 | 🟡 工作树实验 | whole-formula graph context、结构化关系筛选和批量 torch eval 已在当前未提交工作树；仍 candidate-only，需 full verifier 评估后才能决定 r2a artifact |
 
 ---
 
@@ -1367,4 +1417,4 @@ ollama pull bge-m3
 
 ---
 
-*本文档已按 2026-06-05 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*
+*本文档已按 2026-07-05 当前架构校准；早期章节仍保留部分历史基线说明，最终实现以源码和交接文档为准。*

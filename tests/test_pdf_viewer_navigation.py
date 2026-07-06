@@ -47,6 +47,22 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
+def test_block_overlay_context_menu_shows_translation_and_annotation_only() -> None:
+    _app()
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph",
+        bbox=(0.0, 0.0, 100.0, 40.0),
+    )
+    overlay = BlockOverlay(block)
+
+    actions = [action.text() for action in overlay._build_context_menu().actions()]
+
+    assert actions == ["📖 翻译段落", "📝 批注/备注"]
+
+
 def test_pdf_viewer_scrolls_to_bbox_and_shows_highlight() -> None:
     _app()
     engine = _DocEngine()
@@ -648,6 +664,60 @@ def test_pdf_viewer_clear_one_of_multiple_splits_keeps_neighbor_segments_without
     assert viewer._layout.indexOf(split_a) < 0
     assert 0 in viewer._pending_split_rerenders
     assert 0 in engine.rendered_pages
+
+
+def test_pdf_viewer_clear_adjacent_annotation_split_keeps_translation_split() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    block = DocumentBlock(
+        id="p0_b0",
+        page_num=0,
+        block_type=BlockType.PARAGRAPH,
+        content="paragraph",
+        bbox=(20.0, 80.0, 180.0, 120.0),
+    )
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=1, blocks=[block]))
+
+    top = QWidget()
+    translation = QWidget()
+    annotation = QWidget()
+    bottom = QWidget()
+    for widget in (top, translation, annotation, bottom):
+        widget.setFixedSize(400, 60)
+        widget.show()
+        viewer._remember_widget_page(widget, 0)
+    for idx, widget in enumerate((top, translation, annotation, bottom), start=1):
+        viewer._layout.insertWidget(idx, widget)
+
+    annotation_id = viewer.annotation_split_id(block.id)
+    viewer._page_segments[0] = [
+        {"y0": 0, "y1": 120, "blocks": [block], "widget": top},
+        {"split_id": block.id},
+        {"split_id": annotation_id},
+        {"y0": 120, "y1": 240, "blocks": [], "widget": bottom},
+    ]
+    for split in (translation, annotation):
+        split._saved_height = 60
+        split._collapsed = False
+        split._prev_split_h = 60
+    viewer._splits[block.id] = translation  # type: ignore[assignment]
+    viewer._splits[annotation_id] = annotation  # type: ignore[assignment]
+    viewer._split_sources[block.id] = block.id
+    viewer._split_sources[annotation_id] = block.id
+    viewer._split_pages.add(0)
+    viewer._active_pages.add(0)
+    assert viewer._vlayout is not None
+    viewer._vlayout.register_split(0, 120.0)
+
+    viewer._on_clear_close(annotation_id)
+
+    assert annotation_id not in viewer._splits
+    assert block.id in viewer._splits
+    assert [seg.get("split_id") for seg in viewer._page_segments[0] if "split_id" in seg] == [block.id]
+    assert viewer._layout.indexOf(translation) >= 0
+    assert viewer._layout.indexOf(annotation) < 0
 
 
 def test_virtual_page_layout_uses_binary_search_semantics() -> None:

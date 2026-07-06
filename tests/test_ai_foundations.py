@@ -93,7 +93,7 @@ def test_app_config_exposes_rag_and_reasoning_models() -> None:
     assert cfg.model.cloud_translation == "deepseek/deepseek-v4-flash"
     assert cfg.model.cloud_reasoning == "deepseek/deepseek-v4-pro"
     assert cfg.model.formula_ocr_backend == "pix2text-mfr"
-    assert cfg.model.formula_ocr_model == "PP-FormulaNet_plus-S"
+    assert cfg.model.formula_ocr_model == ""
     assert cfg.rag.backend == "legacy_chroma"
     assert cfg.rag.candidate_pool == 48
     assert cfg.routing.translation == "cloud_only"

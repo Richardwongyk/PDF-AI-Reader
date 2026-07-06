@@ -31,7 +31,6 @@ from src.app.formula_semantic_review import FormulaSemanticReviewService
 from src.app.tinybdmath_candidate_service import TINYBDMATH_PREPROCESS_VERSION, TinyBDMathCandidateService
 from src.app.graph_index_store import GraphIndexStore
 from src.core.ai_engine import BaseLLMClient, LiteLLMClient
-from src.core.external_formula_tools import ExternalFormulaToolRunner, ExternalFormulaToolSpec
 from src.core.model_providers import normalize_litellm_model
 from src.core.models import BlockType, DocumentBlock
 from src.core.pdf_engine import DocumentChunker
@@ -164,7 +163,6 @@ def run_pipeline_case(
     r4_limit: int = 16,
     r5_limit: int = 8,
     r2_sample_formulas: int = 0,
-    auto_local_tools: bool = False,
     run_cloud_review: bool = False,
     run_targeted_r2_after_fusion: bool = False,
     drain_r2: bool = False,
@@ -210,7 +208,6 @@ def run_pipeline_case(
             formula_blocks=formula_blocks,
             limit=r2_limit,
             sample_formulas=r2_sample_formulas,
-            auto_local_tools=auto_local_tools,
             drain=drain_r2,
         )
     )
@@ -234,7 +231,6 @@ def run_pipeline_case(
                 formula_blocks=formula_blocks,
                 limit=r2_limit,
                 sample_formulas=0,
-                auto_local_tools=auto_local_tools,
                 drain=drain_r2,
             )
         )
@@ -574,7 +570,6 @@ def _run_r2(
     formula_blocks: list[DocumentBlock],
     limit: int,
     sample_formulas: int,
-    auto_local_tools: bool,
     drain: bool = False,
 ) -> RoundReport:
     started = time.perf_counter()
@@ -602,11 +597,6 @@ def _run_r2(
             scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION,
         )
     block_map = {block.id: block for block in blocks}
-    external_tool_specs: list[ExternalFormulaToolSpec] | None = None
-    discovered_tools: list[str] = []
-    if auto_local_tools:
-        external_tool_specs = ExternalFormulaToolRunner.known_local_specs()
-        discovered_tools = [spec.name for spec in external_tool_specs]
     processed_blocks = 0
     batches = 0
     emitted_any = False
@@ -641,7 +631,6 @@ def _run_r2(
             doc_hash=doc_hash,
             cache_only=False,
             scan_round=FormulaScanRound.LOCAL_HIGH_PRECISION.value,
-            external_tool_specs=external_tool_specs,
         )
         store.mark_running(
             doc_hash,
@@ -679,8 +668,7 @@ def _run_r2(
             "drained": drain and pending == 0,
             "pending": pending,
             "explicit_samples_queued": sampled,
-            "auto_local_tools": auto_local_tools,
-            "discovered_tools": discovered_tools,
+            "model_scope": "local_model_only",
         },
     )
 
@@ -2344,7 +2332,6 @@ def main() -> int:
     parser.add_argument("--r3-limit", type=int, default=2)
     parser.add_argument("--r4-limit", type=int, default=16)
     parser.add_argument("--r5-limit", type=int, default=8)
-    parser.add_argument("--auto-local-tools", action="store_true")
     parser.add_argument("--run-cloud-review", action="store_true")
     parser.add_argument(
         "--run-tinybdmath",
@@ -2396,7 +2383,6 @@ def main() -> int:
             r4_limit=max(1, args.r4_limit),
             r5_limit=max(0, args.r5_limit),
             r2_sample_formulas=max(0, args.r2_sample_formulas),
-            auto_local_tools=bool(args.auto_local_tools),
             run_cloud_review=bool(args.run_cloud_review),
             run_tinybdmath=bool(args.run_tinybdmath),
             tinybdmath_graph_parser_model=args.tinybdmath_graph_parser_model,

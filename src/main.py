@@ -7,6 +7,7 @@ PDF AI Reader — 程序主入口。
 
 import logging
 import os
+import shutil
 import sys
 import argparse
 import socket
@@ -26,7 +27,7 @@ import platform
 if platform.system() == "Windows":
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu-sandbox"
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QLockFile, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
@@ -43,6 +44,9 @@ _OLLAMA_PROBE_TIMEOUT_SEC = 0.12
 _APP_LOG_MAX_BYTES = 2 * 1024 * 1024
 _APP_LOG_BACKUP_COUNT = 3
 _LOG_RETENTION_SEC = 3 * 24 * 60 * 60
+_RUNTIME_RETENTION_SEC = 3 * 24 * 60 * 60
+_INSTANCE_LOCK_STALE_MS = 30 * 1000
+_CONSOLE_LOG_ENV = "PDF_AI_READER_CONSOLE_LOG"
 
 
 def _is_configured_api_key(value: str | None) -> bool:
@@ -100,26 +104,66 @@ def _prune_old_logs(log_dir: Path, now: float | None = None) -> None:
             continue
 
 
+def _prune_old_runtime_dirs(runtime_root: Path, now: float | None = None) -> None:
+    cutoff = (now if now is not None else time.time()) - _RUNTIME_RETENTION_SEC
+    if not runtime_root.exists():
+        return
+    for path in runtime_root.glob("process-*"):
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _process_runtime_dir(runtime_root: Path | None = None) -> Path:
+    root = runtime_root or Path("data") / "runtime"
+    return root / f"process-{os.getpid()}"
+
+
+def _acquire_primary_instance_lock(runtime_root: Path) -> tuple[QLockFile | None, bool]:
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(runtime_root / "primary-instance.lock"))
+    lock.setStaleLockTime(_INSTANCE_LOCK_STALE_MS)
+    if lock.tryLock(0):
+        return lock, False
+    return None, True
+
+
+def _configure_webengine_profile(profile: QWebEngineProfile, runtime_dir: Path) -> None:
+    web_dir = runtime_dir / "qtwebengine"
+    profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
+    profile.setCachePath(str(web_dir / "cache"))
+    profile.setPersistentStoragePath(str(web_dir / "storage"))
+    profile.setPersistentCookiesPolicy(
+        QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies
+    )
+
+
 def setup_logging() -> None:
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     _prune_old_logs(log_dir)
+    log_path = log_dir / f"app-{os.getpid()}.log"
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(
+            log_path,
+            maxBytes=_APP_LOG_MAX_BYTES,
+            backupCount=_APP_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    ]
+    if os.getenv(_CONSOLE_LOG_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            RotatingFileHandler(
-                log_dir / "app.log",
-                maxBytes=_APP_LOG_MAX_BYTES,
-                backupCount=_APP_LOG_BACKUP_COUNT,
-                encoding="utf-8",
-            ),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=handlers,
+        force=True,
     )
 
 
-def build_services(test_mode: bool = False) -> ServiceContainer:
+def build_services(test_mode: bool = False, secondary_instance: bool = False) -> ServiceContainer:
     """构建所有核心服务并注册到 ServiceContainer。
 
     初始化顺序：
@@ -142,15 +186,22 @@ def build_services(test_mode: bool = False) -> ServiceContainer:
     container.register_instance("config_manager", config_manager)
     config: AppConfig = config_manager.get()
     from src.core.math_ocr import MathOCR
-    MathOCR.set_default_backend_config(
-        config.model.formula_ocr_backend,
-        model_name=config.model.formula_ocr_model,
-    )
+    ocr_backend_kwargs = {}
+    if config.model.formula_ocr_model and config.model.formula_ocr_backend not in {"pix2text", "pix2text-mfr"}:
+        ocr_backend_kwargs["model_name"] = config.model.formula_ocr_model
+    MathOCR.set_default_backend_config(config.model.formula_ocr_backend, **ocr_backend_kwargs)
     logging.info("公式 OCR 后端: %s", config.model.formula_ocr_backend)
     if test_mode:
         config.routing.translation = "cloud_only"
         config.routing.qa = "cloud_only"
         config.routing.summarization = "cloud_only"
+    if secondary_instance and config.rag.backend in {"legacy_chroma", "llamaindex_chroma"}:
+        logging.info(
+            "检测到已有 PDF AI Reader 主实例，当前实例将知识库后端从 %s 降级为 sqlite_fts，"
+            "避免多个进程同时访问 ChromaDB 持久化目录。",
+            config.rag.backend,
+        )
+        config.rag.backend = "sqlite_fts"
 
     # ── 2. 基础设施层 (eager — 轻量) ──
     from src.infra.page_cache import PageCache
@@ -400,19 +451,39 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("PDF AI Reader")
     app.setApplicationVersion("1.0.0")
+    app.setQuitOnLastWindowClosed(True)
+    app.lastWindowClosed.connect(lambda: logging.info("QApplication lastWindowClosed"))
+    app.aboutToQuit.connect(lambda: logging.info("QApplication aboutToQuit"))
     logging.info("QApplication 创建完成 (%.2fs)", __import__('time').perf_counter() - t_start)
 
+    runtime_root = Path("data") / "runtime"
+    _prune_old_runtime_dirs(runtime_root)
+    runtime_dir = _process_runtime_dir(runtime_root)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    instance_lock, secondary_instance = _acquire_primary_instance_lock(runtime_root)
+    app._pdf_ai_reader_instance_lock = instance_lock
+    app._pdf_ai_reader_runtime_dir = runtime_dir
+    logging.info(
+        "多进程实例角色: %s, runtime_dir=%s",
+        "secondary" if secondary_instance else "primary",
+        runtime_dir,
+    )
+
     profile = QWebEngineProfile.defaultProfile()
-    profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
+    _configure_webengine_profile(profile, runtime_dir)
 
     try:
         t_build = __import__('time').perf_counter()
-        services = build_services(test_mode=args.test_mode)
+        services = build_services(
+            test_mode=args.test_mode,
+            secondary_instance=secondary_instance,
+        )
 
         # 将全局异常处理的父窗口设为主窗口（用于错误对话框）
         from src.ui.main_window import MainWindow
         t_ui = __import__('time').perf_counter()
         window = MainWindow(services)
+        app._main_window = window  # keep an explicit reference for the Qt object lifetime
         if args.test_mode:
             window._check_first_launch = lambda: None
             window._prewarm_webview_pool = lambda: None
@@ -420,6 +491,26 @@ def main() -> int:
         _error_handler.set_parent_widget(window)
 
         window.show()
+        def _activate_main_window() -> None:
+            window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+            app.setActiveWindow(window)
+            try:
+                logging.info("MainWindow activated: winId=0x%X visible=%s", int(window.winId()), window.isVisible())
+            except Exception:
+                logging.info("MainWindow activated")
+
+        QTimer.singleShot(250, _activate_main_window)
+        QTimer.singleShot(1500, _activate_main_window)
+        QTimer.singleShot(
+            2700,
+            lambda: (
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False),
+                window.showNormal(),
+            ),
+        )
         if args.test_mode:
             from src.app.test_command_bridge import TestCommandBridge
             command_file = Path("test_artifacts/e2e/commands.jsonl")
@@ -458,6 +549,12 @@ def main() -> int:
         services = locals().get("services")
         if services is not None:
             services.shutdown()
+        instance_lock = locals().get("instance_lock")
+        if instance_lock is not None:
+            try:
+                instance_lock.unlock()
+            except Exception:
+                logging.debug("实例锁释放失败", exc_info=True)
 
 
 if __name__ == "__main__":

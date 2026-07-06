@@ -12,8 +12,8 @@
 - 后续每一轮必须可恢复：任务状态、模型输出、置信度、耗时和错误都要写入存储。
 - 每个结果必须可追溯：公式结果要能回到 PDF 页、bbox、文本层、模型名和修正来源。
 - 每个重任务必须可取消、可暂停、可限流：不能长期占满 4 核 CPU。
-- 每个模型后端都必须可替换：MinerU、Pix2Text、UniMERNet、PDF-Extract-Kit、DeepSeek
-  只通过统一接口接入。
+- 模型后端必须保持边界清晰：当前只保留本机 TinyBDMath 结构模型和旧图片公式
+  cache/OCR fallback；第三方公式工具 worker 不再作为 r2 候选通道。
 
 2026-05-28 性能复盘补充：首屏解析拆成“前 8 页快速返回 + 后台全文解析”是符合性能优先的方向，
 但必须验证后台补页后 `DocumentBlock`、知识库、公式任务和 GraphRAG 增量状态一致。不能因为首屏快，
@@ -33,9 +33,9 @@ PDF 导入
        先查 image_hash / input_hash / model_version 缓存，未命中才推理
        写回 formula_recognition_results 和缓存
 
-  -> Round 2: 本地高精度多工具复核
+  -> Round 2: 本机高精度候选复核
        对低置信、问答 evidence、用户标注错误、复杂矩阵/对齐环境做二次识别
-       Pix2Text / Paddle Formula / MinerU / UniMERNet / PDF-Extract-Kit 通过独立 worker 运行
+       当前只保留本机/缓存候选和 TinyBDMath r2a 结构模型候选
        写回未接受候选，不直接覆盖高置信原始证据
 
   -> Round 3: 云端语义修正
@@ -85,13 +85,28 @@ PDF 导入
 - r0 页面 worker 当前调用 `BornDigitalFormulaExtractor`，只消费 MuPDF born-digital 结构证据，
   写入 `stage=pdf_structure` 的未接受候选；r0 不初始化 MFD/OCR。
 - r0 低置信、空 LaTeX 或需要复核的结构候选会额外排入 `r2_local_high_precision`
-  任务，作为后续显式精扫/多工具对比的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
-- r2 当前通过 `ExternalFormulaToolRunner` 和 `tools/formula_tool_worker.py` 调独立工具环境，
-  已支持 Paddle Formula 与 Pix2Text 公式图候选；所有 r2 结果默认 `accepted=false`。
+  任务，作为后续显式本机复核的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
+- 2026-07-05 已移除第三方公式工具 worker 通道：
+  `ExternalFormulaToolRunner`、`tools/formula_tool_worker.py` 和
+  `tools/formula_tool_comparison.py` 不再保留；r2 不再发现或调用 Paddle/Pix2Text/MinerU/PEK
+  隔离环境，所有可进入知识库的公式仍必须经过 accepted/manual revision。
 - `formula_round_jobs.result_json` 和 `formula_recognition_results` 已记录输入 hash、模型和预处理版本；同一轮次同一输入完成后，二次打开或 `--reuse-db` 会跳过已完成 r0/r2 重任务。
-- 新增 `tools/formula_multiround_pipeline.py`，用于 r0-r5 端到端 smoke/benchmark：默认 born-digital 路线不 OCR，显式 `--r2-sample-formulas` 才把现有公式块送入 r2 多工具候选复核，`--run-cloud-review` 可跑真实 DeepSeek r3，r4/r5 可用小批量 drain 验证图谱和知识库增量更新。
+- `tools/formula_multiround_pipeline.py` 用于 r0-r5 端到端 smoke/benchmark：默认 born-digital 路线不 OCR，显式 `--r2-sample-formulas` 只把现有公式块送入本机 r2 候选复核，`--run-cloud-review` 可跑真实 DeepSeek r3，r4/r5 可用小批量 drain 验证图谱和知识库增量更新。
 - 多轮报告已接入源 LaTeX 对照准确率复核：每个 stage/model 都输出 exact/near/weak match rate、average best similarity 和低相似候选；r0/r1/r2/r3 必须证明准确率逐轮递增，未达门槛的结果不能 accepted。
-- 多工具协同细设计见 `docs/formula_multitool_fusion_design.md`：候选级 fusion table、coverage-comparable 检查、accepted/rejected audit、manual revision 和 r5 增量写回基础闭环已经落地；下一步是批量审核、路径证据和大样本质量门禁。自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
+- 候选级 fusion table、coverage-comparable 检查、accepted/rejected audit、manual revision 和 r5 增量写回基础闭环已经落地；下一步是批量审核、路径证据和大样本质量门禁。自写代码只做编排、审计、候选排序和门禁，不写硬编码公式解析规则。
+
+2026-07-05 r2a 状态补充：
+
+- 当前工作树保留用户确认的 TinyBDMath Graph Parser M5 改动。M5 新增
+  whole-formula graph context、结构化关系冲突筛选、默认批量 torch eval 和
+  fast decode 可跳过 layout verifier。
+- M5 仍属于 `r2a_tinybdmath_structural` 的 candidate-only 路线；不改变 r0/r1/r2/r3/r4/r5
+  异步落库、input hash 跳过和 accepted gate 边界。
+- 未跑 layout verifier 的 `layout_status=not_run` 只能用于快速评估，不得写 accepted，
+  不得污染正文、FTS、向量库或 GraphRAG。
+- 2026-07-05 当前验证：新增批注/TOC/运行时检查 27 passed；合并回归 + M5
+  定向组合 94 passed；轻量接手测试 95 passed；M5 定向测试 32 passed；
+  TinyBDMath 主线测试 159 passed。未重跑 Attention/Napkin 桌面 E2E。
 
 这一步已完成多轮调度、存储闭环和 r3 候选写回的第一版：
 
@@ -415,7 +430,7 @@ GraphRAG 只消费已持久化事实：
 
 门槛：
 
-- 默认打开、滚动、缩放不加载 MFR/MinerU/PDF-Extract-Kit。
+- 默认打开、滚动、缩放不加载 MFR 或任何第三方公式工具。
 - cache-only 路径不触发模型 import。
 - 同一输入 hash 二次运行必须跳过或缓存命中。
 - 长文档后台任务可暂停、恢复、失败重试。
@@ -449,8 +464,6 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_inde
 
 1. 保持 `FormulaIndexStore` / `formula_recognition_results` / `formula_fusion_records` / `formula_acceptance_decisions` 为当前持久化边界，继续补租约恢复、失败重试和二次打开 skip 审计。
 2. 在已有基础审核 UI 上补批量审核、accepted precision 报告、审核筛选和二次打开 accepted 状态复用。
-3. Pix2Text/Paddle 外部 worker 已有最小候选接入；下一步用同一批 Attention/Napkin 裁剪样本扩展到 MinerU、UniMERNet/PDF-Extract-Kit，并做源码对齐。
-4. 增加更完整 worker 抽象：常驻 worker、批量协议、模型版本探测、模型缓存路径、失败降级和超时回收。
-5. 用 Attention/Napkin 建立同一批候选样本，比较 Pix2Text、Paddle Formula、UniMERNet、PDF-Extract-Kit、MinerU 的准确率与耗时。
-6. 对 bbox overlap、PDF bbox 定位、LaTeX 相似度审计和 fusion 分组做 profile，确认是否值得 C++17 下沉。
-7. 强化 r4/r5 GraphRAG 路径证据：accepted 高置信结果已能增量写回知识库和 GraphRAG artifact，下一步要证明问答 evidence 能沿 accepted decision -> block -> graph artifact 追溯。
+3. 用 Attention/Napkin 建立同一批候选样本，比较 r0 facts、r2 本机候选和 TinyBDMath r2a 的准确率与耗时。
+4. 对 bbox overlap、PDF bbox 定位、LaTeX 相似度审计和 fusion 分组做 profile，确认是否值得 C++17 下沉。
+5. 强化 r4/r5 GraphRAG 路径证据：accepted 高置信结果已能增量写回知识库和 GraphRAG artifact，下一步要证明问答 evidence 能沿 accepted decision -> block -> graph artifact 追溯。

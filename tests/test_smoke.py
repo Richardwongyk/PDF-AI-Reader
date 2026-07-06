@@ -1,8 +1,10 @@
 import os
+import logging
 import subprocess
 import sys
 import textwrap
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -81,6 +83,84 @@ def test_setup_logging_prunes_old_app_logs(tmp_path, monkeypatch) -> None:
     assert not stale.exists()
     assert fresh.exists()
     assert keep_awake.exists()
+
+
+def test_setup_logging_keeps_console_quiet_by_default(tmp_path, monkeypatch) -> None:
+    from src import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(main._CONSOLE_LOG_ENV, raising=False)
+
+    main.setup_logging()
+
+    handlers = logging.getLogger().handlers
+    assert any(isinstance(handler, RotatingFileHandler) for handler in handlers)
+    assert not any(getattr(handler, "stream", None) is sys.stdout for handler in handlers)
+
+
+def test_setup_logging_allows_explicit_console_log(tmp_path, monkeypatch) -> None:
+    from src import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(main._CONSOLE_LOG_ENV, "1")
+
+    main.setup_logging()
+
+    assert any(getattr(handler, "stream", None) is sys.stdout for handler in logging.getLogger().handlers)
+
+
+def test_runtime_dir_helpers_prune_only_stale_process_dirs(tmp_path) -> None:
+    from src import main
+
+    runtime_root = tmp_path / "runtime"
+    stale = runtime_root / "process-100"
+    fresh = runtime_root / "process-200"
+    unrelated = runtime_root / "cache"
+    for path in (stale, fresh, unrelated):
+        path.mkdir(parents=True)
+        (path / "marker.txt").write_text(path.name, encoding="utf-8")
+    old_time = time.time() - main._RUNTIME_RETENTION_SEC - 60
+    os.utime(stale, (old_time, old_time))
+    os.utime(unrelated, (old_time, old_time))
+
+    main._prune_old_runtime_dirs(runtime_root)
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert unrelated.exists()
+    assert main._process_runtime_dir(runtime_root).name == f"process-{os.getpid()}"
+
+
+def test_primary_instance_lock_marks_second_instance_secondary(tmp_path) -> None:
+    from src import main
+
+    runtime_root = tmp_path / "runtime"
+    first_lock, first_secondary = main._acquire_primary_instance_lock(runtime_root)
+    assert first_lock is not None
+    assert first_secondary is False
+    try:
+        second_lock, second_secondary = main._acquire_primary_instance_lock(runtime_root)
+        assert second_lock is None
+        assert second_secondary is True
+    finally:
+        first_lock.unlock()
+
+
+def test_secondary_instance_uses_fts_without_chroma_repo() -> None:
+    result = _run_python(
+        """
+        from src.main import setup_logging, build_services
+
+        setup_logging()
+        services = build_services(test_mode=True, secondary_instance=True)
+        engine = services.get("knowledge_engine")
+        assert engine.backend_name == "sqlite_fts"
+        assert "chroma_repo" not in services._singletons
+        services.shutdown()
+        print("secondary fts fallback smoke ok")
+        """
+    )
+    assert "secondary fts fallback smoke ok" in result.stdout
 
 
 def test_ollama_reachability_negative_result_is_fast_and_cached() -> None:
@@ -566,6 +646,11 @@ def test_split_widget_followup_buttons() -> None:
         widget._adjust_height(180)
         assert widget.minimumHeight() == 224
         assert widget.maximumHeight() == 224
+        widget._mode = SplitMode.ANNOTATION
+        widget._update_mode_ui()
+        assert widget._collapse_btn.text() == "折叠"
+        assert widget._collapse_btn.toolTip() == "折叠批注 (Esc)"
+        assert widget._collapse_btn.accessibleName() == "折叠批注"
         widget._mode = SplitMode.TRANSLATION
         widget._update_mode_ui()
         widget.apply_theme("light")

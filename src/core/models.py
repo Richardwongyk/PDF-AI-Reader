@@ -30,6 +30,7 @@ class SplitMode(str, Enum):
     QUESTION = "question"          # 提问模式：显示输入框 + 结果区
     TRANSLATION = "translation"    # 翻译模式：仅显示结果区（译文）
     EXPLANATION = "explanation"    # 解释模式：自动发送解释请求
+    ANNOTATION = "annotation"      # 批注模式：显示可编辑备注
 
 
 class SplitState(str, Enum):
@@ -159,8 +160,8 @@ class ModelConfig(BaseModel):
     cloud_translation: str = "deepseek/deepseek-v4-flash" # 翻译与轻量任务模型
     cloud_reasoning: str = "deepseek/deepseek-v4-pro" # 全文问答、结构抽取与图谱模型
     embed_local: str = "bge-m3"          # 可选本地嵌入模型；不可用时使用轻量哈希嵌入
-    formula_ocr_backend: str = "pix2text-mfr"  # pix2text-mfr / paddle_formula / unimernet
-    formula_ocr_model: str = "PP-FormulaNet_plus-S"  # Paddle: PP-FormulaNet_plus-S/M/L or UniMERNet
+    formula_ocr_backend: str = "pix2text-mfr"  # legacy image-formula cache/OCR fallback
+    formula_ocr_model: str = ""                # legacy config field; third-party tool models are not used
     ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
 
 
@@ -186,7 +187,7 @@ class RoutingConfig(BaseModel):
 class UIConfig(BaseModel):
     """UI 配置。"""
     language: str = "zh_CN"              # 界面语言
-    theme: str = "light"                 # light / dark / sepia
+    theme: str = "dark"                  # light / dark / sepia
     split_position: str = "below"        # below / right（裂缝默认位置）
     font_size: int = 12                  # 阅读区字体大小
     line_spacing: float = 1.5            # 行距

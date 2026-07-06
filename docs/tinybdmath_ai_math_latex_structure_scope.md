@@ -1,6 +1,6 @@
 # TinyBDMath AI/Math LaTeX 结构范围初稿
 
-最后更新：2026-06-02
+最后更新：2026-07-05
 
 本文限定第一阶段目标：读懂数学/AI 领域 born-digital PDF 论文中的数学排版
 结构。第一阶段不做通用科学记号系统，不覆盖化学结构图、物理实验图示、
@@ -286,8 +286,11 @@ M2 或智能路由后处理：
 
 ## 6. 与当前代码的关系
 
-当前已提交 Graph Parser M1 和节点头/范围收口改动只能作为审计链路和历史对照，
-不代表上述结构已经全部完成。
+当前已提交 Graph Parser 结构监督链路和节点头/范围收口改动只能作为审计链路
+和历史对照，不代表上述结构已经全部完成。2026-07-05 当前工作树另有用户确认
+保留的未提交 Graph Parser M5 改动：whole-formula graph context、结构化关系
+冲突筛选、默认批量 torch eval 和 fast decode 可跳过 layout verifier。
+M5 仍是 candidate-only 实验路径，不改变 accepted gate。
 
 重要边界：
 
@@ -304,6 +307,10 @@ M2 或智能路由后处理：
   `TARGET_ENCLOSURE_EVIDENCE`、`TARGET_EQUATION_TAG_EVIDENCE` 等中性 role。
 - decoder 不得从 node label 直接合成分数、根号、矩阵等结构。
 - relation/group/parser 输出必须承担结构恢复责任，verifier 负责拒绝低置信。
+- `decode_latex_candidate(..., verify_layout=False)` 仅用于快速评估和模型迭代；
+  任何质量结论、r2a 默认 artifact 决策或 accepted gate 讨论都必须跑 full verifier。
+- whole-formula graph context 是模型特征，不是后处理规则。它可以帮助关系头判断
+  候选边在整式图中的相对位置和密度，但不能引入公式内容枚举。
 
 ## 7. 第一阶段验证实验
 
@@ -374,6 +381,18 @@ PDF-to-CSLT alignment、PDF glyph evidence 和显式 route metadata：
 - 新增 `tests/test_tinybdmath_no_hardcoded_patterns.py`：扫描 TinyBDMath 主线
   和相关测试，并用 synthetic 反例确认可拦截宏注入、正则解析、LaTeX 命令
   分支和样本术语硬编码。
+
+2026-07-05 当前验证补充：
+
+- 新增批注/TOC/运行时检查：27 passed。
+- 合并回归 + M5 定向组合：94 passed。
+- 轻量接手测试：95 passed。
+- M5 定向测试：
+  `tests/test_tinybdmath_graph_parser.py tests/test_tinybdmath_eval_decoded_latex.py -q`
+  为 32 passed。
+- TinyBDMath 主线测试组合为 159 passed。
+- 下一步结构实验报告必须同时列 fast decode 与 `--full-verifier` 指标，防止
+  未跑 layout verifier 的 M5 快速路径掩盖 bbox/layout blocker。
 
 ## 8. 路由字段初稿
 
