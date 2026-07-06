@@ -18,7 +18,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QKeyEvent, QMouseEvent
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -534,52 +534,116 @@ class SplitWidget(QFrame):
     # ── 模式样式 ──
 
     def _apply_translation_style(self) -> None:
-        """应用翻译/解释模式的样式。"""
-        bg = "#f0f5ff" if self._current_theme == "light" else "#1a1a2e"
+        """应用翻译/解释模式样式。
+
+        米黄 → 琥珀底，浅灰 → 浅灰底，黑白 → 深灰底。
+        """
+        if self._current_theme == "dark":
+            bg, accent, accent_hover, text_color = "#d8d8d8", "#5b9bd5", "#4a8ac4", "#2a2a2a"
+        elif self._current_theme == "sepia":
+            bg, accent, accent_hover, text_color = "#3a3a3a", "#999999", "#888888", "#e8e8e8"
+        else:
+            bg, accent, accent_hover, text_color = "#fef8ee", "#d4902a", "#b87a20", "#191928"
+
+        # 清除可能残留的旧花纹 palette
+        self.setAutoFillBackground(False)
+        self.setPalette(QApplication.instance().palette())
+        # 翻译框撑满页面宽度
+        main_layout = self.layout()
+        if main_layout is not None:
+            main_layout.setContentsMargins(0, 0, 0, 0)
+
         self.setStyleSheet(f"""
             QFrame#split_container {{
                 background: {bg};
                 border: none;
-                margin: 0px;
-                padding: 0px;
+                border-radius: 10px;
+                margin: 2px 0px;
+                padding: 4px 6px;
+                color: {text_color};
             }}
             QPushButton#action_button {{
-                background: {self._BLUE};
+                background: {accent};
                 color: #fff;
                 border: none;
-                border-radius: 6px;
+                border-radius: 7px;
                 padding: 6px 14px;
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: 600;
             }}
             QPushButton#action_button:hover {{
-                background: {self._BLUE_DARK};
+                background: {accent_hover};
             }}
         """)
 
+    @staticmethod
+    def _make_pattern(size: int, bg_hex: str, color_main: QColor, color_alt: QColor) -> QPixmap:
+        """生成带底色平铺几何花纹 QPixmap。
+
+        Args:
+            size: 图案单元边长（像素）。
+            bg_hex: 底色（如 '#fef8ee'）。
+            color_main: 主花纹颜色（菱形线条）。
+            color_alt: 辅助色（网点）。
+        """
+        pm = QPixmap(size, size)
+        pm.fill(QColor(bg_hex))
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        half = size // 2
+
+        pen = QPen(color_main)
+        pen.setWidthF(0.8)
+        painter.setPen(pen)
+        painter.drawLine(half, 0, size, half)
+        painter.drawLine(size, half, half, size)
+        painter.drawLine(half, size, 0, half)
+        painter.drawLine(0, half, half, 0)
+
+        pen2 = QPen(color_alt)
+        pen2.setWidthF(1.5)
+        painter.setPen(pen2)
+        painter.drawPoint(half, half)
+
+        pen3 = QPen(QColor(color_alt.red(), color_alt.green(), color_alt.blue(), color_alt.alpha() * 2))
+        pen3.setWidthF(0.8)
+        painter.setPen(pen3)
+        painter.drawPoint(2, 2)
+        painter.drawPoint(size - 3, 2)
+        painter.drawPoint(2, size - 3)
+        painter.drawPoint(size - 3, size - 3)
+
+        painter.end()
+        return pm
+
     def _update_mode_ui(self) -> None:
+        """根据当前模式和主题更新 UI 可见性和 QSS 样式。"""
         if self._mode == SplitMode.TRANSLATION:
             self._header_label.setVisible(False)
             self._context_label.setVisible(False)
             self._input_widget.setVisible(False)
             self._followup_widget.setVisible(False)
             self._action_widget.setVisible(True)
-            self._regen_btn.setText("⟳ 重新翻译")
+            self._regen_btn.setText("\u27f3 重新翻译")
             self._apply_translation_style()
         elif self._mode == SplitMode.EXPLANATION:
             self._apply_translation_style()
             self._header_label.setVisible(True)
-            self._header_label.setText("✏️ 解释")
+            self._header_label.setText("\u270f\ufe0f 解释")
             self._context_label.setVisible(True)
             self._input_widget.setVisible(True)
             self._action_widget.setVisible(True)
             self._followup_widget.setVisible(False)
             self._input_area.setPlaceholderText("请解释此概念的含义...")
         else:
-            from src.ui.theme import SPLIT_WIDGET_STYLE
-            self.setStyleSheet(SPLIT_WIDGET_STYLE)
+            # 问答模式：恢复全宽，取消翻译框缩进
+            main_layout = self.layout()
+            if main_layout is not None:
+                main_layout.setContentsMargins(0, 0, 0, 0)
+            from src.ui.theme import get_split_style
+            self.setStyleSheet(get_split_style(self._current_theme))
             self._header_label.setVisible(True)
-            self._header_label.setText("🔍 提问")
+            self._header_label.setText("\U0001f50d 提问")
             self._context_label.setVisible(True)
             self._input_widget.setVisible(True)
             self._action_widget.setVisible(True)

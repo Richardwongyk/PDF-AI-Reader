@@ -191,6 +191,8 @@ class UIConfig(BaseModel):
     font_size: int = 12                  # 阅读区字体大小
     line_spacing: float = 1.5            # 行距
     show_word_translation: bool = False  # 是否开启取词翻译
+    last_document: str = ""              # 上次打开的 PDF 路径
+    last_page: int = 0                   # 上次阅读的页码（0-based）
 
 
 class AppConfig(BaseModel):

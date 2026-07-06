@@ -434,6 +434,9 @@ def main() -> int:
             if not pdf_path.exists():
                 raise FileNotFoundError(f"PDF not found: {pdf_path}")
             QTimer.singleShot(0, lambda path=str(pdf_path): window._open_pdf_file(path))
+        else:
+            # 无命令行参数时自动恢复上次阅读的文档和位置
+            QTimer.singleShot(200, window._restore_last_session)
         total = __import__('time').perf_counter() - t_start
         logging.info("主窗口已显示。总启动时间: %.2fs", total)
 
