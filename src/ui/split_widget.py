@@ -18,11 +18,10 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -196,7 +195,7 @@ class SplitWidget(QFrame):
     question_submitted = Signal(str, str)
     translation_requested = Signal(str)
     translation_refresh_requested = Signal(str)
-    annotation_saved = Signal(str)
+    annotation_saved = Signal(str, str)
     close_requested = Signal(str)
     height_changed = Signal(int)  # 当 setFixedHeight 改变高度时发射
 
@@ -217,9 +216,11 @@ class SplitWidget(QFrame):
         position: str = "below",
         block_pixel_height: int = 200,
         page_width: int = 0,
+        split_id: str | None = None,
     ) -> None:
         super().__init__()
         self._block = block
+        self._split_id = split_id or block.id
         self._mode = mode
         self._position = position
         self._state = SplitState.HIDDEN
@@ -231,6 +232,8 @@ class SplitWidget(QFrame):
             self._MIN_HEIGHT,
             int(block_pixel_height * 0.7),
         )
+        if mode == SplitMode.ANNOTATION:
+            self._saved_height = max(self._saved_height, 240)
         self._block_pixel_height: int = block_pixel_height
         self._page_width: int = page_width
         self._user_resized: bool = False
@@ -249,7 +252,9 @@ class SplitWidget(QFrame):
     # ── 属性 ──
 
     @property
-    def block_id(self) -> str: return self._block.id
+    def block_id(self) -> str: return self._split_id
+    @property
+    def source_block_id(self) -> str: return self._block.id
     @property
     def state(self) -> SplitState: return self._state
     @property
@@ -269,7 +274,7 @@ class SplitWidget(QFrame):
         self._collapsed = False
         self._user_resized = False
         self._animate_expand()
-        if self._mode == SplitMode.QUESTION:
+        if self._mode in (SplitMode.QUESTION, SplitMode.ANNOTATION):
             self._input_area.setFocus()
 
     def close(self) -> None:
@@ -363,6 +368,11 @@ class SplitWidget(QFrame):
             self._update_webview(is_finished=True)
         self.set_busy(False)
 
+    def set_annotation_text(self, note: str) -> None:
+        self._current_answer = note or ""
+        self._cached_result = self._current_answer
+        self._input_area.setPlainText(self._current_answer)
+
     def show_followup_questions(self, questions: list[str]) -> None:
         while self._followup_layout.count():
             item = self._followup_layout.takeAt(0)
@@ -425,11 +435,13 @@ class SplitWidget(QFrame):
         self._header_label.setObjectName("header_title")
         header_layout.addWidget(self._header_label)
         header_layout.addStretch()
-        collapse_btn = QPushButton("∧")
-        collapse_btn.setObjectName("close_button")
+        collapse_btn = QPushButton("折叠")
+        collapse_btn.setObjectName("collapse_button")
         collapse_btn.setToolTip("折叠 (Esc)")
+        collapse_btn.setAccessibleName("折叠")
         collapse_btn.clicked.connect(self.collapse)
         header_layout.addWidget(collapse_btn)
+        self._collapse_btn = collapse_btn
         body_layout.addWidget(header_widget)
 
         # 上下文
@@ -455,6 +467,7 @@ class SplitWidget(QFrame):
         send_btn.setObjectName("send_button")
         send_btn.clicked.connect(self._on_send)
         send_layout.addWidget(send_btn)
+        self._send_btn = send_btn
         input_layout.addLayout(send_layout)
         body_layout.addWidget(self._input_widget)
 
@@ -513,6 +526,7 @@ class SplitWidget(QFrame):
         copy_btn.setObjectName("action_button")
         copy_btn.clicked.connect(self._on_copy)
         action_layout.addWidget(copy_btn)
+        self._copy_btn = copy_btn
         self._regen_btn = QPushButton("⟳ 重新翻译")
         self._regen_btn.setObjectName("action_button")
         self._regen_btn.clicked.connect(self._on_regenerate)
@@ -521,6 +535,7 @@ class SplitWidget(QFrame):
         clear_btn.setObjectName("action_button")
         clear_btn.clicked.connect(self._on_clear_close)
         action_layout.addWidget(clear_btn)
+        self._clear_btn = clear_btn
         body_layout.addWidget(self._action_widget)
         body_layout.addStretch()
 
@@ -536,113 +551,149 @@ class SplitWidget(QFrame):
     # ── 模式样式 ──
 
     def _apply_translation_style(self) -> None:
-        """应用翻译/解释模式样式。
-
-        米黄 → 琥珀底，浅灰 → 浅灰底，黑白 → 深灰底。
-        """
-        if self._current_theme == "dark":
-            bg, accent, accent_hover, text_color = "#d8d8d8", "#5b9bd5", "#4a8ac4", "#2a2a2a"
-        elif self._current_theme == "sepia":
-            bg, accent, accent_hover, text_color = "#3a3a3a", "#999999", "#888888", "#e8e8e8"
-        else:
-            bg, accent, accent_hover, text_color = "#fef8ee", "#d4902a", "#b87a20", "#191928"
-
-        # 翻译框撑满页面宽度
-        main_layout = self.layout()
-        if main_layout is not None:
-            main_layout.setContentsMargins(0, 0, 0, 0)
-
+        """应用翻译/解释模式的样式。"""
+        bg = "#f0f5ff"
         self.setStyleSheet(f"""
             QFrame#split_container {{
                 background: {bg};
                 border: none;
-                border-radius: 10px;
-                margin: 2px 0px;
-                padding: 4px 6px;
-                color: {text_color};
+                margin: 0px;
+                padding: 0px;
             }}
             QPushButton#action_button {{
-                background: {accent};
+                background: {self._BLUE};
                 color: #fff;
                 border: none;
-                border-radius: 7px;
+                border-radius: 6px;
                 padding: 6px 14px;
                 font-size: 12px;
-                font-weight: 600;
+                font-weight: bold;
             }}
             QPushButton#action_button:hover {{
-                background: {accent_hover};
+                background: {self._BLUE_DARK};
+            }}
+            QPushButton#collapse_button {{
+                background: transparent;
+                color: {self._BLUE_DARK};
+                border: 1px solid {self._BLUE};
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton#collapse_button:hover {{
+                background: {self._BLUE_LIGHT};
             }}
         """)
 
-    @staticmethod
-    def _make_pattern(size: int, bg_hex: str, color_main: QColor, color_alt: QColor) -> QPixmap:
-        """生成带底色平铺几何花纹 QPixmap。
-
-        Args:
-            size: 图案单元边长（像素）。
-            bg_hex: 底色（如 '#fef8ee'）。
-            color_main: 主花纹颜色（菱形线条）。
-            color_alt: 辅助色（网点）。
-        """
-        pm = QPixmap(size, size)
-        pm.fill(QColor(bg_hex))
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        half = size // 2
-
-        pen = QPen(color_main)
-        pen.setWidthF(0.8)
-        painter.setPen(pen)
-        painter.drawLine(half, 0, size, half)
-        painter.drawLine(size, half, half, size)
-        painter.drawLine(half, size, 0, half)
-        painter.drawLine(0, half, half, 0)
-
-        pen2 = QPen(color_alt)
-        pen2.setWidthF(1.5)
-        painter.setPen(pen2)
-        painter.drawPoint(half, half)
-
-        pen3 = QPen(QColor(color_alt.red(), color_alt.green(), color_alt.blue(), color_alt.alpha() * 2))
-        pen3.setWidthF(0.8)
-        painter.setPen(pen3)
-        painter.drawPoint(2, 2)
-        painter.drawPoint(size - 3, 2)
-        painter.drawPoint(2, size - 3)
-        painter.drawPoint(size - 3, size - 3)
-
-        painter.end()
-        return pm
+    def _apply_annotation_style(self) -> None:
+        bg = "#fff8e6"
+        border = "#f2c94c"
+        text = "#2f2a1c"
+        self.setStyleSheet(f"""
+            QFrame#split_container {{
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                margin: 2px 0px;
+                padding: 6px 8px;
+                color: {text};
+            }}
+            QLabel#header_title {{
+                font-size: 13px;
+                font-weight: bold;
+                color: {text};
+                padding: 4px 0px;
+            }}
+            QLabel#context_label {{
+                font-size: 11px;
+                color: {text};
+                padding: 2px 0px 6px 0px;
+            }}
+            QTextEdit#input_area {{
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 8px;
+                background: rgba(255, 255, 255, 0.78);
+                color: #1f2937;
+                font-size: 13px;
+                min-height: 96px;
+                max-height: 260px;
+            }}
+            QPushButton#send_button,
+            QPushButton#action_button {{
+                background: #f2c94c;
+                color: #1f2937;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton#send_button:hover,
+            QPushButton#action_button:hover {{
+                background: #e0b83f;
+            }}
+            QPushButton#collapse_button {{
+                background: rgba(242, 201, 76, 0.18);
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton#collapse_button:hover {{
+                background: #f2c94c;
+                color: #1f2937;
+            }}
+        """)
 
     def _update_mode_ui(self) -> None:
-        """根据当前模式和主题更新 UI 可见性和 QSS 样式。"""
+        if self._result_view is not None:
+            self._result_view.setVisible(self._mode != SplitMode.ANNOTATION)
+        self._copy_btn.setVisible(True)
+        self._regen_btn.setVisible(True)
+        self._send_btn.setText("发送")
+        self._collapse_btn.setText("折叠")
+        self._collapse_btn.setToolTip("折叠 (Esc)")
+        self._collapse_btn.setAccessibleName("折叠")
         if self._mode == SplitMode.TRANSLATION:
             self._header_label.setVisible(False)
             self._context_label.setVisible(False)
             self._input_widget.setVisible(False)
             self._followup_widget.setVisible(False)
             self._action_widget.setVisible(True)
-            self._regen_btn.setText("\u27f3 重新翻译")
+            self._regen_btn.setText("⟳ 重新翻译")
             self._apply_translation_style()
-        elif self._mode == SplitMode.EXPLANATION:
-            self._apply_translation_style()
+        elif self._mode == SplitMode.ANNOTATION:
+            self._apply_annotation_style()
             self._header_label.setVisible(True)
-            self._header_label.setText("\u270f\ufe0f 解释")
+            self._header_label.setText("批注")
             self._context_label.setVisible(True)
             self._input_widget.setVisible(True)
             self._action_widget.setVisible(True)
             self._followup_widget.setVisible(False)
-            self._input_area.setPlaceholderText("请解释此概念的含义...")
-        else:
-            # 问答模式：恢复全宽，取消翻译框缩进
-            main_layout = self.layout()
-            if main_layout is not None:
-                main_layout.setContentsMargins(0, 0, 0, 0)
-            from src.ui.theme import get_split_style
-            self.setStyleSheet(get_split_style(self._current_theme))
+            self._frozen_label.setVisible(False)
+            self._regen_btn.setVisible(False)
+            self._send_btn.setText("保存批注")
+            self._collapse_btn.setToolTip("折叠批注 (Esc)")
+            self._collapse_btn.setAccessibleName("折叠批注")
+            self._input_area.setPlaceholderText("在此输入批注或备注...")
+        elif self._mode == SplitMode.EXPLANATION:
+            self._apply_translation_style()
             self._header_label.setVisible(True)
-            self._header_label.setText("\U0001f50d 提问")
+            self._header_label.setText("✏️ 解释")
+            self._context_label.setVisible(True)
+            self._input_widget.setVisible(True)
+            self._action_widget.setVisible(True)
+            self._followup_widget.setVisible(False)
+            self._input_area.setPlaceholderText("请输入需要补充说明的内容...")
+        else:
+            from src.ui.theme import SPLIT_WIDGET_STYLE
+            self.setStyleSheet(SPLIT_WIDGET_STYLE)
+            self._header_label.setVisible(True)
+            self._header_label.setText("🔍 提问")
             self._context_label.setVisible(True)
             self._input_widget.setVisible(True)
             self._action_widget.setVisible(True)
@@ -657,10 +708,11 @@ class SplitWidget(QFrame):
         """将主题应用到 SplitWidget QSS 和 WebView HTML 内容。"""
         self._current_theme = theme
         self._update_mode_ui()
+        html_theme = "light"
         if self._page_ready and self._result_view is not None:
-            self._result_view.page().runJavaScript(f"setTheme('{theme}');")
+            self._result_view.page().runJavaScript(f"setTheme('{html_theme}');")
         else:
-            self._pending_theme = theme
+            self._pending_theme = html_theme
 
     # ── WebView 截图冻结 ──
 
@@ -761,7 +813,7 @@ class SplitWidget(QFrame):
         safe_text = json.dumps(self._current_answer)
         js_bool = "true" if is_finished else "false"
         js_code = f"updateContent({safe_text}, {js_bool});"
-        if self._page_ready:
+        if self._page_ready and self._result_view is not None:
             self._result_view.page().runJavaScript(js_code)
         else:
             self._pending_js = js_code
@@ -778,7 +830,7 @@ class SplitWidget(QFrame):
         visible = [w for w in [
             self._header_label, self._context_label, self._input_widget,
             self._result_view, self._followup_widget, self._action_widget,
-        ] if w.isVisible()]
+        ] if w is not None and w.isVisible()]
         h += self._body_layout.spacing() * max(0, len(visible) - 1)
         for w in visible:
             if w is not self._result_view:
@@ -845,13 +897,19 @@ class SplitWidget(QFrame):
 
     def _on_send(self) -> None:
         question = self._input_area.toPlainText().strip()
+        if self._mode == SplitMode.ANNOTATION:
+            self._current_answer = question
+            self._cached_result = question
+            self.annotation_saved.emit(question, self._split_id)
+            self.set_busy(False)
+            return
         if not question:
             return
         self.set_busy(True)
         self._chat_history.append({"role": "user", "content": question})
         if len(self._chat_history) > self._MAX_HISTORY_ROUNDS * 2:
             self._chat_history = self._chat_history[-(self._MAX_HISTORY_ROUNDS * 2):]
-        self.question_submitted.emit(question, self._block.id)
+        self.question_submitted.emit(question, self._split_id)
         self._input_area.clear()
 
     def _on_followup_click(self, question: str) -> None:
@@ -860,7 +918,10 @@ class SplitWidget(QFrame):
 
     def _on_copy(self) -> None:
         from PySide6.QtWidgets import QApplication
-        QApplication.clipboard().setText(self._current_answer)
+        if self._mode == SplitMode.ANNOTATION:
+            QApplication.clipboard().setText(self._input_area.toPlainText())
+        else:
+            QApplication.clipboard().setText(self._current_answer)
 
     def _on_clear_close(self) -> None:
         """清除翻译并关闭裂缝，释放资源。"""
@@ -868,7 +929,7 @@ class SplitWidget(QFrame):
         self._cached_result = ""
         self._current_answer = ""
         self._chat_history.clear()
-        self.close_requested.emit(self._block.id)
+        self.close_requested.emit(self._split_id)
 
     def _on_regenerate(self) -> None:
         if self._collapsed:

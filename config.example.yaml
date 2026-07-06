@@ -26,7 +26,7 @@ routing:
   auto_upgrade_threshold: 2000
 ui:
   language: zh_CN
-  # 当前界面默认使用黑色背景；设置窗口暂不提供主题切换入口。
+  # dark 为默认黑底阅读风格；可切换 dark / sepia / light_gray / black_white。
   theme: dark
   split_position: below
   font_size: 12

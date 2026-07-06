@@ -30,6 +30,10 @@
   持久化目录。
 - 详细日志默认只写入 UTF-8 文件日志；终端默认不输出 INFO 级日志，避免 Windows/Conda 启动链路出现中文
   mojibake。需要实时控制台日志时设置 `PDF_AI_READER_CONSOLE_LOG=1`。
+- 主题系统以当前深色黑底为默认兼容契约；新增主题为 `sepia` 米黄、`light_gray` 浅灰、`black_white` 黑白。
+  旧 `light` 配置值会规范化为 `light_gray`，但不再作为菜单/设置选项展示。翻译裂缝和批注裂缝保持原蓝色/护眼色。
+- 阅读会话恢复由 `MainWindow` 写入本地 `data/reader_session.json`：保存 PDF 路径、文档 hash、页号、页内偏移和横向滚动。
+  普通启动且没有 `--open` 参数时自动尝试恢复；文件缺失或 hash 改变时跳过位置恢复。
 - 批注写入改为 `src/data/annotation_store.py` 负责：使用 `QLockFile` 锁住 `data/annotations.json.lock`，
   单条 block patch 合并最新文件内容后再 `os.replace` 原子替换。实时跨窗口推送暂不实现；关闭重开后可读取最新批注。
 - 2026-07-05 大文档稳定性补充：导入时 `_FormulaImportPlanThread` 支持 `page_scan_pages` 限定自动页级公式扫描范围；
@@ -442,7 +446,7 @@ class RoutingConfig(BaseModel):
 
 class UIConfig(BaseModel):
     language: str = "zh_CN"
-    theme: str = "dark"                     # light / dark / sepia
+    theme: str = "dark"                     # dark / sepia / light_gray / black_white
     split_position: str = "below"
     font_size: int = 12
     line_spacing: float = 1.5
@@ -1142,8 +1146,13 @@ class SplitWidget(QFrame):
 # 当前默认黑色背景（config.yaml: ui.theme=dark）:
 apply_theme("dark")
 
-# 代码层仍保留 light/dark/sepia 三套 QPalette；
-# 设置窗口当前不提供主题切换入口，避免未验证的全窗口对比度回归。
+# dark / sepia / light_gray / black_white 四套 QPalette 均通过 QApplication.setPalette() 应用；
+# 菜单栏“主题”和设置窗口主题下拉框均可切换主题，主题修改可独立于云端 API Key 保存。
+# 深色主题 Window/Base 背景色作为兼容契约由测试锁定；
+# sepia 使用远程米黄色板，light_gray 使用远程浅灰色板，black_white 使用远程黑白色板；
+# 旧 light 配置值只做兼容映射到 light_gray，不再作为 UI 选项展示；
+# 设置对话框使用局部 QSS，覆盖下拉框、输入框、按钮和下拉列表；
+# 翻译裂缝和批注裂缝保持原蓝色/护眼色，不随新增主题生成新色系。
 
 # SplitWidget 专用 QSS (SPLIT_WIDGET_STYLE):
 # - 蓝紫渐变背景 (qlineargradient)
@@ -1331,7 +1340,7 @@ routing:
 
 ui:
   language: zh_CN
-  theme: dark            # 默认黑色背景；设置窗口暂不提供主题切换入口
+  theme: dark            # 默认黑色背景；可切换 dark / sepia / light_gray / black_white
   split_position: below
   font_size: 12
   line_spacing: 1.5
@@ -1389,7 +1398,8 @@ ollama pull bge-m3
 | 书签管理 | ✅ 已实现 | 手动添加 + AI 建议 |
 | 混合路由 | ✅ 已实现 | 本地/云端/回退三级策略 |
 | 配置管理 | ✅ 已实现 | YAML + 热加载 + .env |
-| 主题系统 | 🟡 默认黑底 | QPalette 能力保留；设置窗口暂不开放主题切换 |
+| 主题系统 | ✅ 已实现 | 默认深色；菜单栏和设置中可切换 dark/sepia/light_gray/black_white；深色背景契约和四主题对比度有测试覆盖 |
+| 上次阅读恢复 | ✅ 已实现 | 本地 `data/reader_session.json` 保存路径、hash、页号和页内偏移；普通启动自动恢复，显式 `--open` 不覆盖 |
 | 侧栏控制 | ✅ 已实现 | 菜单栏同层左右角按钮隐藏/显示；左右 dock 均可弹出/归位且不可关闭 |
 | 顶部工具栏折叠 | 🟡 基础已实现 | 工具栏空白区和恢复细条可双击折叠/恢复；菜单栏文字双击折叠未可靠实现，暂不继续 |
 | 文档标签页 | ⏳ 暂不实现 | 已讨论但当前不做多文档标签/标签关闭当前文档 |
@@ -1397,7 +1407,7 @@ ollama pull bge-m3
 | 扫描版 OCR | ⏳ 未实现 | 预留接口 |
 | 图表理解 | ⏳ 未实现 | 预留接口 |
 | 笔记系统 | ⏳ 未实现 | 数据模型已定义 |
-| 设置对话框（完整） | ⏳ 简化版 | 仅云端 API 配置可用 |
+| 设置对话框（完整） | 🟡 简化版 | 云端 API 与主题切换可用；米黄/浅灰/黑白下设置框局部控件样式已适配；完整偏好设置中心待补 |
 | AI 工具集侧边栏 | ✅ 已实现基础入口 | 全文问答输入、证据树、回答 WebView、追问建议、证据跳转 |
 | 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5、审核 UI 已接线；最终质量未达标 |
 | 公式审核与写回 | 🟡 进行中 | manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回已接线；批量审核待补 |

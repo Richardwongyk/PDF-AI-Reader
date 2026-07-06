@@ -1528,6 +1528,7 @@ class PdfViewer(QScrollArea):
             position="below",
             block_pixel_height=max(block_pixel_height, 60),
             page_width=page_display_w,
+            split_id=split_id,
         )
         self._align_split_content_to_block(split, block, page_num)
         split.question_submitted.connect(lambda q, _sid, bid=block.id: self._on_split_q(q, bid))
@@ -1833,6 +1834,72 @@ class PdfViewer(QScrollArea):
         self._update_visible_pages()
         _logger.info("PdfViewer: scroll_to_page p%d → y=%d (max=%d)",
                      page_num, y, self.verticalScrollBar().maximum())
+
+    def current_reading_position(self) -> dict[str, object] | None:
+        """Return a stable page-relative viewport position for session restore."""
+        if self._vlayout is None or not self._page_metas:
+            return None
+        self._sync_scroll_range(max(self.viewport().height(), 1))
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        scroll_y = max(0, int(vbar.value()))
+        page_num = self._vlayout.page_at_y(float(scroll_y))
+        if page_num is None:
+            page_num = min(self._page_metas)
+            page_offset = 0.0
+            page_height = max(float(self._vlayout.page_height(page_num)), 1.0)
+        else:
+            page_y = float(self._vlayout.page_y(page_num))
+            page_height = max(float(self._vlayout.page_height(page_num)), 1.0)
+            page_offset = min(max(0.0, float(scroll_y) - page_y), page_height)
+        return {
+            "page_num": int(page_num),
+            "page_offset": page_offset,
+            "page_offset_ratio": page_offset / page_height,
+            "scroll_y": scroll_y,
+            "h_scroll": int(hbar.value()) if hbar is not None and _isValid(hbar) else 0,
+            "zoom": float(self._zoom_multiplier),
+        }
+
+    def restore_reading_position(self, position: dict[str, object]) -> bool:
+        """Restore a previously saved page-relative viewport position."""
+        if self._vlayout is None or not self._page_metas:
+            return False
+        try:
+            page_num = int(position.get("page_num", 0) or 0)
+            h_scroll = int(position.get("h_scroll", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+
+        min_page = min(self._page_metas)
+        max_page = max(self._page_metas)
+        page_num = max(min_page, min(max_page, page_num))
+        page_height = max(float(self._vlayout.page_height(page_num)), 1.0)
+        try:
+            if "page_offset_ratio" in position:
+                ratio = float(position.get("page_offset_ratio", 0.0) or 0.0)
+                page_offset = max(0.0, min(1.0, ratio)) * page_height
+            else:
+                page_offset = float(position.get("page_offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            page_offset = 0.0
+        page_offset = min(max(0.0, page_offset), page_height)
+
+        self._request_page_blocks_around(page_num)
+        self._sync_scroll_range(max(self.viewport().height(), 1))
+        target_y = int(float(self._vlayout.page_y(page_num)) + page_offset)
+        vbar = self.verticalScrollBar()
+        self._scroll_history.clear()
+        vbar.setValue(max(0, min(target_y, vbar.maximum())))
+        hbar = self.horizontalScrollBar()
+        if hbar is not None and _isValid(hbar):
+            hbar.setValue(max(0, min(h_scroll, hbar.maximum())))
+        if page_num not in self._split_pages:
+            container = self._ensure_page_widget(page_num)
+            if container is not None:
+                self._render_page(page_num)
+        self._update_visible_pages()
+        return True
 
     def scroll_to_bbox(
         self,
