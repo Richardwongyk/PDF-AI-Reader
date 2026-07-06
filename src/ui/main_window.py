@@ -54,7 +54,6 @@ from src.core.model_providers import display_model_name, normalize_litellm_model
 from src.core.navigator import Navigator
 from src.core.service_container import ServiceContainer
 from src.data.annotation_store import read_annotation_store, save_annotation_patch
-from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget, WebViewPool
 from src.ui.theme import apply_theme, normalize_theme_name
@@ -295,14 +294,6 @@ class MainWindow(QMainWindow):
         build_kb_action = QAction("构建/重建知识库(&B)", self)
         build_kb_action.triggered.connect(self._on_build_knowledge_base)
         tools_menu.addAction(build_kb_action)
-        high_precision_formula_action = QAction("高精度扫描当前公式(&F)", self)
-        high_precision_formula_action.setObjectName("high_precision_formula_action")
-        high_precision_formula_action.triggered.connect(self._on_high_precision_formula_scan)
-        tools_menu.addAction(high_precision_formula_action)
-        formula_review_action = QAction("公式候选审核(&R)", self)
-        formula_review_action.setObjectName("formula_acceptance_review_action")
-        formula_review_action.triggered.connect(self._on_open_formula_acceptance_review)
-        tools_menu.addAction(formula_review_action)
         tools_menu.addSeparator()
         glossary_action = QAction("术语表管理器(&G)", self)
         glossary_action.triggered.connect(self._on_open_glossary_editor)
@@ -422,13 +413,6 @@ class MainWindow(QMainWindow):
         self._page_jump_box.setMaximumWidth(80)
         self._page_jump_box.returnPressed.connect(self._on_page_jump_requested)
         toolbar.addWidget(self._page_jump_box)
-
-        toolbar.addSeparator()
-        formula_scan_action = QAction("公式精扫", self)
-        formula_scan_action.setObjectName("high_precision_formula_toolbar_action")
-        formula_scan_action.setToolTip("高精度扫描当前视口公式")
-        formula_scan_action.triggered.connect(self._on_high_precision_formula_scan)
-        toolbar.addAction(formula_scan_action)
 
         toolbar_spacer = QWidget()
         toolbar_spacer.setObjectName("toolbar_spacer")
@@ -2123,7 +2107,7 @@ class MainWindow(QMainWindow):
             if ov:
                 ov.update()
         self._status_model_label.setText(
-            f"知识库就绪 | 公式精扫完成 | {'QtPdf' if self._doc_engine.using_qtpdf else 'PyMuPDF'}"
+            f"知识库就绪 | 公式索引完成 | {'QtPdf' if self._doc_engine.using_qtpdf else 'PyMuPDF'}"
         )
         if changed_blocks:
             self._queue_knowledge_upsert(changed_blocks)
@@ -2224,51 +2208,6 @@ class MainWindow(QMainWindow):
                     self._start_import_page_scan_batch()
         if self._pending_formula_work_count() > 0:
             self._formula_idle_timer.start(8000)
-
-    def _on_high_precision_formula_scan(self) -> None:
-        """User-triggered high-precision formula scan for current viewport first."""
-        if not self._viewer_document_loaded or not self._current_doc_hash:
-            QMessageBox.information(self, "公式精扫", "请先打开一个 PDF 文件。")
-            return
-        pages = self._pdf_viewer.visible_pages(margin_pages=True)
-        plan = self._formula_index_scheduler.plan_for_pages(
-            self._current_blocks,
-            pages,
-            FormulaScanTrigger.HIGH_PRECISION,
-            self._doc_engine.page_count,
-        )
-        if not plan.blocks:
-            self._ai_doc_status.setText("公式索引\n当前没有待精扫公式")
-            return
-        filepath = getattr(self._doc_engine, "_filepath", "")
-        self._enqueue_formula_plan(filepath, plan, "high_precision")
-        self._ai_doc_status.setText(
-            f"公式精扫已启动\n本批 {min(len(plan.blocks), plan.batch_budget)} / 待扫 {len(plan.blocks)}"
-        )
-
-    def _on_open_formula_acceptance_review(self) -> None:
-        """Open the audited formula acceptance review dialog."""
-        if not self._viewer_document_loaded or not self._current_doc_hash:
-            QMessageBox.information(self, "公式审核", "请先打开一个 PDF 文件。")
-            return
-        from src.ui.formula_acceptance_dialog import FormulaAcceptanceDialog
-
-        filepath = getattr(self._doc_engine, "_filepath", "")
-        service = FormulaAcceptanceReviewService(self._formula_index_flow.store)
-        dlg = FormulaAcceptanceDialog(service, self._current_doc_hash, filepath, self)
-        dlg.evidence_location_requested.connect(self._on_formula_evidence_location_requested)
-        dlg.exec()
-        if self._formula_knowledge_update_service.pending_count(self._current_doc_hash) > 0:
-            self._formula_idle_timer.start(1000)
-
-    def _on_formula_evidence_location_requested(self, page_num: int, bbox: object) -> None:
-        try:
-            box = tuple(float(value) for value in bbox)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return
-        if len(box) != 4:
-            return
-        self._pdf_viewer.scroll_to_bbox(int(page_num), box)
 
     def _schedule_evidence_formula_scan(self, evidence: list[dict[str, Any]]) -> None:
         if not evidence or not self._current_doc_hash:
@@ -3468,7 +3407,18 @@ class MainWindow(QMainWindow):
 
     def _on_open_glossary_editor(self) -> None:
         """打开术语表管理器。"""
-        QMessageBox.information(self, "术语表管理器", "术语表编辑器将在后续版本实现。")
+        from src.ui.glossary_dialog import GlossaryDialog
+
+        dlg = GlossaryDialog(self._glossary_manager, self)
+        dlg.glossary_saved.connect(self._refresh_translation_glossary)
+        dlg.exec()
+
+    def _refresh_translation_glossary(self) -> None:
+        domains = ["math", "cs_ml", "physics", "imported", "user"]
+        self._ai_engine.translation_service.update_glossary(
+            self._glossary_manager.get_entries(domains)
+        )
+        self._status_model_label.setText("术语表已保存并刷新翻译服务")
 
     def _on_config_changed(self, config: AppConfig) -> None:
         """配置变更：重新应用主题。"""

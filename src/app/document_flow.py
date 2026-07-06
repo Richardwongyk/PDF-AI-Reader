@@ -106,7 +106,7 @@ class DocumentFlow(QObject):
 
         # 更新术语表
         self._ai_engine.translation_service.update_glossary(
-            self._glossary_manager.get_entries(["math", "cs_ml", "physics"])
+            self._glossary_manager.get_entries(["math", "cs_ml", "physics", "imported", "user"])
         )
 
         self.document_opened.emit(result)

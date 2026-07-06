@@ -373,7 +373,9 @@ def build_services(test_mode: bool = False, secondary_instance: bool = False) ->
 
         translation_service = TranslationService(
             router,
-            glossary_entries=glossary_manager.get_entries(["math", "cs_ml", "physics"]),
+            glossary_entries=glossary_manager.get_entries(
+                ["math", "cs_ml", "physics", "imported", "user"]
+            ),
         )
         qa_service = QAService(router)
         return AIEngine(router, translation_service, qa_service, config)

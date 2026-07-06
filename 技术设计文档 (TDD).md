@@ -42,7 +42,7 @@
 - 生成模型走可配置路由：LiteLLM 云端、Ollama 本地和 Mock 降级都必须明确标注，不能把云端伪装成本地。
 - 知识库由 `KnowledgeEngine` facade 统一管理，可选 SQLite FTS5、Chroma、LlamaIndex 编排等后端；无真实 embedding 时优先 FTS5 快速召回。
 - 公式解析采用 r0/r0.5/r1/r2/r2a/r3/r4/r5 多轮异步持久化流水线。born-digital PDF 默认不 OCR，低置信结果只做候选。
-- `FormulaAcceptanceReviewService`、命令行审核、基础审核 UI、manual revision、evidence JSON 预览、PDF page/bbox 定位、r5 知识库增量 upsert 和 accepted GraphRAG artifact 同步已接线。
+- `FormulaAcceptanceReviewService`、命令行门禁、manual revision、evidence JSON 预览、r5 知识库增量 upsert 和 accepted GraphRAG artifact 同步仍作为底层门禁能力保留；主窗口不再暴露人工公式复核入口。
 - 当前未完成项包括：最终高精度 LaTeX 还原、Napkin 大样本质量门禁、批量审核体验、r4/r5 语义路径证据和产品级 GraphRAG。
 - 2026-05-28 性能修复尝试引入/暴露 P0 渲染退化：极大缩放下大页面 tile-only 首帧无 fallback，
   快速滚动/跳页时可能显示黑底或空白。后续渲染设计必须采用旧整页 pixmap、低清整页 fallback
@@ -340,14 +340,14 @@ D:\程设大作业\
    - `Navigator.load_toc()` 或 `Navigator.generate_toc_from_blocks()` 加载目录；自动生成目录优先识别结构化标题模式（如“第X节”“一、”“1、”），再回退到 heading 块，并过滤乱码/公式碎片/空标题/重复项，低于可靠目录门槛时发出空目录清空左侧树
    - 立即可以滚动浏览（首屏懒加载渲染）
 
-**阶段二（后台精扫，不阻塞阅读）**：
+**阶段二（后台公式索引，不阻塞阅读）**：
 5. `_ParseThread` 继续在后台执行（在 `finished_parsing` 发射后）：
    - 调用 `Pix2TextMFDDetector.apply_to_blocks()` 仅对候选页面（含 LaTeX 命令的页面）跑 ONNX 模型
    - 发射 `formula_blocks_updated(updated: list[dict])` 信号
 6. 主线程接收 `formula_blocks_updated`：
    - 更新内存中 `DocumentBlock.block_type` 为 FORMULA
    - 刷新对应 `BlockOverlay` 样式
-   - 状态栏更新"公式精扫完成"
+   - 状态栏更新"公式索引完成"
 
 **知识库构建（独立异步）**：
 7. `MainWindow._on_document_loaded()` 中检查知识库：
@@ -619,7 +619,7 @@ class DocumentEngine(BaseService):
     - parse_finished(ParseResult)     文档解析完成
     - parse_progress(int, int)        解析进度 (当前页, 总页数)
     - parse_error(str)                解析错误
-    - formula_blocks_updated(list)    阶段二 MFD 公式精扫结果
+    - formula_blocks_updated(list)    阶段二后台公式索引结果
 
     属性:
     - is_open: bool                   是否有打开的文档
@@ -908,6 +908,8 @@ class GlossaryManager:
     - search_terms(keyword) → list[GlossaryEntry]       模糊搜索
     - resolve_conflict(en, preferred_domain) → str      多义消歧
     - get_entries(domains=None) → list[GlossaryEntry]   获取全部/指定领域术语
+    - read_glossary_file(filepath) → list[GlossaryEntry] 读取外部文件但不写入
+    - set_entries(domain, entries) → None               替换指定领域术语
     - save() → None                                     写回 JSON 文件
     - import_user_glossary(filepath) → int              导入外部文件
     - domains: list[str]                                已加载领域列表
@@ -1393,7 +1395,7 @@ ollama pull bge-m3
 | 翻译服务 | ✅ 已实现 | 公式保护 + 术语注入 + Few-shot |
 | 问答服务 | ✅ 已实现 | 知识库检索 + 多轮对话 |
 | 知识库构建 | ✅ 已实现 | KnowledgeEngine facade，可走 SQLite FTS5 / Chroma / 后续混合检索 |
-| 术语表管理 | ✅ 已实现 | 3 个内置学科包 + 导入功能 |
+| 术语表管理 | ✅ 已实现 | 3 个内置学科包 + 图形化编辑器 + JSON/CSV 导入 + 保存后刷新翻译服务 |
 | 目录导航 | ✅ 已实现 | 原生大纲 + 标题推断 |
 | 书签管理 | ✅ 已实现 | 手动添加 + AI 建议 |
 | 混合路由 | ✅ 已实现 | 本地/云端/回退三级策略 |
@@ -1409,8 +1411,8 @@ ollama pull bge-m3
 | 笔记系统 | ⏳ 未实现 | 数据模型已定义 |
 | 设置对话框（完整） | 🟡 简化版 | 云端 API 与主题切换可用；米黄/浅灰/黑白下设置框局部控件样式已适配；完整偏好设置中心待补 |
 | AI 工具集侧边栏 | ✅ 已实现基础入口 | 全文问答输入、证据树、回答 WebView、追问建议、证据跳转 |
-| 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5、审核 UI 已接线；最终质量未达标 |
-| 公式审核与写回 | 🟡 进行中 | manual revision、evidence 预览、PDF bbox 定位和 r5 accepted 写回已接线；批量审核待补 |
+| 公式多轮流水线 | 🟡 进行中 | r0-r5、fusion、r3/r4/r5 和底层门禁已接线；主窗口不再暴露人工审核入口，最终质量未达标 |
+| 公式门禁与写回 | 🟡 进行中 | manual revision、evidence 预览和 r5 accepted 写回仍作为底层能力保留；批量产品化入口暂不提供 |
 | TinyBDMath Graph Parser M5 | 🟡 工作树实验 | whole-formula graph context、结构化关系筛选和批量 torch eval 已在当前未提交工作树；仍 candidate-only，需 full verifier 评估后才能决定 r2a artifact |
 
 ---

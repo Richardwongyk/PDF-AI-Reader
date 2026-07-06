@@ -28,7 +28,6 @@ class TestCommandBridge(QObject):
         self._pending_fragment = ""
         self._active_command_id = ""
         self._kb_rebuild_command_id = ""
-        self._formula_scan_command_id = ""
         self._kb_rebuild_pending = False
         self._timer = QTimer(self)
         self._timer.setInterval(200)
@@ -163,19 +162,6 @@ class TestCommandBridge(QObject):
                     {"started": started, **self._formula_state()},
                 )
                 return
-            if cmd == "high_precision_formula_scan":
-                before = self._formula_state()
-                self._formula_scan_command_id = self._active_command_id
-                self._window._on_high_precision_formula_scan()
-                self._emit(
-                    "formula_scan_requested",
-                    {
-                        "mode": "high_precision",
-                        "before": before,
-                        "after": self._formula_state(),
-                    },
-                )
-                return
             if cmd == "snapshot_state":
                 self._emit("state", self._state())
                 return
@@ -212,9 +198,6 @@ class TestCommandBridge(QObject):
             "pending": int(pending),
             **self._formula_state(),
         }
-        if self._formula_scan_command_id:
-            payload["command_id"] = self._formula_scan_command_id
-            self._formula_scan_command_id = ""
         self._emit("formula_scan_finished", payload)
 
     def _pick_block(self, command: dict[str, Any]) -> str:

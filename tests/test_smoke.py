@@ -560,8 +560,9 @@ def test_main_window_smoke() -> None:
         assert not window._right_dock.isFloating()
         assert window.dockWidgetArea(window._right_dock) == Qt.DockWidgetArea.RightDockWidgetArea
         assert abs(window._right_dock.width() - docked_right_width) <= 24
-        assert window.findChild(QAction, "high_precision_formula_action") is not None
-        assert window.findChild(QAction, "high_precision_formula_toolbar_action") is not None
+        assert window.findChild(QAction, "high_precision_formula_action") is None
+        assert window.findChild(QAction, "formula_acceptance_review_action") is None
+        assert window.findChild(QAction, "high_precision_formula_toolbar_action") is None
         assert window._formula_idle_timer.interval() == 5000
         QTimer.singleShot(500, window.close)
         QTimer.singleShot(1500, app.quit)

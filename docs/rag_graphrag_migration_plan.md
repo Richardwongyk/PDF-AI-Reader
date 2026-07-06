@@ -261,28 +261,28 @@ PDF / OCR / MFR
 
 - 公式图片先按 hash 查 `data/formula_ocr_cache.db`，缓存命中不加载 Pix2Text。
 - `MathOCR.recognize_batch(..., max_uncached=N)` 可以限制本轮 MFR 推理的缓存未命中数量。
-- 交互式默认不跑 MFD 页扫描；显式精扫可通过 `max_mfd_pages>0` 开启，并按图片、已有公式块、LaTeX/数学符号密度排序候选页。
+- 交互式默认不跑大批量 MFD 页扫描；后台页级扫描按 `max_mfd_pages>0` 的预算开启，并按图片、已有公式块、LaTeX/数学符号密度排序候选页。
 - MFD 找到的图片/扫描公式先按优先级进入有限 OCR 预算，其余保留 `needs_ocr=True` 占位，等待后台公式索引补扫。
 - `FormulaIndexFlow` 已接入主窗口，后台补扫 `needs_ocr=True` 的公式块。
 - `FormulaIndexStore` 已用 SQLite 持久化公式扫描任务，记录 `doc_hash/page/bbox/block_id/image_hash/status/priority/latex/model/error/attempts`，支持重启后继续调度。
 - 导入 PDF 时会把全文页码写入页面级 MFD 队列，并把已有待 OCR 公式块写入 MFR 队列；任务持久化不阻塞首屏。
-- `FormulaIndexScheduler` / `FormulaScanPolicy` 已把视口、全文问答 evidence 和用户触发页统一为小批量扫描计划；默认 cache-only，显式高精度模式才允许模型推理。
-- 工具菜单和工具栏已有当前视口“公式精扫”入口；后台空闲补扫已接入小批次页面 MFD 和 cache-only OCR。
-- background 队列默认不连续 drain，避免长文档持续占用 CPU；显式高精度当前视口扫描才允许连续处理当前范围。
+- `FormulaIndexScheduler` / `FormulaScanPolicy` 已把视口、全文问答 evidence 和后台页级扫描统一为小批量扫描计划；默认 cache-only，模型推理只在受控后台预算内执行。
+- 主窗口不再暴露手动公式扫描入口；后台空闲补扫已接入小批次页面 MFD 和 cache-only OCR。
+- background 队列默认不连续 drain，避免长文档持续占用 CPU。
 - Pix2Text MFD 检测器已进程内复用，减少后台小批次重复初始化成本。
 - 识别完成的公式通过 `KnowledgeEngine.upsert_blocks()` 增量写入当前知识库后端，不重建整个文档索引。
 - 知识库未就绪时，公式增量块会先暂存，等基础索引构建完成后 flush。
 
 待落地的异步索引层：
 
-- 全篇高精度确认流：允许用户主动开启更激进的 `max_mfd_pages/max_uncached`，但必须可暂停和恢复。
+- 全篇高置信确认流：允许后台任务在受控配置下使用更激进的 `max_mfd_pages/max_uncached`，但必须可暂停和恢复。
 - 公式精度审计：把 Attention / Napkin 的 PDF 抽取结果与 LaTeX 源公式做 recall/precision 对照。
 - 公式识别后端：第三方公式工具 worker 和 PaddleOCR 适配层已拆除；born-digital 公式质量主线改为 TinyBDMath 本机结构模型，图片公式仍走旧 cache/OCR fallback。
 - `GraphIndexWorker`：在 `rag.enable_graph_index=true` 时抽取章节、概念、定理、公式、引用关系；图谱失败只降级 GraphRAG，不影响基础 RAG。
 
 验收门槛：
 
-- 打开 Attention/Napkin 的首屏时间不因公式精扫增加。
+- 打开 Attention/Napkin 的首屏时间不因公式后台索引增加。
 - 同一公式二次打开必须命中缓存，不重复 MFR。
 - E2E 日志不得出现 OCR 线程阻塞 UI 或渲染队列积压。
 

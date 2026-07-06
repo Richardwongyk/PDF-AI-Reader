@@ -81,11 +81,11 @@ PDF 导入
   - 全文页码进入 `r0_pdf_structure` 页面队列。
   - `needs_ocr=True` 的公式块进入 `r1_cached_recognition`。
   - 所有已解析公式块进入 `r3_cloud_semantic_review` 的非 OCR 复核记录。
-- 显式高精度扫描使用 `r2_local_high_precision`，不会被 `r1_cached_recognition` 的 done 状态吞掉。
+- 后台本机高置信复核使用 `r2_local_high_precision`，不会被 `r1_cached_recognition` 的 done 状态吞掉。
 - r0 页面 worker 当前调用 `BornDigitalFormulaExtractor`，只消费 MuPDF born-digital 结构证据，
   写入 `stage=pdf_structure` 的未接受候选；r0 不初始化 MFD/OCR。
 - r0 低置信、空 LaTeX 或需要复核的结构候选会额外排入 `r2_local_high_precision`
-  任务，作为后续显式本机复核的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
+  任务，作为后续后台本机复核的待处理目标；不会自动覆盖正文，也不会在默认阅读路径启动重模型。
 - 2026-07-05 已移除第三方公式工具 worker 通道：
   `ExternalFormulaToolRunner`、`tools/formula_tool_worker.py` 和
   `tools/formula_tool_comparison.py` 不再保留；r2 不再发现或调用 Paddle/Pix2Text/MinerU/PEK
@@ -118,9 +118,9 @@ PDF 导入
 - r3 done 结果会合并原始排队 payload，保留 `review_candidate`、`queued_input_hash`、`review_input_hash`、优先级和优先级原因，保证审计时能复原云端审了哪个候选、基于哪个 fusion input。
 - 行内公式候选额外携带 `inline_pdf_evidence`：原 PDF math-font span 的 text/font/size/bbox、候选 bbox、字体列表、字号范围和脚本字号证据。它用于 r3/工具复核和审计，不是默认 LaTeX 重建器，也不能绕过 accepted 门禁。
 - 真实 DeepSeek r3 单条 smoke 已跑通。2026-05-28 已补上 accepted/rejected audit 表、
-  命令行审核入口、基础审核对话框、manual revision、evidence 预览、PDF bbox 定位和
+  命令行门禁入口、manual revision、evidence 预览和
   accepted 变化触发 r5 知识库 upsert 的闭环；r5 已同步 accepted 公式 GraphRAG artifact
-  并记录 graph sync 状态。后续仍需批量审核体验和更高质量的 r4 语义图谱。
+  并记录 graph sync 状态。主窗口人工复核入口已移除，后续优先补更高质量的 r4 语义图谱。
 
 ### 文档块
 
@@ -164,7 +164,7 @@ PDF 导入
 
 规则：
 
-- born-digital 候选默认 `needs_model=false`，除非乱码、缺字、低置信或用户显式精扫。
+- born-digital 候选默认 `needs_model=false`，除非乱码、缺字或低置信后台复核需要本机模型。
 - 图片/扫描候选默认 `needs_model=true`。
 - 风险标记必须可见：`prose_like_region`、`table_or_text_like_region`、
   `tabular_alignment`、`unknown_glyph`、`missing_tounicode` 等。
@@ -239,8 +239,7 @@ PDF 导入
     `auto_accept_allowed`，强制覆盖必须显式 `--allow-not-ready` 并留下 reason。
   - `revise-fusion` 用审核者提供的 LaTeX 修订单个 fusion record，并接受该 revision。
   - `decisions` 列出 audit events。
-- 基础审核对话框已能预览 recognition/fusion evidence JSON，并按 `page_num + bbox` 跳回
-  PDF 证据位置；定位只消费已落库 evidence，不做公式修正规则。
+- 旧人工复核窗口已从主窗口移除；证据定位只消费已落库 evidence，不做公式修正规则。
 
 ### 任务队列
 
@@ -463,7 +462,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools\formula_inde
 ## 下一步落地
 
 1. 保持 `FormulaIndexStore` / `formula_recognition_results` / `formula_fusion_records` / `formula_acceptance_decisions` 为当前持久化边界，继续补租约恢复、失败重试和二次打开 skip 审计。
-2. 在已有基础审核 UI 上补批量审核、accepted precision 报告、审核筛选和二次打开 accepted 状态复用。
+2. 移除人工复核产品入口后，优先补 accepted precision 报告、命令行门禁筛选和二次打开 accepted 状态复用。
 3. 用 Attention/Napkin 建立同一批候选样本，比较 r0 facts、r2 本机候选和 TinyBDMath r2a 的准确率与耗时。
 4. 对 bbox overlap、PDF bbox 定位、LaTeX 相似度审计和 fusion 分组做 profile，确认是否值得 C++17 下沉。
 5. 强化 r4/r5 GraphRAG 路径证据：accepted 高置信结果已能增量写回知识库和 GraphRAG artifact，下一步要证明问答 evidence 能沿 accepted decision -> block -> graph artifact 追溯。

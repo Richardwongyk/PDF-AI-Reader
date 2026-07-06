@@ -1,9 +1,8 @@
 """Formula scan scheduling policy.
 
-The scheduler turns UI context such as viewport pages, question evidence, and
-explicit user actions into a small OCR batch plan. The plan is deliberately
-conservative by default: interactive reading only performs cache-first scans,
-while future high-precision modes can opt into model-backed OCR.
+The scheduler turns viewport pages, question evidence, and background work into
+small cache-first OCR batch plans so formula indexing stays off the hot reading
+path.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ class FormulaScanTrigger(str, Enum):
     EVIDENCE = "evidence"
     USER_ACTION = "user_action"
     BACKGROUND = "background"
-    HIGH_PRECISION = "high_precision"
 
 
 @dataclass(frozen=True)
@@ -46,14 +44,12 @@ class FormulaScanPolicy:
         evidence_budget: int = 4,
         user_action_budget: int = 6,
         background_budget: int = 8,
-        high_precision_budget: int = 16,
         large_doc_pages: int = 300,
     ) -> None:
         self.viewport_budget = viewport_budget
         self.evidence_budget = evidence_budget
         self.user_action_budget = user_action_budget
         self.background_budget = background_budget
-        self.high_precision_budget = high_precision_budget
         self.large_doc_pages = large_doc_pages
 
     def make_plan(
@@ -73,8 +69,8 @@ class FormulaScanPolicy:
             blocks=pending,
             priority_pages=priority_pages,
             batch_budget=batch_budget,
-            drain_queue=trigger is FormulaScanTrigger.HIGH_PRECISION,
-            cache_only=trigger is not FormulaScanTrigger.HIGH_PRECISION,
+            drain_queue=False,
+            cache_only=True,
             scan_round=self._scan_round(trigger),
         )
 
@@ -85,8 +81,6 @@ class FormulaScanPolicy:
             return self.evidence_budget
         if trigger is FormulaScanTrigger.USER_ACTION:
             return self.user_action_budget
-        if trigger is FormulaScanTrigger.HIGH_PRECISION:
-            return self.high_precision_budget
         budget = self.background_budget
         if page_count >= self.large_doc_pages:
             budget = max(1, budget // 2)
@@ -94,8 +88,6 @@ class FormulaScanPolicy:
 
     @staticmethod
     def _scan_round(trigger: FormulaScanTrigger) -> str:
-        if trigger is FormulaScanTrigger.HIGH_PRECISION:
-            return FormulaScanRound.LOCAL_HIGH_PRECISION.value
         return FormulaScanRound.CACHED_RECOGNITION.value
 
     @staticmethod

@@ -73,6 +73,18 @@ class GlossaryManager:
         _logger.info("术语表导入成功: %s (%d 条)", filepath, len(entries))
         return len(entries)
 
+    def read_glossary_file(self, filepath: str) -> list[GlossaryEntry]:
+        """读取外部术语表文件，但不写入当前术语表。"""
+        return self._repo.import_from_file(filepath)
+
+    def set_entries(self, domain: str, entries: list[GlossaryEntry]) -> None:
+        """替换指定领域的全部术语。"""
+        normalized = [
+            entry.model_copy(update={"domain": domain})
+            for entry in entries
+        ]
+        self._terms[domain] = normalized
+
     def add_term(
         self, en: str, zh: str, domain: str, force: bool = False
     ) -> GlossaryEntry:

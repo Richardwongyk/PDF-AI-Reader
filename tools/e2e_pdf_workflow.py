@@ -959,21 +959,11 @@ def _run_formula_scan_stress(case: PdfCase, multiplier: int, actions: list[dict[
             timeout=20,
         )
         scan_index = len(_read_events())
-        scan_command_id = _send_command({"cmd": "high_precision_formula_scan"})
-        scan_event = _wait_for_event(
-            "formula_scan_requested",
-            scan_index,
-            timeout=20,
-            command_id=scan_command_id,
-        )
         deadline = time.monotonic() + 12
         finished_event: dict[str, Any] | None = None
         while time.monotonic() < deadline:
             for item in _read_events()[scan_index:]:
-                if (
-                    item.get("event") == "formula_scan_finished"
-                    and item.get("command_id") == scan_command_id
-                ):
+                if item.get("event") == "formula_scan_finished":
                     finished_event = item
             if finished_event is not None:
                 break
@@ -990,8 +980,7 @@ def _run_formula_scan_stress(case: PdfCase, multiplier: int, actions: list[dict[
             index=index,
             page=page + 1,
             page_scan_started=bool(page_event.get("started")),
-            formula_before=_json_safe(scan_event.get("before")),
-            formula_after_request=_json_safe(scan_event.get("after")),
+            formula_after_request=_json_safe(page_event),
             formula_finished=_json_safe(finished_event),
             formula_final=_json_safe(final_state.get("formula")),
         )

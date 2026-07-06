@@ -194,12 +194,12 @@ FormulaAcceptanceDecision 描述产品级接受/拒绝审核事件：
 - r0 低置信或 `formula_accuracy` 低相似。
 - bbox 含复杂二维结构、表格/矩阵/多行对齐风险。
 - 问答 evidence 命中但公式候选低置信。
-- 用户显式精扫当前页/当前选区/全文。
+- 后台本机复核队列命中当前页、当前选区或全文候选。
 
 候选来源：
 
 - r0 facts：born-digital PDF 文本层、glyph/font/bbox/vector 结构候选。
-- r2 本机候选：图片/扫描/显式精扫的本机 cache/OCR fallback 候选。
+- r2 本机候选：图片/扫描/后台复核的本机 cache/OCR fallback 候选。
 - r2a TinyBDMath：本机结构模型候选。
 - r3 semantic review：云端/分析模型复核建议，仍然 candidate-only。
 - Poppler/pdfminer：born-digital 字符/bbox 交叉审计，不作为 MFR。
@@ -349,8 +349,8 @@ accepted audit/r5 流程；它不是自动修公式规则。`--allow-not-ready` 
    - 只消费 accepted 结果变化。
    - 知识库未就绪时保持 queued。
    - 2026-05-28 已新增 `formula_acceptance_decisions` audit 表、store acceptance API、
-     `tools/formula_acceptance_review.py` 命令行审核入口和 fusion -> synthetic accepted result
-     路径；r5 accepted 变化会同步 GraphRAG artifact，并记录 graph sync 状态；已有基础审核对话框、手工 revision 输入、证据预览和 PDF bbox 跳转。
+     `tools/formula_acceptance_review.py` 命令行门禁入口和 fusion -> synthetic accepted result
+     路径；r5 accepted 变化会同步 GraphRAG artifact，并记录 graph sync 状态；manual revision、证据预览和 accepted 写回保留在底层门禁路径。
 5. 行内公式已纳入候选与质量门禁：
    - `inline_spans:document_chunker` 参与 accuracy/fusion。
    - 纯脚注/装饰符号不再包成公式。

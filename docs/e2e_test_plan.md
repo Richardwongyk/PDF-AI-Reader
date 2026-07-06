@@ -128,7 +128,7 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - 右侧全文问答已有证据面板、检索状态、引用页跳转和追问建议；仍需补真实模型质量评估和更细粒度的引用高亮。
 - 公式审计已经能统计 LaTeX 源和 PDF 抽取差距；扫描/图片公式已接入 Pix2Text MFR OCR，但整体 LaTeX 保真仍明显不足，需要继续做源码对齐和文本公式恢复。
 - 第三方公式工具 worker 已移除；E2E 不再验证 Paddle/MinerU/PEK 等隔离环境输出。公式质量仍必须通过 r0/r2/r2a/r3 候选审计和 accepted gate。
-- 公式审核基础 UI 已支持 manual revision、recognition/fusion evidence 预览和 PDF page/bbox 定位；E2E 还需要补真实 UI 触发、批量审核、二次打开 accepted 状态复用和 GraphRAG 路径证据检查。
+- 公式门禁仍保留 manual revision、recognition/fusion evidence 预览和 accepted 写回底层能力；主窗口人工审核入口已移除，E2E 重点转为二次打开 accepted 状态复用和 GraphRAG 路径证据检查。
 
 ## 本轮闭环结果
 
@@ -170,11 +170,11 @@ C:\Users\WYK\.conda\envs\pdf_ai_reader_314\python.exe -X utf8 tools/formula_inde
 - Napkin 桌面 E2E 的 UI/性能/RAG 链路跑完：启动约 50.855s，打开约 0.035s，1050 页长文档跳转到 1/11/51/121/251 页、缩放、双击翻译、裂缝问答、右侧问答均完成；日志 `ERROR/WARNING/CRITICAL=0`；知识库检查约 2.710s；缩放 max 225.5ms、render max 40.3ms、visible update max 395.9ms。
 - Napkin E2E 总退出码仍为失败，原因是公式质量门禁未过：`common_source_command_recall 0.128 < 0.350`。这不是 UI 崩溃，而是正确暴露公式识别质量未达标；不能降级为通过。
 
-2026-05-28 公式审核定位补充：
+2026-05-28 公式门禁定位历史记录：
 
-- 基础审核对话框可展示 recognition result / fusion record 的已落库 evidence JSON，并把 `page_num + bbox` 传给 `PdfViewer.scroll_to_bbox()`。
+- 旧人工复核窗口曾展示 recognition result / fusion record 的已落库 evidence JSON，并把 `page_num + bbox` 传给 `PdfViewer.scroll_to_bbox()`；当前主窗口不再暴露该入口。
 - 已补回归测试覆盖 fresh/offscreen layout 下 bbox 定位时滚动范围同步；此前可能出现高亮对象已创建但滚动条 maximum 为 0、页面没有移动的 bug。
-- 后续桌面 E2E 应把“打开审核对话框 → 选择候选 → 预览证据 → 定位 PDF bbox → accepted/revision → r5 写回/GraphRAG artifact”纳入完整路径。
+- 后续桌面 E2E 不再走人工复核窗口；应验证后台候选、accepted/revision 数据复用、r5 写回和 GraphRAG artifact 不污染默认阅读路径。
 
 2026-05-28 Napkin 400x 前台验证失败记录：
 
