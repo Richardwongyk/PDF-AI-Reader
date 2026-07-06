@@ -427,7 +427,13 @@ def test_main_window_smoke() -> None:
         assert window._active_reader_tab().filepath == ""
         assert window._toc_tree.topLevelItemCount() == 0
         assert window._ai_doc_status.text() == "未打开文档"
-        window._on_reader_tab_close_requested(reader_tab_bar.currentIndex())
+        close_button = reader_tab_bar.tabButton(
+            reader_tab_bar.currentIndex(),
+            QTabBar.ButtonPosition.RightSide,
+        )
+        assert isinstance(close_button, QToolButton)
+        assert close_button.objectName() == "reader_tab_close_button"
+        close_button.click()
         app.processEvents()
         assert reader_tab_bar.count() == 1
         with tempfile.TemporaryDirectory() as session_dir:
@@ -453,18 +459,24 @@ def test_main_window_smoke() -> None:
             saved = json.loads(window._session_state_path.read_text(encoding="utf-8"))
             assert saved["version"] == 2
             assert saved["active_tab_index"] == 0
-            assert [tab["title"] for tab in saved["tabs"]] == ["B.pdf", "Blank", "A.pdf"]
+            assert [tab["title"] for tab in saved["tabs"]] == ["B", "Blank", "A"]
             assert [tab["position"].get("page_num") for tab in saved["tabs"]] == [2, None, 1]
             window._clear_reader_tabs()
             assert reader_tab_bar.count() == 0
             assert window._restore_reader_tabs_session(saved)
             assert reader_tab_bar.count() == 3
-            assert [reader_tab_bar.tabText(i) for i in range(3)] == ["B.pdf", "Blank", "A.pdf"]
+            assert [reader_tab_bar.tabText(i) for i in range(3)] == ["B", "Blank", "A"]
             assert reader_tab_bar.currentIndex() == 0
             active_restored = window._active_reader_tab()
             assert active_restored is not None
             assert active_restored.filepath.endswith("b.pdf")
             assert active_restored.position["page_num"] == 2
+            titled_tab = window._create_reader_tab(
+                title="Deep Learning - Ian Goodfellow.pdf",
+                switch=False,
+            )
+            window._sync_reader_tab_bar()
+            assert window._reader_tab_display_title(titled_tab.title, titled_tab.filepath) == "Deep Learning"
             open_calls = []
             def fake_open_pdf_file(filepath, **kwargs):
                 open_calls.append((filepath, kwargs))
@@ -786,6 +798,15 @@ def test_split_widget_followup_buttons() -> None:
         widget.apply_theme("dark")
         assert "#fff8e6" in widget.styleSheet()
         assert "#2f2918" not in widget.styleSheet()
+        assert widget._send_layout.indexOf(widget._send_btn) == -1
+        assert widget._action_layout.indexOf(widget._copy_btn) < widget._action_layout.indexOf(widget._send_btn)
+        assert widget._action_layout.indexOf(widget._send_btn) < widget._action_layout.indexOf(widget._clear_btn)
+        empty_annotation_height = widget._saved_height
+        assert empty_annotation_height <= widget._ANNOTATION_INITIAL_HEIGHT + 20
+        widget.set_annotation_text("\\n".join(["note"] * 80))
+        assert widget._saved_height >= empty_annotation_height
+        assert widget._saved_height <= widget._ANNOTATION_MAX_HEIGHT
+        assert widget._input_area.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
         widget.close()
         app.quit()
         print("split followup smoke ok")
