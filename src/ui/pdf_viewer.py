@@ -2288,6 +2288,7 @@ class PdfViewer(QScrollArea):
         self._widget_page_map.clear()
         self._split_pages.clear()
         self._tile_renderer.clear()
+        self._tile_renderer.set_document(None)
         self._scroll_history.clear()
         self._last_scroll_value = 0
         self._vlayout = None

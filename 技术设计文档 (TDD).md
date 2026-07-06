@@ -24,16 +24,22 @@
 - 批注持久化由 `MainWindow` 维护：以文档 hash 为一级 key、block id 为二级 key 写入 `data/annotations.json`。
   该文件属于本地用户数据，已加入 `.gitignore`；保存空文本等同删除批注。文档加载和页面 blocks 补齐时会回填
   `block.metadata["annotation"]` 并同步黄色标记。
-- 2026-07-05 多进程多窗口最小版：允许多个独立 PDF AI Reader 进程同时存在。每个进程使用独立
-  `data/runtime/process-<pid>/qtwebengine/` 和 `logs/app-<pid>.log`；第一个进程持有 primary instance lock，
-  后续 secondary 进程自动将 Chroma 知识库后端降级为 SQLite FTS，避免多进程同时访问同一个 ChromaDB
-  持久化目录。
+- 2026-07-06 单实例标签模式：第一个进程持有 `data/runtime/primary-instance.lock` 并创建主窗口；
+  后续 secondary 进程不再创建窗口，而是通过 Qt `QLocalSocket` 把启动请求转交给主实例后退出。
+  若请求携带 `--open` PDF 路径，主窗口会在顶部阅读标签中打开该文件。
 - 详细日志默认只写入 UTF-8 文件日志；终端默认不输出 INFO 级日志，避免 Windows/Conda 启动链路出现中文
   mojibake。需要实时控制台日志时设置 `PDF_AI_READER_CONSOLE_LOG=1`。
 - 主题系统以当前深色黑底为默认兼容契约；新增主题为 `sepia` 米黄、`light_gray` 浅灰、`black_white` 黑白。
   旧 `light` 配置值会规范化为 `light_gray`，但不再作为菜单/设置选项展示。翻译裂缝和批注裂缝保持原蓝色/护眼色。
-- 阅读会话恢复由 `MainWindow` 写入本地 `data/reader_session.json`：保存 PDF 路径、文档 hash、页号、页内偏移和横向滚动。
-  普通启动且没有 `--open` 参数时自动尝试恢复；文件缺失或 hash 改变时跳过位置恢复。
+- 阅读会话恢复由 `MainWindow` 写入本地 `data/reader_session.json`：新格式保存 `tabs` 数组、`active_tab_index`、
+  每个标签的 PDF 路径、文档 hash、页号、页内偏移和横向滚动，同时保留顶层 `filepath/doc_hash/position` 兼容旧格式。
+  普通启动且没有 `--open` 参数时自动按原数量和原顺序复现标签条，并只加载上次激活标签；文件缺失或 hash 改变时跳过位置恢复。
+- 单窗口阅读标签由 `MainWindow` 维护 `_ReaderTabState` 列表并在中央阅读区顶部显示 `QTabBar`。
+  每个标签保存 `tab_id`、标题、PDF 路径、文档 hash 和 `PdfViewer.current_reading_position()`；`QTabBar.tabMoved`
+  会同步 `_ReaderTabState` 顺序，保存前也会按标签条当前顺序重排，保证重启后顺序不变。
+  当前实现仍复用一套 `DocumentEngine`/`PdfViewer`；切换标签时先保存当前标签位置。同一 PDF 的多个标签会复用当前
+  已加载文档并直接调用 `PdfViewer.restore_reading_position()` 恢复位置；不同 PDF 标签仍会重新打开目标 PDF 后恢复位置。
+  批注和翻译缓存继续按文档 hash 隔离，临时展开的裂缝 UI 不跨标签常驻。
 - 批注写入改为 `src/data/annotation_store.py` 负责：使用 `QLockFile` 锁住 `data/annotations.json.lock`，
   单条 block patch 合并最新文件内容后再 `os.replace` 原子替换。实时跨窗口推送暂不实现；关闭重开后可读取最新批注。
 - 2026-07-05 大文档稳定性补充：导入时 `_FormulaImportPlanThread` 支持 `page_scan_pages` 限定自动页级公式扫描范围；
@@ -55,8 +61,8 @@
   bbox 横向定位和 split page 缩放重建。
 - 翻译裂缝宽度跟随页面，WebView 正文按原文 block bbox 设置左右 padding。
   该修复只解决显示对齐，不改变翻译公式保护和公式候选 accepted gate。
-- 菜单栏文字区域双击折叠未可靠满足需求，当前暂不继续；多文档标签页/标签关闭当前文档
-  当前也不实现。
+- 菜单栏文字区域双击折叠未可靠满足需求，当前暂不继续；多文档入口已改为单窗口顶部标签条，
+  支持新建、切换和关闭标签。
 - 最新 UI/导航回归：`tests/test_pdf_viewer_navigation.py -q` 为 19 passed；
   `tests/test_smoke.py tests/test_pdf_viewer_navigation.py -q` 为 30 passed。
   这不是 Attention/Napkin 桌面 E2E 或公式质量门禁。
@@ -264,7 +270,7 @@ D:\程设大作业\
 │   └── knowledge_bases/           # ChromaDB 持久化数据（运行时生成）
 │       ├── chroma.sqlite3
 │       └── <collection_uuid>/
-│   └── runtime/                   # 多进程运行时目录（process-<pid>/qtwebengine）
+│   └── runtime/                   # 单实例运行时目录（primary lock + qtwebengine）
 ├── logs/
 │   └── app-<pid>.log              # 进程级应用运行日志
 ├── src/
@@ -1184,8 +1190,8 @@ apply_theme("dark")
 3. **共享数据不可变传递**：`list[DocumentBlock]` 构建完成后通过信号传递，工作线程不再修改。
 4. **QThread 生命周期管理**：`AIEngine._active_threads` 保持引用防止 Python GC 回收导致信号断开。
 5. **线程中断处理**：_ParseThread 支持 `requestInterruption()`；旧线程 3s 超时后 `terminate()`。
-6. **多进程最小隔离**：`main.py` 启动时用 `data/runtime/primary-instance.lock` 区分 primary/secondary 实例。
-   每个进程设置独立 QtWebEngine cache/storage path；secondary 实例不创建共享 Chroma 后端，改用 SQLite FTS。
+6. **单实例标签模式**：`main.py` 启动时用 `data/runtime/primary-instance.lock` 区分 primary/secondary 实例。
+   primary 创建主窗口并监听 `QLocalServer`；secondary 仅通过 `QLocalSocket` 转交 `--open` 请求并退出，避免再开第二个窗口。
 
 ---
 
@@ -1317,7 +1323,7 @@ ConfigManager.config_changed(config)
 | 双栏页面数限制 | 仅候选页面（含 LaTeX 命令的页面）跑 MFD 模型 |
 | 线程池限制 | QThreadPool 最多 2 线程 |
 | Chromium 沙盒禁用 | Windows 上 `--no-sandbox --disable-gpu-sandbox` 避免 QtWebEngineProcess 崩溃 |
-| 多进程 QtWebEngine 隔离 | 每个进程使用 `data/runtime/process-<pid>/qtwebengine`，避免多个窗口争用同一 Chromium profile |
+| 单实例 QtWebEngine 运行时 | 主进程使用 `data/runtime/process-<pid>/qtwebengine`；重复启动通过 IPC 复用主窗口，避免多个窗口争用 Chromium profile |
 | telemetry 关闭 | `ANONYMIZED_TELEMETRY=False` 避免 posthog 报错 |
 
 ---
@@ -1401,10 +1407,10 @@ ollama pull bge-m3
 | 混合路由 | ✅ 已实现 | 本地/云端/回退三级策略 |
 | 配置管理 | ✅ 已实现 | YAML + 热加载 + .env |
 | 主题系统 | ✅ 已实现 | 默认深色；菜单栏和设置中可切换 dark/sepia/light_gray/black_white；深色背景契约和四主题对比度有测试覆盖 |
-| 上次阅读恢复 | ✅ 已实现 | 本地 `data/reader_session.json` 保存路径、hash、页号和页内偏移；普通启动自动恢复，显式 `--open` 不覆盖 |
+| 上次阅读会话恢复 | ✅ 已实现 | 本地 `data/reader_session.json` 保存完整标签组、激活标签、路径、hash、页号和页内偏移；普通启动按原数量/顺序恢复标签，显式 `--open` 不覆盖 |
 | 侧栏控制 | ✅ 已实现 | 菜单栏同层左右角按钮隐藏/显示；左右 dock 均可弹出/归位且不可关闭 |
 | 顶部工具栏折叠 | 🟡 基础已实现 | 工具栏空白区和恢复细条可双击折叠/恢复；菜单栏文字双击折叠未可靠实现，暂不继续 |
-| 文档标签页 | ⏳ 暂不实现 | 已讨论但当前不做多文档标签/标签关闭当前文档 |
+| 文档标签页 | ✅ 已实现 | 单窗口顶部 `QTabBar`；每个标签保存 PDF 路径、hash 和阅读位置，切换和拖拽排序会持久化，重启后按原顺序恢复 |
 | 取词翻译 | ⏳ 未实现 | 预留接口 |
 | 扫描版 OCR | ⏳ 未实现 | 预留接口 |
 | 图表理解 | ⏳ 未实现 | 预留接口 |

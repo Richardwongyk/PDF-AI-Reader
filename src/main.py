@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import argparse
+import json
 import socket
 import time
 from logging.handlers import RotatingFileHandler
@@ -27,7 +28,8 @@ import platform
 if platform.system() == "Windows":
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu-sandbox"
 
-from PySide6.QtCore import QLockFile, Qt, QTimer
+from PySide6.QtCore import QIODevice, QLockFile, Qt, QTimer
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
@@ -47,6 +49,7 @@ _LOG_RETENTION_SEC = 3 * 24 * 60 * 60
 _RUNTIME_RETENTION_SEC = 3 * 24 * 60 * 60
 _INSTANCE_LOCK_STALE_MS = 30 * 1000
 _CONSOLE_LOG_ENV = "PDF_AI_READER_CONSOLE_LOG"
+_SINGLE_INSTANCE_SERVER = "pdf-ai-reader-main-window"
 
 
 def _is_configured_api_key(value: str | None) -> bool:
@@ -128,6 +131,101 @@ def _acquire_primary_instance_lock(runtime_root: Path) -> tuple[QLockFile | None
     if lock.tryLock(0):
         return lock, False
     return None, True
+
+
+def _runtime_lock_path(runtime_root: Path) -> Path:
+    return runtime_root / "primary-instance.lock"
+
+
+def _lock_owner_pid(lock_path: Path) -> int | None:
+    try:
+        first_line = lock_path.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        pid = int(first_line.strip())
+    except (OSError, IndexError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _process_exists(pid: int | None) -> bool:
+    if not pid:
+        return False
+    if pid == os.getpid():
+        return True
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+        except Exception:
+            return False
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _send_to_primary_instance(open_pdf: str | None) -> bool:
+    deadline = time.monotonic() + 8.0
+    payload = json.dumps({"open_pdf": open_pdf or ""}, ensure_ascii=False).encode("utf-8")
+    while True:
+        socket = QLocalSocket()
+        socket.connectToServer(_SINGLE_INSTANCE_SERVER, QIODevice.OpenModeFlag.WriteOnly)
+        if socket.waitForConnected(500):
+            socket.write(payload)
+            socket.flush()
+            ok = socket.waitForBytesWritten(800)
+            socket.disconnectFromServer()
+            if ok:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.15)
+
+
+def _start_single_instance_server(window: object) -> QLocalServer | None:
+    server = QLocalServer()
+    if not server.listen(_SINGLE_INSTANCE_SERVER):
+        QLocalServer.removeServer(_SINGLE_INSTANCE_SERVER)
+        if not server.listen(_SINGLE_INSTANCE_SERVER):
+            logging.warning("单实例 IPC 服务启动失败: %s", server.errorString())
+            return None
+
+    def _activate_main_window() -> None:
+        window.showNormal()
+        window.raise_()
+        window.activateWindow()
+        app = QApplication.instance()
+        if app is not None:
+            app.setActiveWindow(window)
+
+    def _on_new_connection() -> None:
+        while server.hasPendingConnections():
+            client = server.nextPendingConnection()
+            if client is None:
+                continue
+            if client.waitForReadyRead(800):
+                raw = bytes(client.readAll()).decode("utf-8", errors="ignore")
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    payload = {}
+                open_pdf = str(payload.get("open_pdf", "") or "").strip()
+                if open_pdf:
+                    QTimer.singleShot(
+                        0,
+                        lambda path=open_pdf: window._open_pdf_file(path, restore_session=False),
+                    )
+            client.disconnectFromServer()
+            client.deleteLater()
+        QTimer.singleShot(0, _activate_main_window)
+
+    server.newConnection.connect(_on_new_connection)
+    return server
 
 
 def _configure_webengine_profile(profile: QWebEngineProfile, runtime_dir: Path) -> None:
@@ -470,6 +568,35 @@ def main() -> int:
         "secondary" if secondary_instance else "primary",
         runtime_dir,
     )
+    if secondary_instance:
+        open_pdf = str(Path(args.open_pdf).resolve()) if args.open_pdf else ""
+        if _send_to_primary_instance(open_pdf):
+            logging.info("已把启动请求转交给现有主窗口，当前 secondary 实例退出")
+            return 0
+        lock_path = _runtime_lock_path(runtime_root)
+        owner_pid = _lock_owner_pid(lock_path)
+        if _process_exists(owner_pid):
+            logging.warning(
+                "检测到已有 PDF AI Reader 进程 pid=%s，但暂时无法联系主窗口；"
+                "为保持单窗口标签模式，当前 secondary 实例退出。",
+                owner_pid,
+            )
+            return 0
+        logging.warning(
+            "检测到过期实例锁且 owner pid=%s 不存在，清理锁后恢复启动主窗口。",
+            owner_pid,
+        )
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            logging.warning("过期实例锁清理失败: %s", lock_path, exc_info=True)
+            return 1
+        QLocalServer.removeServer(_SINGLE_INSTANCE_SERVER)
+        instance_lock, secondary_instance = _acquire_primary_instance_lock(runtime_root)
+        app._pdf_ai_reader_instance_lock = instance_lock
+        if secondary_instance:
+            logging.warning("清理过期锁后仍无法取得主实例锁，当前 secondary 实例退出")
+            return 0
 
     profile = QWebEngineProfile.defaultProfile()
     _configure_webengine_profile(profile, runtime_dir)
@@ -493,6 +620,7 @@ def main() -> int:
         _error_handler.set_parent_widget(window)
 
         window.show()
+        app._pdf_ai_reader_single_instance_server = _start_single_instance_server(window)
         def _activate_main_window() -> None:
             window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             window.showNormal()

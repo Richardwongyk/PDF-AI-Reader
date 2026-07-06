@@ -163,6 +163,36 @@ def test_secondary_instance_uses_fts_without_chroma_repo() -> None:
     assert "secondary fts fallback smoke ok" in result.stdout
 
 
+def test_document_flow_emits_closing_before_engine_close() -> None:
+    from src.app.document_flow import DocumentFlow
+
+    events: list[str] = []
+
+    class _Signal:
+        def connect(self, _callback) -> None:
+            pass
+
+    class _DocEngine:
+        parse_finished = _Signal()
+        parse_completed = _Signal()
+        parse_progress = _Signal()
+        parse_error = _Signal()
+
+        def close_document(self) -> None:
+            events.append("engine_closed")
+
+    class _AIEngine:
+        _active_threads: list[object] = []
+
+    flow = DocumentFlow(_DocEngine(), object(), _AIEngine(), object())
+    flow.document_closing.connect(lambda: events.append("closing"))
+    flow.document_closed.connect(lambda: events.append("closed"))
+
+    flow.close_document()
+
+    assert events == ["closing", "engine_closed", "closed"]
+
+
 def test_ollama_reachability_negative_result_is_fast_and_cached() -> None:
     result = _run_python(
         """
@@ -340,11 +370,14 @@ def test_long_pdf_parse_finished_before_full_background_parse() -> None:
 def test_main_window_smoke() -> None:
     result = _run_python(
         """
+        import json
         import sys
+        import tempfile
+        from pathlib import Path
         from PySide6.QtCore import Qt, QTimer, QPoint
         from PySide6.QtGui import QAction
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QApplication, QDockWidget, QPushButton, QScrollArea, QToolBar, QToolButton, QWidget
+        from PySide6.QtWidgets import QApplication, QDockWidget, QPushButton, QScrollArea, QTabBar, QToolBar, QToolButton, QWidget
         from PySide6.QtWebEngineCore import QWebEngineProfile
 
         from src.main import setup_logging, build_services
@@ -378,6 +411,90 @@ def test_main_window_smoke() -> None:
         restore_handle = window.findChild(QWidget, "toolbar_restore_handle")
         assert toolbar_spacer is not None
         assert restore_handle is not None
+        reader_tab_bar = window.findChild(QTabBar, "reader_tab_bar")
+        new_reader_tab_button = window.findChild(QToolButton, "new_reader_tab_button")
+        assert reader_tab_bar is not None
+        assert new_reader_tab_button is not None
+        assert reader_tab_bar.count() == 1
+        assert window._active_reader_tab() is not None
+        window._on_toc_ready([{"title": "Old PDF", "page": 0, "level": 1}])
+        window._ai_doc_status.setText("old document")
+        assert window._toc_tree.topLevelItemCount() == 1
+        new_reader_tab_button.click()
+        app.processEvents()
+        assert reader_tab_bar.count() == 2
+        assert window._active_reader_tab() is not None
+        assert window._active_reader_tab().filepath == ""
+        assert window._toc_tree.topLevelItemCount() == 0
+        assert window._ai_doc_status.text() == "未打开文档"
+        window._on_reader_tab_close_requested(reader_tab_bar.currentIndex())
+        app.processEvents()
+        assert reader_tab_bar.count() == 1
+        with tempfile.TemporaryDirectory() as session_dir:
+            window._session_state_path = Path(session_dir) / "reader_session.json"
+            first_tab = window._active_reader_tab()
+            assert first_tab is not None
+            first_tab.title = "A.pdf"
+            first_tab.filepath = str(Path(session_dir) / "a.pdf")
+            first_tab.doc_hash = "hash-a"
+            first_tab.position = {"page_num": 1, "page_offset_ratio": 0.25}
+            second_tab = window._create_reader_tab(
+                title="B.pdf",
+                filepath=str(Path(session_dir) / "b.pdf"),
+                doc_hash="hash-b",
+                position={"page_num": 2, "page_offset_ratio": 0.5},
+                switch=False,
+            )
+            window._create_reader_tab(title="Blank", switch=True)
+            window._set_active_reader_tab(second_tab.tab_id)
+            reader_tab_bar.moveTab(0, 2)
+            app.processEvents()
+            window._save_current_session_state()
+            saved = json.loads(window._session_state_path.read_text(encoding="utf-8"))
+            assert saved["version"] == 2
+            assert saved["active_tab_index"] == 0
+            assert [tab["title"] for tab in saved["tabs"]] == ["B.pdf", "Blank", "A.pdf"]
+            assert [tab["position"].get("page_num") for tab in saved["tabs"]] == [2, None, 1]
+            window._clear_reader_tabs()
+            assert reader_tab_bar.count() == 0
+            assert window._restore_reader_tabs_session(saved)
+            assert reader_tab_bar.count() == 3
+            assert [reader_tab_bar.tabText(i) for i in range(3)] == ["B.pdf", "Blank", "A.pdf"]
+            assert reader_tab_bar.currentIndex() == 0
+            active_restored = window._active_reader_tab()
+            assert active_restored is not None
+            assert active_restored.filepath.endswith("b.pdf")
+            assert active_restored.position["page_num"] == 2
+            open_calls = []
+            def fake_open_pdf_file(filepath, **kwargs):
+                open_calls.append((filepath, kwargs))
+            window._open_pdf_file = fake_open_pdf_file
+            window._viewer_document_loaded = True
+            window._current_filepath = active_restored.filepath
+            window._current_doc_hash = "hash-b"
+            same_path_tab = window._create_reader_tab(
+                title="B second view",
+                filepath=active_restored.filepath,
+                doc_hash="hash-b",
+                position={"page_num": 3, "page_offset_ratio": 0.1},
+                switch=False,
+            )
+            window._activate_reader_tab(same_path_tab.tab_id)
+            app.processEvents()
+            assert open_calls == []
+            assert window._active_reader_tab().tab_id == same_path_tab.tab_id
+            different_path_tab = window._create_reader_tab(
+                title="C.pdf",
+                filepath=str(Path(session_dir) / "c.pdf"),
+                doc_hash="hash-c",
+                position={"page_num": 4, "page_offset_ratio": 0.2},
+                switch=False,
+            )
+            window._activate_reader_tab(different_path_tab.tab_id)
+            app.processEvents()
+            assert open_calls
+            assert open_calls[-1][0].endswith("c.pdf")
+            window._session_save_timer.stop()
         left_corner = window.menuBar().cornerWidget(Qt.Corner.TopLeftCorner)
         right_corner = window.menuBar().cornerWidget(Qt.Corner.TopRightCorner)
         assert left_corner is not None

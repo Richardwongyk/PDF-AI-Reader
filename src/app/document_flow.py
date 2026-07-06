@@ -31,6 +31,7 @@ class DocumentFlow(QObject):
 
     # Signals
     document_opened = Signal(object)   # ParseResult
+    document_closing = Signal()        # emitted before the PDF engine releases the document
     document_closed = Signal()
     parse_progress = Signal(int, int)   # (current, total)
     parse_error = Signal(str)
@@ -78,6 +79,7 @@ class DocumentFlow(QObject):
     def close_document(self) -> None:
         """关闭当前文档，停止所有活跃线程。"""
         _logger.info("DocumentFlow: close_document START")
+        self.document_closing.emit()
 
         # 停止所有 AI 线程（借鉴 Mad Professor 的线程生命周期管理）
         for t in list(self._ai_engine._active_threads):
