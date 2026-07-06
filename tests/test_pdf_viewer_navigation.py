@@ -238,6 +238,36 @@ def test_pdf_viewer_jump_page_renders_target_and_neighbors_immediately() -> None
     assert engine.rendered_pages
 
 
+def test_pdf_viewer_restores_saved_reading_position() -> None:
+    _app()
+    engine = _DocEngine()
+    viewer = PdfViewer(engine, _Config())  # type: ignore[arg-type]
+    viewer.resize(640, 480)
+    viewer.load_document(ParseResult(filepath="paper.pdf", page_count=4, blocks=[]))
+    assert viewer._vlayout is not None
+
+    page_num = 2
+    page_height = viewer._vlayout.page_height(page_num)
+    target_y = int(viewer._vlayout.page_y(page_num) + page_height * 0.35)
+    viewer.verticalScrollBar().setValue(target_y)
+
+    position = viewer.current_reading_position()
+    assert position is not None
+    assert position["page_num"] == page_num
+
+    viewer.scroll_to_page(0)
+    restored = viewer.restore_reading_position(position)
+
+    assert restored is True
+    restored_position = viewer.current_reading_position()
+    assert restored_position is not None
+    assert restored_position["page_num"] == page_num
+    assert abs(
+        float(restored_position["page_offset_ratio"])
+        - float(position["page_offset_ratio"])
+    ) < 0.01
+
+
 def test_pdf_viewer_reuses_segment_overlays_on_zoom() -> None:
     _app()
     engine = _DocEngine()

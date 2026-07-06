@@ -203,6 +203,64 @@ def get_split_style(theme_name: str) -> str:
 # =============================================================================
 
 
+def normalize_theme_name(theme_name: str) -> str:
+    if theme_name == "light":
+        return "light_gray"
+    if theme_name in {"dark", "sepia", "light_gray", "black_white"}:
+        return theme_name
+    return "dark"
+
+
+def _make_light_gray_palette() -> QPalette:
+    p = QPalette()
+    p.setColor(QPalette.ColorRole.Window, QColor(220, 220, 220))
+    p.setColor(QPalette.ColorRole.WindowText, QColor(42, 42, 42))
+    p.setColor(QPalette.ColorRole.Base, QColor(228, 228, 228))
+    p.setColor(QPalette.ColorRole.AlternateBase, QColor(216, 216, 216))
+    p.setColor(QPalette.ColorRole.Text, QColor(42, 42, 42))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(42, 42, 42))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(228, 228, 228))
+    p.setColor(QPalette.ColorRole.Button, QColor(212, 212, 212))
+    p.setColor(QPalette.ColorRole.ButtonText, QColor(42, 42, 42))
+    p.setColor(QPalette.ColorRole.Light, QColor(228, 228, 228))
+    p.setColor(QPalette.ColorRole.Midlight, QColor(216, 216, 216))
+    p.setColor(QPalette.ColorRole.Dark, QColor(170, 170, 170))
+    p.setColor(QPalette.ColorRole.Mid, QColor(185, 185, 185))
+    p.setColor(QPalette.ColorRole.Shadow, QColor(150, 150, 150))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(91, 155, 213))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(42, 42, 42))
+    p.setColor(QPalette.ColorRole.Link, QColor(91, 155, 213))
+    p.setColor(QPalette.ColorRole.LinkVisited, QColor(70, 130, 180))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(150, 150, 150))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(150, 150, 150))
+    return p
+
+
+def _make_black_white_palette() -> QPalette:
+    p = QPalette()
+    p.setColor(QPalette.ColorRole.Window, QColor(26, 26, 26))
+    p.setColor(QPalette.ColorRole.WindowText, QColor(232, 232, 232))
+    p.setColor(QPalette.ColorRole.Base, QColor(36, 36, 36))
+    p.setColor(QPalette.ColorRole.AlternateBase, QColor(30, 30, 30))
+    p.setColor(QPalette.ColorRole.Text, QColor(232, 232, 232))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(232, 232, 232))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(26, 26, 26))
+    p.setColor(QPalette.ColorRole.Button, QColor(44, 44, 44))
+    p.setColor(QPalette.ColorRole.ButtonText, QColor(232, 232, 232))
+    p.setColor(QPalette.ColorRole.Light, QColor(50, 50, 50))
+    p.setColor(QPalette.ColorRole.Midlight, QColor(40, 40, 40))
+    p.setColor(QPalette.ColorRole.Dark, QColor(90, 90, 90))
+    p.setColor(QPalette.ColorRole.Mid, QColor(70, 70, 70))
+    p.setColor(QPalette.ColorRole.Shadow, QColor(15, 15, 15))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(108, 92, 231))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    p.setColor(QPalette.ColorRole.Link, QColor(140, 180, 255))
+    p.setColor(QPalette.ColorRole.LinkVisited, QColor(180, 155, 255))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(120, 120, 120))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(120, 120, 120))
+    return p
+
+
 def _make_light_palette() -> QPalette:
     """构建素白（学术）主题 QPalette。"""
     p = QPalette()
@@ -273,30 +331,33 @@ def _make_dark_palette() -> QPalette:
 
 
 def _make_sepia_palette() -> QPalette:
-    """构建护眼羊皮纸主题 QPalette。"""
+    """构建米黄主题 QPalette。"""
     p = QPalette()
 
-    p.setColor(QPalette.ColorRole.Window, QColor(245, 222, 179))
-    p.setColor(QPalette.ColorRole.WindowText, QColor(60, 40, 20))
-    p.setColor(QPalette.ColorRole.Base, QColor(252, 240, 210))
-    p.setColor(QPalette.ColorRole.AlternateBase, QColor(245, 230, 195))
-    p.setColor(QPalette.ColorRole.Text, QColor(60, 40, 20))
-    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(17, 24, 39))
-    p.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 255, 255))
+    p.setColor(QPalette.ColorRole.Window, QColor(250, 244, 227))
+    p.setColor(QPalette.ColorRole.WindowText, QColor(25, 25, 40))
+    p.setColor(QPalette.ColorRole.Base, QColor(255, 251, 240))
+    p.setColor(QPalette.ColorRole.AlternateBase, QColor(248, 240, 220))
+    p.setColor(QPalette.ColorRole.Text, QColor(25, 25, 40))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(25, 25, 40))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 251, 240))
 
-    p.setColor(QPalette.ColorRole.Button, QColor(240, 220, 180))
-    p.setColor(QPalette.ColorRole.ButtonText, QColor(60, 40, 20))
-    p.setColor(QPalette.ColorRole.Light, QColor(255, 240, 210))
-    p.setColor(QPalette.ColorRole.Midlight, QColor(245, 225, 190))
-    p.setColor(QPalette.ColorRole.Dark, QColor(180, 160, 130))
-    p.setColor(QPalette.ColorRole.Mid, QColor(200, 180, 150))
-    p.setColor(QPalette.ColorRole.Shadow, QColor(150, 130, 100))
+    p.setColor(QPalette.ColorRole.Button, QColor(244, 236, 218))
+    p.setColor(QPalette.ColorRole.ButtonText, QColor(25, 25, 40))
+    p.setColor(QPalette.ColorRole.Light, QColor(255, 251, 240))
+    p.setColor(QPalette.ColorRole.Midlight, QColor(248, 240, 220))
+    p.setColor(QPalette.ColorRole.Dark, QColor(190, 178, 160))
+    p.setColor(QPalette.ColorRole.Mid, QColor(210, 198, 180))
+    p.setColor(QPalette.ColorRole.Shadow, QColor(165, 150, 130))
 
-    p.setColor(QPalette.ColorRole.Highlight, QColor(180, 140, 80))
-    p.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(212, 144, 42))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(25, 25, 40))
 
-    p.setColor(QPalette.ColorRole.Link, QColor(120, 80, 40))
-    p.setColor(QPalette.ColorRole.LinkVisited, QColor(150, 100, 60))
+    p.setColor(QPalette.ColorRole.Link, QColor(212, 144, 42))
+    p.setColor(QPalette.ColorRole.LinkVisited, QColor(170, 110, 30))
+
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(170, 165, 155))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(170, 165, 155))
 
     return p
 
@@ -308,12 +369,15 @@ def apply_theme(theme_name: str) -> None:
     不通过 QSS 级联，确保所有原生控件正常渲染。
 
     Args:
-        theme_name: "light" / "dark" / "sepia"
+        theme_name: "dark" / "sepia" / "light_gray" / "black_white"
     """
     themes: dict[str, QPalette] = {
-        "light": _make_light_palette(),
         "dark": _make_dark_palette(),
         "sepia": _make_sepia_palette(),
+        "light_gray": _make_light_gray_palette(),
+        "black_white": _make_black_white_palette(),
     }
-    palette = themes.get(theme_name, _make_light_palette())
-    QApplication.instance().setPalette(palette)
+    palette = themes.get(normalize_theme_name(theme_name), _make_dark_palette())
+    app = QApplication.instance()
+    if app is not None:
+        app.setPalette(palette)

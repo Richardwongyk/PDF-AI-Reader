@@ -187,11 +187,13 @@ class RoutingConfig(BaseModel):
 class UIConfig(BaseModel):
     """UI 配置。"""
     language: str = "zh_CN"              # 界面语言
-    theme: str = "light"                 # light / dark / sepia
+    theme: str = "dark"                  # dark / sepia / light_gray / black_white
     split_position: str = "below"        # below / right（裂缝默认位置）
     font_size: int = 12                  # 阅读区字体大小
     line_spacing: float = 1.5            # 行距
     show_word_translation: bool = False  # 是否开启取词翻译
+    last_document: str = ""              # retained for config compatibility
+    last_page: int = 0                   # retained for config compatibility
 
 
 class AppConfig(BaseModel):

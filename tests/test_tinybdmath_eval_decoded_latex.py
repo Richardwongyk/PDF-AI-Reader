@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.tinybdmath_eval_decoded_latex import (
     _build_report,
     _candidates_from_graph_parser,
@@ -109,6 +111,8 @@ def test_decoded_latex_eval_can_generate_candidates_from_graph_parser_model(tmp_
 
 
 def test_decoded_latex_eval_torch_inference_supports_m5_graph_context(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+
     model_path = tmp_path / "graph_parser_m5.json"
     _toy_m5_artifact().save(model_path)
     graph_rows = [_graph_row("m5", ["l", "i", "m"])]

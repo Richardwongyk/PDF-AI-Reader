@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, QSize, Signal, Slot, QEvent
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -57,7 +57,7 @@ from src.data.annotation_store import read_annotation_store, save_annotation_pat
 from src.app.formula_acceptance_review import FormulaAcceptanceReviewService
 from src.ui.pdf_viewer import PdfViewer
 from src.ui.split_widget import SplitWidget, WebViewPool
-from src.ui.theme import apply_theme
+from src.ui.theme import apply_theme, normalize_theme_name
 from src.app.formula_index_scheduler import FormulaScanTrigger
 
 
@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
 
         # 当前文档状态
         self._current_doc_hash: str = ""
+        self._current_filepath: str = ""
         self._current_blocks: list[DocumentBlock] = []
         self._blocks_by_id: dict[str, DocumentBlock] = {}
         self._loaded_block_pages: set[int] = set()
@@ -160,6 +161,8 @@ class MainWindow(QMainWindow):
         self._active_translation_blocks: set[str] = set()
         self._annotations: dict[str, str] = {}
         self._annotation_store_path = Path("data") / "annotations.json"
+        self._session_state_path = Path("data") / "reader_session.json"
+        self._pending_session_restore: dict[str, Any] | None = None
         self._last_user_translation_at: float = 0.0
         self._pymupdf4llm_pending_result: object | None = None
         self._dock_answer_text: str = ""
@@ -184,12 +187,16 @@ class MainWindow(QMainWindow):
         self._left_panel_expanded_width: int = 240
         self._left_panel_min_width: int = 220
         self._left_dock_float_button: QToolButton | None = None
+        self._left_dock_title_label: QLabel | None = None
         self._right_panel_body: QWidget | None = None
         self._right_panel_toggle_button: QToolButton | None = None
         self._right_dock_float_button: QToolButton | None = None
+        self._right_dock_title_label: QLabel | None = None
         self._right_panel_collapsed: bool = False
         self._right_panel_expanded_width: int = 360
         self._right_panel_min_width: int = 300
+        self._ai_evidence_label: QLabel | None = None
+        self._ai_answer_label: QLabel | None = None
         self._ai_followup_widget: QScrollArea | None = None
         self._ai_followup_container: QWidget | None = None
         self._pending_kb_upserts: dict[str, DocumentBlock] = {}
@@ -207,6 +214,10 @@ class MainWindow(QMainWindow):
         self._generated_toc_timer.setSingleShot(True)
         self._generated_toc_timer.setInterval(1500)
         self._generated_toc_timer.timeout.connect(self._refresh_generated_toc)
+        self._session_save_timer = QTimer(self)
+        self._session_save_timer.setSingleShot(True)
+        self._session_save_timer.setInterval(1200)
+        self._session_save_timer.timeout.connect(self._save_current_session_state)
 
         self._init_ui()
         self._connect_signals()
@@ -262,6 +273,22 @@ class MainWindow(QMainWindow):
         # QShortcut 直接注册到窗口，绕过菜单系统的快捷键限制
         QShortcut(QKeySequence("Ctrl+="), self, lambda: self._pdf_viewer.zoom_in())
         QShortcut(QKeySequence("Ctrl+-"), self, lambda: self._pdf_viewer.zoom_out())
+
+        theme_menu = menubar.addMenu("主题(&M)")
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        self._theme_actions: dict[str, QAction] = {}
+        current_theme = self._normalize_theme_name(self._config.ui.theme)
+        for theme_key, theme_label in self._theme_choices():
+            action = QAction(theme_label, self)
+            action.setCheckable(True)
+            action.setChecked(theme_key == current_theme)
+            action.triggered.connect(
+                lambda checked=False, t=theme_key: self._on_theme_changed(t)
+            )
+            theme_group.addAction(action)
+            theme_menu.addAction(action)
+            self._theme_actions[theme_key] = action
 
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
@@ -615,6 +642,7 @@ class MainWindow(QMainWindow):
 
         evidence_label = QLabel("检索依据")
         evidence_label.setStyleSheet("font-weight: 600;")
+        self._ai_evidence_label = evidence_label
         body_layout.addWidget(evidence_label)
         self._ai_evidence_tree = QTreeWidget()
         self._ai_evidence_tree.setObjectName("ai_evidence_tree")
@@ -629,6 +657,7 @@ class MainWindow(QMainWindow):
 
         answer_label = QLabel("回答")
         answer_label.setStyleSheet("font-weight: 600;")
+        self._ai_answer_label = answer_label
         body_layout.addWidget(answer_label)
         self._ai_answer_view = WebViewPool.acquire()
         self._ai_answer_view.setObjectName("ai_answer_view")
@@ -767,6 +796,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel("导航")
         title_label.setObjectName("left_dock_title_label")
         title_label.setStyleSheet("font-weight: 600;")
+        self._left_dock_title_label = title_label
         title_layout.addWidget(title_label, 1)
 
         self._left_dock_float_button = QToolButton()
@@ -823,6 +853,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel("AI 工具集")
         title_label.setObjectName("right_dock_title_label")
         title_label.setStyleSheet("font-weight: 600;")
+        self._right_dock_title_label = title_label
         title_layout.addWidget(title_label, 1)
 
         self._right_dock_float_button = QToolButton()
@@ -952,30 +983,629 @@ class MainWindow(QMainWindow):
         self._right_panel_toggle_button.setAccessibleName(tooltip)
         self._right_panel_toggle_button.setStatusTip(tooltip)
 
+    def _theme_choices(self) -> list[tuple[str, str]]:
+        return [
+            ("dark", "深色（默认）"),
+            ("sepia", "米黄"),
+            ("light_gray", "浅灰"),
+            ("black_white", "黑白"),
+        ]
+
+    def _normalize_theme_name(self, theme: str) -> str:
+        return normalize_theme_name(theme)
+
+    def _on_theme_changed(self, theme_name: str) -> None:
+        theme = self._normalize_theme_name(theme_name)
+        if theme == self._normalize_theme_name(self._config.ui.theme):
+            return
+        self._services.get("config_manager").update({"ui": {"theme": theme}})
+
+    def _sync_theme_menu(self) -> None:
+        actions = getattr(self, "_theme_actions", None)
+        if not actions:
+            return
+        current = self._normalize_theme_name(self._config.ui.theme)
+        for theme_key, action in actions.items():
+            action.setChecked(theme_key == current)
+
     def _apply_theme(self) -> None:
-        """应用主题。light=系统原生，dark/sepia=QPalette。广播到所有裂缝。"""
-        theme = self._config.ui.theme
-        if theme != "light":
-            apply_theme(theme)
-        self.setStyleSheet("")
+        """应用主题。三套主题都显式使用 QPalette，避免切换时残留旧颜色。"""
+        theme = self._normalize_theme_name(self._config.ui.theme)
+        apply_theme(theme)
+        self.setStyleSheet(self._main_window_theme_stylesheet(theme))
+        self._apply_theme_text_overrides(theme)
+        self._sync_theme_menu()
         if self._pdf_viewer:
             self._pdf_viewer.apply_theme_to_splits(theme)
         self._set_dock_answer_theme(theme)
 
+    def _main_window_theme_stylesheet(self, theme: str) -> str:
+        theme = normalize_theme_name(theme)
+        if theme == "light_gray":
+            return """
+                QMainWindow {
+                    background: #dcdcdc;
+                    color: #2a2a2a;
+                }
+                QMenuBar, QMenu {
+                    background: #dcdcdc;
+                    color: #2a2a2a;
+                    border-bottom: 1px solid #bebebe;
+                }
+                QMenuBar::item {
+                    color: #2a2a2a;
+                    background: transparent;
+                    padding: 4px 10px;
+                }
+                QMenuBar::item:selected,
+                QMenu::item:selected {
+                    background: #d4d4d4;
+                    color: #2a2a2a;
+                }
+                QToolBar {
+                    background: #dcdcdc;
+                    color: #2a2a2a;
+                    border-bottom: 1px solid #bebebe;
+                    spacing: 4px;
+                }
+                QToolBar QToolButton {
+                    color: #2a2a2a;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    padding: 4px 8px;
+                }
+                QToolBar QToolButton:hover {
+                    background: #e8f1f8;
+                    border-color: #5b9bd5;
+                }
+                QToolBar QLineEdit,
+                QLineEdit {
+                    color: #2a2a2a;
+                    background: #e4e4e4;
+                    border: 1px solid #bebebe;
+                    border-radius: 4px;
+                    selection-background-color: #5b9bd5;
+                    selection-color: #ffffff;
+                }
+                QDockWidget, QDockWidget QWidget {
+                    color: #2a2a2a;
+                    background: #e4e4e4;
+                    titlebar-close-icon: none;
+                    titlebar-normal-icon: none;
+                }
+                QWidget#left_dock_title_bar,
+                QWidget#right_dock_title_bar {
+                    background: #d4d4d4;
+                    color: #2a2a2a;
+                    border-bottom: 1px solid #bebebe;
+                }
+                QLabel {
+                    color: #2a2a2a;
+                }
+                QTreeWidget {
+                    color: #2a2a2a;
+                    background: #e4e4e4;
+                    alternate-background-color: #d4d4d4;
+                    border: 1px solid #bebebe;
+                    selection-background-color: #d0e7fb;
+                    selection-color: #2a2a2a;
+                }
+                QHeaderView::section {
+                    color: #2a2a2a;
+                    background: #d4d4d4;
+                    border: 1px solid #bebebe;
+                    font-weight: 600;
+                }
+                QScrollArea {
+                    background: #e4e4e4;
+                    color: #2a2a2a;
+                }
+                QPushButton {
+                    color: #2a2a2a;
+                }
+                QStatusBar {
+                    background: #dcdcdc;
+                    color: #2a2a2a;
+                    border-top: 1px solid #bebebe;
+                }
+                QProgressBar {
+                    color: #2a2a2a;
+                    background: #e4e4e4;
+                    border: 1px solid #bebebe;
+                    border-radius: 4px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background: #5b9bd5;
+                    border-radius: 3px;
+                }
+            """
+        if theme == "black_white":
+            return """
+                QMainWindow {
+                    background: #1a1a1a;
+                    color: #e8e8e8;
+                }
+                QMenuBar, QMenu {
+                    background: #1a1a1a;
+                    color: #e8e8e8;
+                    border-bottom: 1px solid #3a3a3a;
+                }
+                QMenuBar::item {
+                    color: #e8e8e8;
+                    background: transparent;
+                    padding: 4px 10px;
+                }
+                QMenuBar::item:selected,
+                QMenu::item:selected {
+                    background: #242424;
+                    color: #ffffff;
+                }
+                QToolBar {
+                    background: #1a1a1a;
+                    color: #e8e8e8;
+                    border-bottom: 1px solid #3a3a3a;
+                    spacing: 4px;
+                }
+                QToolBar QToolButton {
+                    color: #e8e8e8;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    padding: 4px 8px;
+                }
+                QToolBar QToolButton:hover {
+                    background: #242424;
+                    border-color: #6c5ce7;
+                }
+                QToolBar QLineEdit,
+                QLineEdit {
+                    color: #e8e8e8;
+                    background: #242424;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 4px;
+                    selection-background-color: #6c5ce7;
+                    selection-color: #ffffff;
+                }
+                QDockWidget, QDockWidget QWidget {
+                    color: #e8e8e8;
+                    background: #242424;
+                    titlebar-close-icon: none;
+                    titlebar-normal-icon: none;
+                }
+                QWidget#left_dock_title_bar,
+                QWidget#right_dock_title_bar {
+                    background: #1e1e1e;
+                    color: #e8e8e8;
+                    border-bottom: 1px solid #3a3a3a;
+                }
+                QLabel {
+                    color: #e8e8e8;
+                }
+                QTreeWidget {
+                    color: #e8e8e8;
+                    background: #242424;
+                    alternate-background-color: #1e1e1e;
+                    border: 1px solid #3a3a3a;
+                    selection-background-color: #3a315f;
+                    selection-color: #ffffff;
+                }
+                QHeaderView::section {
+                    color: #e8e8e8;
+                    background: #1e1e1e;
+                    border: 1px solid #3a3a3a;
+                    font-weight: 600;
+                }
+                QScrollArea {
+                    background: #242424;
+                    color: #e8e8e8;
+                }
+                QPushButton {
+                    color: #e8e8e8;
+                }
+                QStatusBar {
+                    background: #1a1a1a;
+                    color: #e8e8e8;
+                    border-top: 1px solid #3a3a3a;
+                }
+                QProgressBar {
+                    color: #e8e8e8;
+                    background: #242424;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 4px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background: #6c5ce7;
+                    border-radius: 3px;
+                }
+            """
+        if theme == "sepia":
+            return """
+                QMainWindow {
+                    background: #faf4e3;
+                    color: #191928;
+                }
+                QMenuBar, QMenu {
+                    background: #faf4e3;
+                    color: #191928;
+                    border-bottom: 1px solid #d8ccb8;
+                }
+                QMenuBar::item {
+                    color: #191928;
+                    background: transparent;
+                    padding: 4px 10px;
+                }
+                QMenuBar::item:selected,
+                QMenu::item:selected {
+                    background: #f0e8d4;
+                    color: #191928;
+                }
+                QToolBar {
+                    background: #faf4e3;
+                    color: #191928;
+                    border-bottom: 1px solid #d8ccb8;
+                    spacing: 4px;
+                }
+                QToolBar QToolButton {
+                    color: #191928;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    padding: 4px 8px;
+                }
+                QToolBar QToolButton:hover {
+                    background: #fdf0de;
+                    border-color: #d4902a;
+                }
+                QToolBar QLineEdit,
+                QLineEdit {
+                    color: #191928;
+                    background: #fffbf0;
+                    border: 1px solid #d8ccb8;
+                    border-radius: 4px;
+                    selection-background-color: #d4902a;
+                    selection-color: #ffffff;
+                }
+                QDockWidget, QDockWidget QWidget {
+                    color: #191928;
+                    background: #fffbf0;
+                    titlebar-close-icon: none;
+                    titlebar-normal-icon: none;
+                }
+                QWidget#left_dock_title_bar,
+                QWidget#right_dock_title_bar {
+                    background: #f0e8d4;
+                    color: #191928;
+                    border-bottom: 1px solid #d8ccb8;
+                }
+                QLabel {
+                    color: #191928;
+                }
+                QTreeWidget {
+                    color: #191928;
+                    background: #fffbf0;
+                    alternate-background-color: #f8f0dc;
+                    border: 1px solid #d8ccb8;
+                    selection-background-color: #fdf0de;
+                    selection-color: #191928;
+                }
+                QHeaderView::section {
+                    color: #191928;
+                    background: #f0e8d4;
+                    border: 1px solid #d8ccb8;
+                    font-weight: 600;
+                }
+                QScrollArea {
+                    background: #fffbf0;
+                    color: #191928;
+                }
+                QPushButton {
+                    color: #191928;
+                }
+                QStatusBar {
+                    background: #faf4e3;
+                    color: #191928;
+                    border-top: 1px solid #d8ccb8;
+                }
+                QProgressBar {
+                    color: #191928;
+                    background: #fffbf0;
+                    border: 1px solid #d8ccb8;
+                    border-radius: 4px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background: #d4902a;
+                    border-radius: 3px;
+                }
+            """
+        if theme == "light":
+            return """
+                QMainWindow {
+                    background: #fafafa;
+                    color: #111111;
+                }
+                QMenuBar, QMenu {
+                    background: #fafafa;
+                    color: #111111;
+                }
+                QMenuBar::item {
+                    color: #111111;
+                    background: transparent;
+                    padding: 4px 10px;
+                }
+                QMenuBar::item:selected,
+                QMenu::item:selected {
+                    background: #e5e7eb;
+                    color: #111111;
+                }
+                QMenuBar::item:disabled,
+                QMenu::item:disabled {
+                    color: #6b7280;
+                }
+                QToolBar {
+                    background: #fafafa;
+                    color: #111111;
+                    border-bottom: 1px solid #d1d5db;
+                    spacing: 4px;
+                }
+                QToolBar QToolButton {
+                    color: #111111;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    padding: 4px 8px;
+                }
+                QToolBar QToolButton:hover {
+                    background: #e5e7eb;
+                    border-color: #cbd5e1;
+                }
+                QToolBar QLineEdit,
+                QLineEdit {
+                    color: #111111;
+                    background: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    selection-background-color: #2563eb;
+                    selection-color: #ffffff;
+                }
+                QDockWidget {
+                    color: #111111;
+                    background: #ffffff;
+                    titlebar-close-icon: none;
+                    titlebar-normal-icon: none;
+                }
+                QDockWidget QWidget {
+                    background: #ffffff;
+                    color: #111111;
+                }
+                QWidget#left_dock_title_bar,
+                QWidget#right_dock_title_bar {
+                    background: #ffffff;
+                    color: #111111;
+                    border-bottom: 1px solid #d1d5db;
+                }
+                QLabel {
+                    color: #111111;
+                }
+                QTreeWidget {
+                    color: #111111;
+                    background: #ffffff;
+                    alternate-background-color: #f3f4f6;
+                    border: 1px solid #d1d5db;
+                    selection-background-color: #dbeafe;
+                    selection-color: #111111;
+                }
+                QTreeWidget::item {
+                    color: #111111;
+                }
+                QTreeWidget::item:selected {
+                    background: #dbeafe;
+                    color: #111111;
+                }
+                QHeaderView::section {
+                    color: #111111;
+                    background: #f3f4f6;
+                    border: 1px solid #d1d5db;
+                    font-weight: 600;
+                }
+                QScrollArea {
+                    background: #ffffff;
+                    color: #111111;
+                }
+                QPushButton {
+                    color: #111111;
+                }
+                QStatusBar {
+                    background: #fafafa;
+                    color: #111111;
+                }
+                QProgressBar {
+                    color: #111111;
+                    background: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background: #2563eb;
+                    border-radius: 3px;
+                }
+            """
+        if theme == "sepia":
+            return """
+                QMainWindow {
+                    background: #dab867;
+                    color: #12325c;
+                }
+                QMenuBar, QMenu {
+                    background: #d4ae58;
+                    color: #12325c;
+                }
+                QMenuBar::item {
+                    color: #12325c;
+                    background: transparent;
+                    padding: 4px 10px;
+                }
+                QMenuBar::item:selected,
+                QMenu::item:selected {
+                    background: #efd489;
+                    color: #12325c;
+                }
+                QMenuBar::item:disabled,
+                QMenu::item:disabled {
+                    color: #59606d;
+                }
+                QToolBar {
+                    background: #d4ae58;
+                    color: #12325c;
+                    border-bottom: 1px solid #9e7831;
+                    spacing: 4px;
+                }
+                QToolBar QToolButton {
+                    color: #12325c;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    padding: 4px 8px;
+                }
+                QToolBar QToolButton:hover {
+                    background: #e7c776;
+                    border-color: #9e7831;
+                }
+                QToolBar QLineEdit,
+                QLineEdit {
+                    color: #12325c;
+                    background: #ecd99f;
+                    border: 1px solid #9e7831;
+                    border-radius: 4px;
+                    selection-background-color: #12325c;
+                    selection-color: #fff6da;
+                }
+                QDockWidget {
+                    color: #12325c;
+                    background: #e2c374;
+                    titlebar-close-icon: none;
+                    titlebar-normal-icon: none;
+                }
+                QDockWidget QWidget {
+                    background: #e2c374;
+                    color: #12325c;
+                }
+                QWidget#left_dock_title_bar,
+                QWidget#right_dock_title_bar {
+                    background: #cfaa54;
+                    color: #12325c;
+                    border-bottom: 1px solid #9e7831;
+                }
+                QLabel {
+                    color: #12325c;
+                }
+                QTreeWidget {
+                    color: #12325c;
+                    background: #e2c374;
+                    alternate-background-color: #e9cc85;
+                    border: 1px solid #9e7831;
+                    selection-background-color: #f1d98f;
+                    selection-color: #12325c;
+                }
+                QTreeWidget::item {
+                    color: #12325c;
+                }
+                QTreeWidget::item:selected {
+                    background: #f1d98f;
+                    color: #12325c;
+                }
+                QHeaderView::section {
+                    color: #12325c;
+                    background: #cfaa54;
+                    border: 1px solid #9e7831;
+                    font-weight: 600;
+                }
+                QScrollArea {
+                    background: #e2c374;
+                    color: #12325c;
+                }
+                QPushButton {
+                    color: #12325c;
+                }
+                QStatusBar {
+                    background: #d4ae58;
+                    color: #12325c;
+                }
+                QProgressBar {
+                    color: #12325c;
+                    background: #ecd99f;
+                    border: 1px solid #9e7831;
+                    border-radius: 4px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background: #12325c;
+                    border-radius: 3px;
+                }
+            """
+        else:
+            return ""
+
+    def _apply_theme_text_overrides(self, theme: str) -> None:
+        theme = self._normalize_theme_name(theme)
+        if theme == "light_gray":
+            status_style = "color: #2a2a2a; font-weight: 600;"
+            label_style = "color: #2a2a2a; font-weight: 600;"
+        elif theme == "sepia":
+            status_style = "color: #191928; font-weight: 600;"
+            label_style = "color: #191928; font-weight: 600;"
+        elif theme == "black_white":
+            status_style = "color: #e8e8e8; font-weight: 600;"
+            label_style = "color: #e8e8e8; font-weight: 600;"
+        else:
+            status_style = "color: #444; font-weight: 600;"
+            label_style = "font-weight: 600;"
+        for label in (
+            getattr(self, "_left_dock_title_label", None),
+            getattr(self, "_right_dock_title_label", None),
+            getattr(self, "_ai_evidence_label", None),
+            getattr(self, "_ai_answer_label", None),
+            getattr(self, "_ai_followup_label", None),
+        ):
+            if label is not None:
+                label.setStyleSheet(label_style)
+        if getattr(self, "_ai_doc_status", None) is not None:
+            self._ai_doc_status.setStyleSheet(status_style)
+
     def _set_dock_answer_theme(self, theme: str) -> None:
         """同步右侧问答 WebView 主题。"""
-        dock_widget = self._right_dock.widget() or self._right_dock
-        palette = dock_widget.palette()
-        bg = palette.color(QPalette.ColorRole.Window)
-        if not bg.isValid():
-            bg = palette.color(QPalette.ColorRole.Base)
-        fg = palette.color(QPalette.ColorRole.Text)
-        if not fg.isValid():
-            fg = palette.color(QPalette.ColorRole.WindowText)
+        theme = self._normalize_theme_name(theme)
+        if theme == "light_gray":
+            bg = QColor("#e4e4e4")
+            fg = QColor("#2a2a2a")
+        elif theme == "sepia":
+            bg = QColor("#fffbf0")
+            fg = QColor("#191928")
+        elif theme == "black_white":
+            bg = QColor("#242424")
+            fg = QColor("#e8e8e8")
+        else:
+            dock_widget = self._right_dock.widget() or self._right_dock
+            palette = dock_widget.palette()
+            bg = palette.color(QPalette.ColorRole.Window)
+            if not bg.isValid():
+                bg = palette.color(QPalette.ColorRole.Base)
+            fg = palette.color(QPalette.ColorRole.Text)
+            if not fg.isValid():
+                fg = palette.color(QPalette.ColorRole.WindowText)
         if self._contrast_ratio(bg, fg) < 4.5:
             fg = QColor("#f8fafc") if bg.lightness() < 128 else QColor("#111827")
-        link = QColor("#93c5fd") if bg.lightness() < 128 else QColor("#2563eb")
-        blockquote = QColor("#e5e7eb") if bg.lightness() < 128 else QColor("#4b5563")
+        if theme == "sepia":
+            link = QColor("#d4902a")
+            blockquote = QColor("#8b7e6c")
+        elif theme == "black_white":
+            link = QColor("#8cb4ff")
+            blockquote = QColor("#999999")
+        elif theme == "light_gray":
+            link = QColor("#5b9bd5")
+            blockquote = QColor("#6e6e6e")
+        else:
+            link = QColor("#93c5fd") if bg.lightness() < 128 else QColor("#2563eb")
+            blockquote = QColor("#e5e7eb") if bg.lightness() < 128 else QColor("#4b5563")
         html_theme = "dark" if bg.lightness() < 128 else "light"
         safe_theme = json.dumps(html_theme)
         safe_bg = json.dumps(bg.name())
@@ -1145,17 +1775,118 @@ class MainWindow(QMainWindow):
         if filepath:
             self._open_pdf_file(filepath)
 
-    def _open_pdf_file(self, filepath: str) -> None:
+    def _open_pdf_file(self, filepath: str, *, restore_session: bool = True) -> None:
         """打开 PDF 文件（委托 DocumentFlow 协调器）。"""
-        self.logger.info("_open_pdf_file: %s", filepath)
+        self._session_save_timer.stop()
+        self._save_current_session_state()
+        resolved = str(Path(filepath).expanduser().resolve())
+        if restore_session:
+            self._prepare_session_restore_for_path(resolved)
+        else:
+            self._pending_session_restore = None
+        self.logger.info("_open_pdf_file: %s", resolved)
         self._status_page_label.setText("正在解析 PDF...")
         self._status_progress.setVisible(True)
-        self._document_flow.open_document(filepath)
+        self._document_flow.open_document(resolved)
+
+    def restore_last_reading_session(self) -> bool:
+        """Open the last readable PDF recorded in the local reading session."""
+        state = self._read_session_state()
+        filepath = str(state.get("filepath", "") or "").strip()
+        if not filepath:
+            return False
+        try:
+            path = Path(filepath).expanduser().resolve()
+        except OSError:
+            return False
+        if not path.is_file():
+            return False
+        self._open_pdf_file(str(path))
+        return True
+
+    def _read_session_state(self) -> dict[str, Any]:
+        try:
+            raw = self._session_state_path.read_text(encoding="utf-8")
+            state = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def _save_current_session_state(self) -> None:
+        if not self._viewer_document_loaded or not self._current_filepath or not self._current_doc_hash:
+            return
+        try:
+            position = self._pdf_viewer.current_reading_position()
+        except Exception:
+            self.logger.debug("Failed to read current PDF position", exc_info=True)
+            return
+        if not position:
+            return
+        state = {
+            "version": 1,
+            "filepath": self._current_filepath,
+            "doc_hash": self._current_doc_hash,
+            "position": position,
+            "updated_at": time.time(),
+        }
+        try:
+            self._session_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._session_state_path.with_suffix(".json.tmp")
+            tmp_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(self._session_state_path)
+        except OSError:
+            self.logger.debug("Failed to save reading session state", exc_info=True)
+
+    def _prepare_session_restore_for_path(self, filepath: str) -> None:
+        state = self._read_session_state()
+        if not self._same_session_path(filepath, str(state.get("filepath", "") or "")):
+            self._pending_session_restore = None
+            return
+        position = state.get("position")
+        self._pending_session_restore = state if isinstance(position, dict) else None
+
+    def _same_session_path(self, left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        try:
+            left_key = str(Path(left).expanduser().resolve()).casefold()
+            right_key = str(Path(right).expanduser().resolve()).casefold()
+        except OSError:
+            left_key = str(Path(left).expanduser()).casefold()
+            right_key = str(Path(right).expanduser()).casefold()
+        return left_key == right_key
+
+    def _restore_pending_session_position(self) -> None:
+        state = self._pending_session_restore
+        self._pending_session_restore = None
+        if not state or not self._current_filepath or not self._current_doc_hash:
+            return
+        if not self._same_session_path(self._current_filepath, str(state.get("filepath", "") or "")):
+            return
+        saved_hash = str(state.get("doc_hash", "") or "")
+        if saved_hash and saved_hash != self._current_doc_hash:
+            self.logger.info("Skip session position restore because PDF hash changed")
+            return
+        position = state.get("position")
+        if not isinstance(position, dict):
+            return
+
+        def attempt_restore() -> None:
+            if not self._viewer_document_loaded or not self._current_filepath:
+                return
+            self._pdf_viewer.restore_reading_position(position)
+
+        for delay_ms in (0, 160, 420):
+            QTimer.singleShot(delay_ms, attempt_restore)
 
     def _on_document_closed(self) -> None:
         """DocumentFlow 通知文档已关闭 → 清理 UI。"""
         self._pdf_viewer.clear()
         self._current_doc_hash = ""
+        self._current_filepath = ""
         self._current_blocks.clear()
         self._blocks_by_id.clear()
         self._loaded_block_pages.clear()
@@ -1195,6 +1926,7 @@ class MainWindow(QMainWindow):
             self._loaded_block_pages = {b.page_num for b in self._current_blocks}
         self._has_native_toc = bool(result.toc)
         self._current_doc_hash = self._document_flow.current_hash
+        self._current_filepath = str(Path(result.filepath).expanduser().resolve())
         self._load_annotations_for_current_document()
         self._ask_flow.set_doc_hash(self._current_doc_hash)
         self._status_progress.setVisible(False)
@@ -1226,6 +1958,7 @@ class MainWindow(QMainWindow):
             self._pdf_viewer.update_page_blocks(page_num, page_blocks)
         self._pending_page_blocks.clear()
         self._viewer_document_loaded = True
+        self._restore_pending_session_position()
         self._last_formula_viewport_pages.clear()
         self._formula_idle_timer.stop()
         QTimer.singleShot(250, lambda fp=result.filepath: self._start_import_formula_plan_thread(fp))
@@ -1461,6 +2194,8 @@ class MainWindow(QMainWindow):
         if not self._viewer_document_loaded or not self._current_doc_hash:
             return
         self._formula_viewport_timer.start()
+        if self._current_filepath:
+            self._session_save_timer.start()
 
     def _schedule_viewport_formula_scan(self) -> None:
         pages = self._pdf_viewer.visible_pages(margin_pages=False)
@@ -2326,13 +3061,19 @@ class MainWindow(QMainWindow):
     # =========================================================================
 
     def _on_open_settings(self) -> None:
-        """打开设置对话框 — 配置云端 API。"""
+        """打开设置对话框 — 配置云端 API 与界面主题。"""
         from PySide6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QComboBox
 
         cm = self._services.get("config_manager")
         dlg = QDialog(self)
-        dlg.setWindowTitle("设置 — 云端 API 配置")
+        dlg.setWindowTitle("设置")
+        dlg.setObjectName("settings_dialog")
+        dlg.setStyleSheet(self._settings_dialog_stylesheet(self._config.ui.theme))
+        dlg.setMinimumWidth(360)
         layout = QFormLayout(dlg)
+        layout.setContentsMargins(26, 20, 26, 20)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(12)
 
         provider_box = QComboBox()
         providers = [
@@ -2361,6 +3102,15 @@ class MainWindow(QMainWindow):
         key_edit.setText(existing)
         layout.addRow("API Key:", key_edit)
 
+        theme_box = QComboBox()
+        for value, label in self._theme_choices():
+            theme_box.addItem(label, value)
+        current_theme = self._normalize_theme_name(self._config.ui.theme)
+        theme_index = theme_box.findData(current_theme)
+        if theme_index >= 0:
+            theme_box.setCurrentIndex(theme_index)
+        layout.addRow("主题:", theme_box)
+
         def _load_provider_key(_index: int) -> None:
             provider = str(provider_box.currentData() or provider_box.currentText())
             key_edit.setText(cm.get_api_key(provider) or "")
@@ -2376,35 +3126,302 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             provider = str(provider_box.currentData() or provider_box.currentText())
             api_key = key_edit.text().strip()
+            theme = str(theme_box.currentData() or "dark")
+            old_cfg = self._config
+            old_provider = normalize_litellm_model(old_cfg.model.cloud_translation or old_cfg.model.cloud)
+            old_api_key = cm.get_api_key(provider) or ""
+
+            updates: dict[str, Any] = {}
+            model_changed = False
+            provider_key_missing = False
+
+            if theme != old_cfg.ui.theme:
+                updates["ui"] = {"theme": theme}
+
             if api_key:
-                old_cfg = self._config
-                old_provider = normalize_litellm_model(old_cfg.model.cloud_translation or old_cfg.model.cloud)
-                old_api_key = cm.get_api_key(provider) or ""
-                if provider == old_provider and api_key == old_api_key:
-                    self._status_model_label.setText(self._model_status_text())
-                    QMessageBox.information(
-                        self,
-                        "已生效",
-                        f"云端模型 {display_model_name(provider)} 当前已在使用，配置未变化。",
-                    )
-                    return
-                cm.update({
-                    "model": {
+                if provider != old_provider or api_key != old_api_key:
+                    updates["model"] = {
                         "cloud": provider,
                         "cloud_translation": provider,
-                    },
-                    "api_keys": {provider: api_key},
-                })
+                    }
+                    updates["api_keys"] = {provider: api_key}
+                    model_changed = True
+            elif provider != old_provider:
+                provider_key_missing = True
+
+            if updates:
+                cm.update(updates)
                 new_config = cm.get()
-                self._apply_cloud_runtime_config(new_config)
+                if model_changed:
+                    self._apply_cloud_runtime_config(new_config)
                 self._status_model_label.setText(self._model_status_text())
+                changed_parts: list[str] = []
+                if model_changed:
+                    changed_parts.append(f"云端模型 {display_model_name(provider)}")
+                if "ui" in updates:
+                    changed_parts.append(f"主题 {theme_box.currentText()}")
+                message = "、".join(changed_parts) + " 已保存并立即生效。"
+                if provider_key_missing:
+                    message += "\n\n云端模型未保存：API Key 为空，本次仅保存主题设置。"
                 QMessageBox.information(
                     self,
                     "已生效",
-                    f"云端模型 {display_model_name(provider)} 已保存并立即生效。",
+                    message,
                 )
+            elif provider_key_missing:
+                QMessageBox.warning(self, "未保存", "切换云端模型需要填写 API Key。")
             else:
-                QMessageBox.warning(self, "未保存", "API Key 不能为空。")
+                self._status_model_label.setText(self._model_status_text())
+                QMessageBox.information(self, "已生效", "当前配置未变化。")
+
+    def _settings_dialog_stylesheet(self, theme: str) -> str:
+        theme = normalize_theme_name(theme)
+        if theme == "light_gray":
+            return """
+                QDialog#settings_dialog {
+                    background: #e4e4e4;
+                    color: #2a2a2a;
+                }
+                QDialog#settings_dialog QLabel {
+                    color: #2a2a2a;
+                    font-size: 14px;
+                }
+                QDialog#settings_dialog QLineEdit,
+                QDialog#settings_dialog QComboBox {
+                    min-height: 30px;
+                    padding: 4px 10px;
+                    border: 1px solid #bebebe;
+                    border-radius: 6px;
+                    background: #f0f0f0;
+                    color: #2a2a2a;
+                    selection-background-color: #5b9bd5;
+                    selection-color: #ffffff;
+                }
+                QDialog#settings_dialog QComboBox::drop-down {
+                    border: none;
+                    width: 28px;
+                }
+                QDialog#settings_dialog QComboBox QAbstractItemView {
+                    background: #f0f0f0;
+                    color: #2a2a2a;
+                    border: 1px solid #bebebe;
+                    selection-background-color: #d0e7fb;
+                    selection-color: #2a2a2a;
+                }
+                QDialog#settings_dialog QPushButton {
+                    min-width: 96px;
+                    min-height: 30px;
+                    color: #2a2a2a;
+                    background: #ededed;
+                    border: 1px solid #bebebe;
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                }
+                QDialog#settings_dialog QPushButton:hover {
+                    background: #f7f7f7;
+                    border-color: #5b9bd5;
+                }
+                QDialog#settings_dialog QPushButton:default {
+                    border: 1px solid #1d7dd8;
+                }
+            """
+        if theme == "black_white":
+            return """
+                QDialog#settings_dialog {
+                    background: #242424;
+                    color: #e8e8e8;
+                }
+                QDialog#settings_dialog QLabel {
+                    color: #e8e8e8;
+                    font-size: 14px;
+                }
+                QDialog#settings_dialog QLineEdit,
+                QDialog#settings_dialog QComboBox {
+                    min-height: 30px;
+                    padding: 4px 10px;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 6px;
+                    background: #1e1e1e;
+                    color: #e8e8e8;
+                    selection-background-color: #6c5ce7;
+                    selection-color: #ffffff;
+                }
+                QDialog#settings_dialog QComboBox::drop-down {
+                    border: none;
+                    width: 28px;
+                }
+                QDialog#settings_dialog QComboBox QAbstractItemView {
+                    background: #1e1e1e;
+                    color: #e8e8e8;
+                    border: 1px solid #3a3a3a;
+                    selection-background-color: #3a315f;
+                    selection-color: #ffffff;
+                }
+                QDialog#settings_dialog QPushButton {
+                    min-width: 96px;
+                    min-height: 30px;
+                    color: #e8e8e8;
+                    background: #2c2c2c;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                }
+                QDialog#settings_dialog QPushButton:hover {
+                    background: #343434;
+                    border-color: #6c5ce7;
+                }
+                QDialog#settings_dialog QPushButton:default {
+                    border: 1px solid #8cb4ff;
+                }
+            """
+        if theme == "sepia":
+            return """
+                QDialog#settings_dialog {
+                    background: #faf4e3;
+                    color: #191928;
+                }
+                QDialog#settings_dialog QLabel {
+                    color: #191928;
+                    font-size: 14px;
+                }
+                QDialog#settings_dialog QLineEdit,
+                QDialog#settings_dialog QComboBox {
+                    min-height: 30px;
+                    padding: 4px 10px;
+                    border: 1px solid #d8ccb8;
+                    border-radius: 6px;
+                    background: #fffbf0;
+                    color: #191928;
+                    selection-background-color: #d4902a;
+                    selection-color: #ffffff;
+                }
+                QDialog#settings_dialog QComboBox::drop-down {
+                    border: none;
+                    width: 28px;
+                }
+                QDialog#settings_dialog QComboBox QAbstractItemView {
+                    background: #fffbf0;
+                    color: #191928;
+                    border: 1px solid #d8ccb8;
+                    selection-background-color: #fdf0de;
+                    selection-color: #191928;
+                }
+                QDialog#settings_dialog QPushButton {
+                    min-width: 96px;
+                    min-height: 30px;
+                    color: #191928;
+                    background: #f4ecda;
+                    border: 1px solid #d8ccb8;
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                }
+                QDialog#settings_dialog QPushButton:hover {
+                    background: #fdf0de;
+                    border-color: #d4902a;
+                }
+                QDialog#settings_dialog QPushButton:default {
+                    border: 1px solid #1d7dd8;
+                }
+            """
+        if theme == "sepia":
+            return """
+                QDialog#settings_dialog {
+                    background: #d9b760;
+                    color: #12325c;
+                }
+                QDialog#settings_dialog QLabel {
+                    color: #12325c;
+                    font-size: 14px;
+                }
+                QDialog#settings_dialog QLineEdit,
+                QDialog#settings_dialog QComboBox {
+                    min-height: 30px;
+                    padding: 4px 10px;
+                    border: 1px solid #9e7831;
+                    border-radius: 6px;
+                    background: #ecd18a;
+                    color: #12325c;
+                    selection-background-color: #12325c;
+                    selection-color: #fff6da;
+                }
+                QDialog#settings_dialog QComboBox::drop-down {
+                    border: none;
+                    width: 28px;
+                }
+                QDialog#settings_dialog QComboBox QAbstractItemView {
+                    background: #ecd18a;
+                    color: #12325c;
+                    border: 1px solid #9e7831;
+                    selection-background-color: #12325c;
+                    selection-color: #fff6da;
+                }
+                QDialog#settings_dialog QPushButton {
+                    min-width: 96px;
+                    min-height: 30px;
+                    color: #12325c;
+                    background: #f0d486;
+                    border: 1px solid #c09843;
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                }
+                QDialog#settings_dialog QPushButton:hover {
+                    background: #f6dea0;
+                    border-color: #12325c;
+                }
+                QDialog#settings_dialog QPushButton:default {
+                    border: 1px solid #1d7dd8;
+                }
+            """
+        if theme == "light":
+            return """
+                QDialog#settings_dialog {
+                    background: #ffffff;
+                    color: #111111;
+                }
+                QDialog#settings_dialog QLabel {
+                    color: #111111;
+                    font-size: 14px;
+                }
+                QDialog#settings_dialog QLineEdit,
+                QDialog#settings_dialog QComboBox {
+                    min-height: 30px;
+                    padding: 4px 10px;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 6px;
+                    background: #ffffff;
+                    color: #111111;
+                    selection-background-color: #2563eb;
+                    selection-color: #ffffff;
+                }
+                QDialog#settings_dialog QComboBox::drop-down {
+                    border: none;
+                    width: 28px;
+                }
+                QDialog#settings_dialog QComboBox QAbstractItemView {
+                    background: #ffffff;
+                    color: #111111;
+                    border: 1px solid #cbd5e1;
+                    selection-background-color: #dbeafe;
+                    selection-color: #111111;
+                }
+                QDialog#settings_dialog QPushButton {
+                    min-width: 96px;
+                    min-height: 30px;
+                    color: #111111;
+                    background: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                }
+                QDialog#settings_dialog QPushButton:hover {
+                    background: #f3f4f6;
+                    border-color: #2563eb;
+                }
+                QDialog#settings_dialog QPushButton:default {
+                    border: 1px solid #1d7dd8;
+                }
+            """
+        return ""
 
     def _apply_cloud_runtime_config(self, config: AppConfig) -> None:
         """Apply cloud model/client changes without restarting the app."""
@@ -2456,6 +3473,7 @@ class MainWindow(QMainWindow):
     def _on_config_changed(self, config: AppConfig) -> None:
         """配置变更：重新应用主题。"""
         self._config = config
+        self._sync_theme_menu()
         self._apply_theme()
 
     def _model_status_text(self) -> str:
@@ -2621,6 +3639,8 @@ class MainWindow(QMainWindow):
         确保 ChromaDB WAL 文件正确刷入磁盘。
         """
         self.logger.info("MainWindow closeEvent: accepted; shutting down services")
+        self._session_save_timer.stop()
+        self._save_current_session_state()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)

@@ -524,7 +524,12 @@ def main() -> int:
             pdf_path = Path(args.open_pdf).resolve()
             if not pdf_path.exists():
                 raise FileNotFoundError(f"PDF not found: {pdf_path}")
-            QTimer.singleShot(0, lambda path=str(pdf_path): window._open_pdf_file(path))
+            QTimer.singleShot(
+                0,
+                lambda path=str(pdf_path): window._open_pdf_file(path, restore_session=False),
+            )
+        elif not args.test_mode:
+            QTimer.singleShot(0, window.restore_last_reading_session)
         total = __import__('time').perf_counter() - t_start
         logging.info("主窗口已显示。总启动时间: %.2fs", total)
 

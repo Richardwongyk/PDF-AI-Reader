@@ -25,6 +25,7 @@ tempCodeRunnerFile.*
 data/knowledge_bases/
 data/knowledge_bases_fts/
 data/annotations.json
+data/reader_session.json
 data/runtime/
 
 # 日志

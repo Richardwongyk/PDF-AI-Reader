@@ -552,7 +552,7 @@ class SplitWidget(QFrame):
 
     def _apply_translation_style(self) -> None:
         """应用翻译/解释模式的样式。"""
-        bg = "#f0f5ff" if self._current_theme == "light" else "#1a1a2e"
+        bg = "#f0f5ff"
         self.setStyleSheet(f"""
             QFrame#split_container {{
                 background: {bg};
@@ -587,9 +587,9 @@ class SplitWidget(QFrame):
         """)
 
     def _apply_annotation_style(self) -> None:
-        bg = "#fff8e6" if self._current_theme == "light" else "#2f2918"
-        border = "#f2c94c" if self._current_theme == "light" else "#8a6d1d"
-        text = "#2f2a1c" if self._current_theme == "light" else "#f5e8ba"
+        bg = "#fff8e6"
+        border = "#f2c94c"
+        text = "#2f2a1c"
         self.setStyleSheet(f"""
             QFrame#split_container {{
                 background: {bg};
@@ -708,10 +708,11 @@ class SplitWidget(QFrame):
         """将主题应用到 SplitWidget QSS 和 WebView HTML 内容。"""
         self._current_theme = theme
         self._update_mode_ui()
+        html_theme = "light"
         if self._page_ready and self._result_view is not None:
-            self._result_view.page().runJavaScript(f"setTheme('{theme}');")
+            self._result_view.page().runJavaScript(f"setTheme('{html_theme}');")
         else:
-            self._pending_theme = theme
+            self._pending_theme = html_theme
 
     # ── WebView 截图冻结 ──
 

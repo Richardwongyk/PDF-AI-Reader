@@ -5,6 +5,8 @@ EmbeddingService: 文本向量化（通过 Ollama BGE-M3）
 KnowledgeEngine: 知识库构建与语义检索的协调者
 """
 
+from __future__ import annotations
+
 import math
 import re
 from collections import Counter
