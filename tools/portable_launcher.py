@@ -29,9 +29,16 @@ def _append_path(env: dict[str, str], *paths: Path) -> None:
 
 def main() -> int:
     bundle_dir = Path(sys.executable).resolve().parent
-    runtime_dir = bundle_dir / "runtime"
-    app_dir = bundle_dir / "app"
+    runtime_dir = bundle_dir / "r"
+    app_dir = bundle_dir / "a"
+    if not runtime_dir.exists():
+        runtime_dir = bundle_dir / "runtime"
+    if not app_dir.exists():
+        app_dir = bundle_dir / "app"
     main_py = app_dir / "src" / "main.py"
+    package_dir = runtime_dir / "p"
+    if not package_dir.exists():
+        package_dir = runtime_dir / "Lib" / "site-packages"
 
     pythonw = runtime_dir / "pythonw.exe"
     python = runtime_dir / "python.exe"
@@ -43,7 +50,7 @@ def main() -> int:
     if not interpreter.exists() or not main_py.exists():
         _message_box(
             "PDF AI Reader release package is incomplete.\n\n"
-            "Please keep PDF-AI-Reader.exe together with the app and runtime folders."
+            "Please keep PDF-AI-Reader.exe together with the bundled app and runtime folders."
         )
         return 1
 
@@ -52,21 +59,22 @@ def main() -> int:
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("ANONYMIZED_TELEMETRY", "False")
     env.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu-sandbox")
-    env["PYTHONPATH"] = str(app_dir)
+    env["PYTHONPATH"] = os.pathsep.join([str(app_dir), str(package_dir)])
     env["CONDA_PREFIX"] = str(runtime_dir)
     env["CONDA_DEFAULT_ENV"] = "pdf_ai_reader_314"
-    env["QT_PLUGIN_PATH"] = str(runtime_dir / "Lib" / "site-packages" / "PySide6" / "plugins")
-    env["QML2_IMPORT_PATH"] = str(runtime_dir / "Lib" / "site-packages" / "PySide6" / "qml")
+    env["QT_PLUGIN_PATH"] = str(package_dir / "PySide6" / "plugins")
+    env["QML2_IMPORT_PATH"] = str(package_dir / "PySide6" / "qml")
     _append_path(
         env,
         runtime_dir,
         runtime_dir / "Scripts",
         runtime_dir / "DLLs",
         runtime_dir / "Library" / "bin",
+        runtime_dir / "b",
         runtime_dir / "Library" / "usr" / "bin",
         runtime_dir / "Library" / "mingw-w64" / "bin",
-        runtime_dir / "Lib" / "site-packages" / "PySide6",
-        runtime_dir / "Lib" / "site-packages" / "shiboken6",
+        package_dir / "PySide6",
+        package_dir / "shiboken6",
     )
 
     command = [str(interpreter), str(main_py), *sys.argv[1:]]

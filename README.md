@@ -15,7 +15,7 @@ Windows 打包版可在 Release 页面下载：
 - [直接下载 Windows 压缩包](https://github.com/Richardwongyk/PDF-AI-Reader/releases/download/v1.0.0/PDF-AI-Reader-Windows.zip)
 
 下载后请先完整解压 `PDF-AI-Reader-Windows.zip`，再运行解压目录中的 `PDF-AI-Reader.exe`。
-不要在压缩包预览窗口里直接双击 exe，也不要把 exe 单独移出文件夹；程序运行需要旁边的 `app` 和 `runtime` 目录。
+不要在压缩包预览窗口里直接双击 exe，也不要把 exe 单独移出文件夹；程序运行需要旁边的随包运行时目录。
 
 ---
 
